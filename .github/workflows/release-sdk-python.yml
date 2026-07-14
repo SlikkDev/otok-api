@@ -1,0 +1,92 @@
+name: Release otok (Python)
+
+on:
+  push:
+    tags:
+      - "sdk-python-v*"
+  # Manual fallback for environments that cannot push tags directly:
+  # publishes the version currently in sdk/python/src/otok/_version.py and
+  # then pushes the matching sdk-python-v<version> tag from the runner.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - name: Check tag matches src/otok/_version.py
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#sdk-python-v}"
+          PKG_VERSION="$(python -c 'from otok import __version__; print(__version__)')"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) does not match src/otok/_version.py ($PKG_VERSION)" >&2
+            exit 1
+          fi
+      - name: Check tag does not already exist (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          PKG_VERSION="$(python -c 'from otok import __version__; print(__version__)')"
+          if git ls-remote --exit-code origin "refs/tags/sdk-python-v${PKG_VERSION}" >/dev/null 2>&1; then
+            echo "Tag sdk-python-v${PKG_VERSION} already exists" >&2
+            exit 1
+          fi
+      - run: ruff check .
+      - run: mypy
+      - run: pytest
+      - name: Build sdist + wheel
+        run: |
+          pip install build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: sdk/python/dist/
+          if-no-files-found: error
+
+  # Auth: PyPI trusted publishing (OIDC) — no token secret. Configure the
+  # (pending) publisher on pypi.org for project "otok" pointing at this repo
+  # and workflow filename; see sdk/python/RELEASING.md. id-token: write is
+  # scoped to this job only (least privilege).
+  publish:
+    runs-on: ubuntu-latest
+    needs: verify
+    permissions:
+      id-token: write # PyPI trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+
+  push-tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    needs: publish
+    permissions:
+      contents: write # push the release tag on workflow_dispatch runs
+    steps:
+      - uses: actions/checkout@v4
+      - name: Push release tag
+        run: |
+          PKG_VERSION="$(sed -nE 's/^__version__ = "(.+)"$/\1/p' sdk/python/src/otok/_version.py)"
+          if [ -z "$PKG_VERSION" ]; then
+            echo "Could not read version from sdk/python/src/otok/_version.py" >&2
+            exit 1
+          fi
+          git tag "sdk-python-v${PKG_VERSION}" "${GITHUB_SHA}"
+          git push origin "sdk-python-v${PKG_VERSION}"
