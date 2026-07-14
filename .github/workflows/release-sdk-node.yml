@@ -4,13 +4,17 @@ on:
   push:
     tags:
       - "sdk-node-v*"
+  # Manual fallback for environments that cannot push tags directly:
+  # publishes the version currently in sdk/node/package.json and then pushes
+  # the matching sdk-node-v<version> tag from the runner.
+  workflow_dispatch:
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       id-token: write # npm trusted publishing (OIDC) + provenance
-      contents: read
+      contents: write # push the release tag on workflow_dispatch runs
     defaults:
       run:
         working-directory: sdk/node
@@ -26,6 +30,7 @@ jobs:
       # Trusted publishing needs npm >= 11.5.1 (the runner's bundled npm is older).
       - run: npm install -g npm@latest
       - name: Check tag matches package.json version
+        if: github.event_name == 'push'
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#sdk-node-v}"
           PKG_VERSION="$(node -p "require('./package.json').version")"
@@ -45,6 +50,20 @@ jobs:
       # token stored as the NPM_TOKEN repo secret; the env line below is
       # harmless when the secret is unset (OIDC wins when configured).
       # See sdk/node/RELEASING.md.
+      - name: Check tag does not already exist (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if git ls-remote --exit-code origin "refs/tags/sdk-node-v${PKG_VERSION}" >/dev/null 2>&1; then
+            echo "Tag sdk-node-v${PKG_VERSION} already exists" >&2
+            exit 1
+          fi
       - run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Push release tag (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          git tag "sdk-node-v${PKG_VERSION}" "${GITHUB_SHA}"
+          git push origin "sdk-node-v${PKG_VERSION}"
