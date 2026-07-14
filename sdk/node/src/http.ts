@@ -82,7 +82,7 @@ export class HttpClient {
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: HttpClientOptions) {
-    if (!options.apiKey) throw new Error("otok-node: apiKey is required");
+    if (!options.apiKey) throw new Error("@otok/node: apiKey is required");
     this.apiKey = options.apiKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -99,7 +99,7 @@ export class HttpClient {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this.apiKey}`,
       Accept: "application/json",
-      "User-Agent": `otok-node/${SDK_VERSION}`,
+      "User-Agent": `@otok/node/${SDK_VERSION}`,
     };
     let bodyText: string | undefined;
     if (options.body !== undefined) {
@@ -132,7 +132,7 @@ export class HttpClient {
       throw await toApiError(response);
     }
     // Unreachable: the final loop iteration always returns or throws.
-    throw new Error("otok-node: retry loop exited unexpectedly");
+    throw new Error("@otok/node: retry loop exited unexpectedly");
   }
 
   private buildUrl(path: string, query?: Record<string, QueryValue>): string {

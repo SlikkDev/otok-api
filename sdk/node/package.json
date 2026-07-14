@@ -1,10 +1,20 @@
 {
-  "name": "otok-node",
+  "name": "@otok/node",
   "version": "0.1.0",
   "description": "Official Node.js SDK for the oToK marketing platform public API (/v1) — contacts, deals, transactional email, webhooks, and a high-level e-commerce layer.",
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "dist",
     "README.md"
