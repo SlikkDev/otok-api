@@ -1,4 +1,4 @@
-# otok-node
+# @otok/node
 
 Official Node.js SDK for the [oToK](https://github.com/SlikkDev/otok-api) marketing platform public API (`/v1`).
 
@@ -12,7 +12,7 @@ Gives bespoke websites and e-commerce stores out-of-the-box integration with oTo
 ## Install
 
 ```bash
-npm install otok-node
+npm install @otok/node
 ```
 
 ## Quickstart
@@ -20,7 +20,7 @@ npm install otok-node
 Create an API key in **Settings → API keys** in your oToK workspace (keys look like `otok_live_…` and are shown once).
 
 ```ts
-import { OtokClient } from "otok-node";
+import { OtokClient } from "@otok/node";
 
 const otok = new OtokClient({
   apiKey: process.env.OTOK_API_KEY!,
@@ -112,7 +112,7 @@ Events are POSTed with an `X-Otok-Signature: t=<unix>,v1=<hex>` header (HMAC-SHA
 
 ```ts
 import express from "express";
-import { constructEvent, OtokWebhookVerificationError } from "otok-node";
+import { constructEvent, OtokWebhookVerificationError } from "@otok/node";
 
 const app = express();
 
@@ -144,7 +144,7 @@ app.post(
 
 ```ts
 import Fastify from "fastify";
-import { constructEvent } from "otok-node";
+import { constructEvent } from "@otok/node";
 
 const app = Fastify();
 
@@ -170,7 +170,7 @@ app.post("/api/otok-events", async (req, reply) => {
 
 ```ts
 // app/api/otok-events/route.ts
-import { constructEvent } from "otok-node";
+import { constructEvent } from "@otok/node";
 
 export async function POST(request: Request) {
   const raw = await request.text(); // raw body — do not use request.json()
@@ -214,7 +214,7 @@ Request/response field names match the wire contract (snake_case) exactly, so th
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
 
 ```ts
-import { OtokApiError } from "otok-node";
+import { OtokApiError } from "@otok/node";
 
 try {
   await otok.bookings.create({ /* … */ });

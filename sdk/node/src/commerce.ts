@@ -89,7 +89,7 @@ export function customerToContactParams(
 ): ContactUpsertParams {
   if (!customer.email && !customer.phone) {
     throw new Error(
-      "otok-node: a commerce customer needs at least an email or a phone",
+      "@otok/node: a commerce customer needs at least an email or a phone",
     );
   }
   const params: ContactUpsertParams = {
@@ -149,7 +149,7 @@ export class CommerceApi {
    * webhook handlers — replays converge on the same contact/deal/receipt.
    */
   async trackOrder(order: CommerceOrder): Promise<TrackOrderResult> {
-    if (!order.orderId) throw new Error("otok-node: order.orderId is required");
+    if (!order.orderId) throw new Error("@otok/node: order.orderId is required");
 
     const contact = await this.identifyCustomer(order.customer);
 
@@ -170,7 +170,7 @@ export class CommerceApi {
       const to = order.customer.email;
       if (!to) {
         throw new Error(
-          "otok-node: order.receipt requires customer.email to send to",
+          "@otok/node: order.receipt requires customer.email to send to",
         );
       }
       receipt = await this.emails.send({
