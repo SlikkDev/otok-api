@@ -6,7 +6,11 @@ oToK is a multichannel marketing communication platform (WhatsApp, email, web). 
 
 ## Documentation
 
-**[API Reference →](docs/api/README.md)**
+- **[Hosted docs site →](https://slikkdev.github.io/otok-api/)** — browsable guides + API reference
+- **[API Reference (Redoc) →](https://slikkdev.github.io/otok-api/reference/)** — rendered from the OpenAPI spec
+- **[OpenAPI 3.1 spec](docs/openapi.yaml)** — machine-readable API description (`docs/openapi.yaml`)
+
+**[API Reference (markdown) →](docs/api/README.md)**
 
 Quick links:
 

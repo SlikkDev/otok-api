@@ -1,0 +1,4486 @@
+openapi: 3.1.0
+info:
+  title: oToK REST API
+  version: "1.0.0"
+  summary: Public REST API for the oToK multichannel marketing communication platform.
+  description: |
+    The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts, tags and
+    groups, WhatsApp campaigns and templates, deals and pipelines, payments, transactional
+    email, outbound webhooks, and bookings.
+
+    ## Authentication
+
+    Send a workspace API key as a bearer token on every request:
+
+    ```
+    Authorization: Bearer otok_live_...
+    ```
+
+    Keys are created in **Settings → Developers** in the oToK app and are shown exactly once.
+    A revoked key is indistinguishable from an unknown key — both return `401 "Invalid API key"`.
+    The REST API requires a plan with API access (**Growth or higher**); other plans receive `403`.
+
+    ## Error shapes
+
+    The API uses **two error body shapes**:
+
+    1. **Domain errors** (email and webhook-endpoint APIs) use a structured envelope:
+       `{"error": {"code", "message"}}` — key on `error.code`.
+    2. **Framework errors** (validation, auth, rate limiting, most resource errors) use
+       `{"statusCode", "message", "error"}`, where `message` is a string or an array of
+       per-field validation messages. Some 4xx responses extend this shape with a
+       machine-readable `error_code` field (deals, payments, bookings, contacts).
+
+    Request bodies are strictly validated: unknown body properties are rejected with 400.
+    Path `:id` parameters must be UUIDs; a non-UUID id returns 400 (except
+    `DELETE /v1/webhook-endpoints/{id}`, which returns 404).
+
+    ## Rate limits
+
+    | Scope | Limit |
+    |---|---|
+    | Per API key (default, all endpoints) | 100 requests / minute |
+    | `POST /v1/emails` | 300 requests / minute per key |
+    | Per source IP, across all API-key traffic | 300 requests / minute |
+
+    Exceeding a limit returns HTTP 429 with a `Retry-After` header. The per-key bucket is
+    shared across all source IPs using that key.
+
+    ## Pagination
+
+    Most list endpoints return `{ "data", "total", "limit", "offset" }` with `limit`
+    default 50 (hard cap 500). `GET /v1/deals` and `GET /v1/payments` use dedicated query
+    parameters with `limit` default 25 (clamped 1–100) and silently ignore/clamp invalid
+    values instead of rejecting them.
+
+    ## Idempotency
+
+    - Contacts upsert by `phone`/`email`.
+    - Deals and payments upsert by `external_reference`.
+    - Emails require an explicit `idempotency_key`.
+    - Booking creation is idempotent per slot + meeting type + contact (server-derived, no key).
+  contact:
+    name: oToK
+    url: https://app.otok.io
+  license:
+    name: MIT
+    url: https://github.com/slikkdev/otok-api/blob/main/LICENSE
+externalDocs:
+  description: Prose guides (getting started, per-resource pages)
+  url: https://slikkdev.github.io/otok-api/
+servers:
+  - url: https://app.otok.io/api
+security:
+  - bearerAuth: []
+tags:
+  - name: Contacts
+    description: Contact upsert & update, plus the merge-conflict contract. There is no DELETE endpoint for contacts.
+  - name: Contact notes
+    description: Plain-text notes on a contact. API note payloads are text only.
+  - name: Tags
+    description: Tag CRUD (no delete). Names are unique per workspace (case-insensitive).
+  - name: Contact groups
+    description: Contact group CRUD (no delete). Names are unique per workspace (case-insensitive).
+  - name: Campaigns
+    description: WhatsApp campaigns — create, schedule, execute.
+  - name: Templates
+    description: WhatsApp message templates — read and send only; template management is in-app.
+  - name: Pipelines
+    description: Read pipelines and their stages.
+  - name: Deals
+    description: Deal CRUD-minus-delete, stage moves, win/lose, idempotent upsert via `external_reference`.
+  - name: Payments
+    description: One-time / recurring / installment payments, entries, refunds.
+  - name: Emails
+    description: "`POST /v1/emails` — idempotent raw transactional sends with opt-in tracking."
+  - name: Webhook endpoints
+    description: Register receivers for email delivery/engagement events on API-originated sends.
+  - name: Meeting types
+    description: Read meeting types and query open slots.
+  - name: Bookings
+    description: Booking lifecycle — create, cancel, reschedule, reassign host.
+
+paths:
+  # ───────────────────────────── Contacts ─────────────────────────────
+  /v1/contacts:
+    get:
+      operationId: listContacts
+      tags: [Contacts]
+      summary: List contacts
+      description: |
+        Standard list conventions apply. `search` matches `name`, `first_name`, `last_name`,
+        `email`, `phone`, `company_name` (case-insensitive substring), plus an exact match on
+        the E.164-normalized form of the term and the contact's historical phone/email
+        identifiers.
+
+        Contacts support extra filter operators: `$jsonb_contains` for `tags`/`groups` (by
+        UUID), `$event_attendance` (`{"event_id": "...", "status": "attended"}`), and the
+        virtual consent fields `whatsapp_subscribed`, `email_subscribed` (boolean),
+        `whatsapp_deliverability`, `email_deliverability`.
+      parameters:
+        - $ref: "#/components/parameters/FilterParam"
+        - $ref: "#/components/parameters/SortParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+        - $ref: "#/components/parameters/SearchParam"
+      responses:
+        "200":
+          description: Paginated contact list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Contact"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertContact
+      tags: [Contacts]
+      summary: Upsert a contact by phone/email
+      description: |
+        Creates a contact, or updates the existing contact that the given `phone`/`email`
+        resolves to. Resolution is history-aware and **phone wins** over email. On a match,
+        scalar fields overwrite, `custom_fields` shallow-merge, and `tags`/`groups` are
+        **added** to the existing set (never removed by this route).
+
+        The response is **201 in both cases** (create and update) with no
+        created-vs-updated marker; compare `created_at`/`updated_at` to distinguish.
+
+        If the phone resolves to one existing contact and the email to a *different* one, the
+        API does not write: it opens a merge request and returns
+        **409 `CONTACT_MERGE_REQUIRED`**. The non-identity fields of the request are parked
+        with the merge request and applied when it is resolved.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactWrite"
+      responses:
+        "201":
+          description: The full contact object — returned for both create and update.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+        "400":
+          description: |
+            Validation failure, unknown fields, a blacklisted phone
+            (`error_code: "PHONE_BLACKLISTED"`), or the workspace contact limit
+            (only when a cap is set on the workspace).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/ContactMergeRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/contacts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getContact
+      tags: [Contacts]
+      summary: Get one contact
+      responses:
+        "200":
+          description: A single contact object (same enrichment as list rows).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateContact
+      tags: [Contacts]
+      summary: Update a contact by id
+      description: |
+        Same field set and validation as the POST upsert (all optional), with different
+        semantics:
+
+        - `tags`/`groups` **replace** the full set (empty array clears; names auto-create).
+        - `custom_fields` still shallow-merge — set a key to `null` to remove it.
+        - `name` and `first_name`/`last_name` stay in sync.
+        - `block_state` changes route through the consent/blocking subsystem; global blocks
+          cannot be lifted via the API.
+
+        To change a contact's phone or email, prefer `POST /v1/contacts` — this route does
+        not perform identity-conflict resolution.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactWrite"
+      responses:
+        "200":
+          description: The updated contact object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Contact"
+        "400":
+          description: |
+            Validation / unknown fields / non-UUID id, or `error_code: "PHONE_BLACKLISTED"`
+            (only when the patch changes the phone to a blacklisted number).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/contacts/{id}/notes:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: listContactNotes
+      tags: [Contact notes]
+      summary: List a contact's notes
+      description: |
+        Returns a JSON **array** of all the contact's notes — not paginated, no query
+        parameters. Pinned notes come first (most recently pinned on top), then the rest
+        newest-first. `author_name` is included on list responses only.
+      responses:
+        "200":
+          description: All notes for the contact.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Note"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createContactNote
+      tags: [Contact notes]
+      summary: Add a note
+      description: |
+        API note payloads are text only (rich text and mentions are in-app features; sending
+        them returns 400). Notes created via the API have no author user and are attributed
+        to source `api`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [body]
+              properties:
+                body:
+                  type: string
+                  maxLength: 5000
+                  description: Trimmed — empty after trim → 400 "Note body cannot be empty".
+                pinned:
+                  type: boolean
+                  description: "`true` pins the note immediately."
+      responses:
+        "201":
+          description: The created note.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/notes/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    patch:
+      operationId: updateNote
+      tags: [Contact notes]
+      summary: Edit / pin a note
+      description: |
+        Both fields optional; sending neither returns the current note unchanged. A body
+        change bumps `updated_at`; a pin toggle alone does not. If the note is the contact's
+        profile note, a body edit also updates the contact's `notes` field (and fires
+        field-change automations).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                body:
+                  type: string
+                  maxLength: 5000
+                  description: Empty → 400.
+                pinned:
+                  type: boolean
+                  description: Pin/unpin.
+      responses:
+        "200":
+          description: The note after the update.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Note"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    delete:
+      operationId: deleteNote
+      tags: [Contact notes]
+      summary: Delete a note
+      description: |
+        Deleting the contact's profile note also clears the contact's `notes` field. A
+        deletion breadcrumb is kept in the contact's activity timeline.
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    const: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Tags ─────────────────────────────
+  /v1/tags:
+    get:
+      operationId: listTags
+      tags: [Tags]
+      summary: List tags
+      description: Standard list conventions; `search` matches the `name` field.
+      parameters:
+        - $ref: "#/components/parameters/FilterParam"
+        - $ref: "#/components/parameters/SortParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+        - $ref: "#/components/parameters/SearchParam"
+      responses:
+        "200":
+          description: Paginated tag list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createTag
+      tags: [Tags]
+      summary: Create a tag
+      description: |
+        Tag names are unique per workspace (case-insensitive). Check for existence first
+        (list with `search=<name>`) and reuse the existing record when it's already there.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TagWrite"
+      responses:
+        "201":
+          description: The created tag with `usage_count` 0.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/tags/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getTag
+      tags: [Tags]
+      summary: Get one tag
+      responses:
+        "200":
+          description: A tag object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateTag
+      tags: [Tags]
+      summary: Update a tag
+      description: Same fields as create, all optional.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TagWrite"
+      responses:
+        "200":
+          description: The updated tag.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tag"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Contact groups ─────────────────────────────
+  /v1/contact-groups:
+    get:
+      operationId: listContactGroups
+      tags: [Contact groups]
+      summary: List groups
+      description: Standard list conventions; `search` matches the `name` field.
+      parameters:
+        - $ref: "#/components/parameters/FilterParam"
+        - $ref: "#/components/parameters/SortParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+        - $ref: "#/components/parameters/SearchParam"
+      responses:
+        "200":
+          description: Paginated group list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ContactGroup"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createContactGroup
+      tags: [Contact groups]
+      summary: Create a group
+      description: Group names are unique per workspace (case-insensitive).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactGroupWrite"
+      responses:
+        "201":
+          description: The created group with `contact_count` 0.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactGroup"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/contact-groups/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getContactGroup
+      tags: [Contact groups]
+      summary: Get one group
+      responses:
+        "200":
+          description: A group object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactGroup"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateContactGroup
+      tags: [Contact groups]
+      summary: Update a group
+      description: Same fields as create, all optional.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactGroupWrite"
+      responses:
+        "200":
+          description: The updated group.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactGroup"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Campaigns ─────────────────────────────
+  /v1/campaigns:
+    get:
+      operationId: listCampaigns
+      tags: [Campaigns]
+      summary: List campaigns
+      description: |
+        Standard list conventions. **List rows omit `variables` and `audience_filters`** —
+        fetch a single campaign to read them.
+      parameters:
+        - $ref: "#/components/parameters/FilterParam"
+        - $ref: "#/components/parameters/SortParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+        - $ref: "#/components/parameters/SearchParam"
+      responses:
+        "200":
+          description: Paginated campaign list (rows omit `variables` and `audience_filters`).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Campaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createCampaign
+      tags: [Campaigns]
+      summary: Create a campaign
+      description: |
+        If the campaign is saved with `status: "scheduled"` **and** a `scheduled_at`, it is
+        automatically queued to execute at `scheduled_at` — you do not need to call
+        `/execute`. Any change to the campaign re-syncs the schedule.
+
+        At send time, the audience can only **narrow** the built-in WhatsApp
+        send-eligibility baseline (subscribed, not blocked, deliverable) — never widen it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignWrite"
+      responses:
+        "201":
+          description: The full created campaign object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+        "400":
+          description: |
+            Field validation, unknown fields, `"Invalid audience_filters definition"`
+            (body includes an `errors` array), or a workspace monthly campaign cap.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"Audience not found"` — `audience_id` not in this workspace.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/campaigns/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getCampaign
+      tags: [Campaigns]
+      summary: Get one campaign
+      responses:
+        "200":
+          description: The full campaign object (including `variables` and `audience_filters`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateCampaign
+      tags: [Campaigns]
+      summary: Update a campaign
+      description: |
+        Same fields as create, all optional; same audience validation and scheduling
+        re-sync. The API can only set `status` to `draft` or `scheduled`. There is no
+        restriction based on the campaign's current status — patching a running/completed
+        campaign is possible and re-syncs scheduling, so take care not to accidentally
+        re-schedule a finished campaign.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CampaignWrite"
+      responses:
+        "200":
+          description: The updated campaign.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Campaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/campaigns/{id}/execute:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: executeCampaign
+      tags: [Campaigns]
+      summary: Queue a scheduled campaign for immediate execution
+      description: |
+        The campaign must have `status: "scheduled"` — a draft must first be PATCHed to
+        `scheduled`. No request body.
+
+        > **This endpoint always returns 201, even on failure.** Not-found and wrong-status
+        > conditions are reported in the body with `success: false` — inspect the body, not
+        > just the status code.
+
+        Execution is queued with a per-campaign job id, so repeated execute calls while a
+        run is queued do not enqueue duplicates. Delivery progress is reflected in the
+        campaign's counters, which you can poll via `GET /v1/campaigns/{id}`.
+      responses:
+        "201":
+          description: Always 201 — check `success` in the body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CampaignExecuteResult"
+              examples:
+                queued:
+                  value:
+                    success: true
+                    message: Campaign queued for execution
+                    jobId: execute-1f2e3d4c-...
+                notFound:
+                  value:
+                    success: false
+                    message: Campaign not found
+                wrongStatus:
+                  value:
+                    success: false
+                    message: "Campaign status is 'draft' — only 'scheduled' campaigns can be executed"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Templates ─────────────────────────────
+  /v1/templates:
+    get:
+      operationId: listTemplates
+      tags: [Templates]
+      summary: List templates
+      description: |
+        Standard list conventions. Only templates with an approved `status` can be delivered
+        by WhatsApp.
+      parameters:
+        - $ref: "#/components/parameters/FilterParam"
+        - $ref: "#/components/parameters/SortParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+        - $ref: "#/components/parameters/SearchParam"
+      responses:
+        "200":
+          description: Paginated template list (full rows).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Template"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/templates/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getTemplate
+      tags: [Templates]
+      summary: Get one template
+      responses:
+        "200":
+          description: A full template row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Template"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/templates/{id}/send:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: sendTemplate
+      tags: [Templates]
+      summary: Send a template message
+      description: |
+        Sends the template to a phone number. The template must belong to your workspace
+        (404 otherwise). The recipient contact is matched by normalized phone — **created
+        automatically if it doesn't exist** — and the sent message is recorded in the Inbox
+        conversation.
+
+        The nested shapes of `body_variables` / `header_config` / `button_configs` are
+        validated when the message is built — malformed inner content surfaces as a 400 with
+        a descriptive message (or a 502 if it is only rejected by the WhatsApp provider).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateSendRequest"
+      responses:
+        "201":
+          description: The message was sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateSendResult"
+        "400":
+          description: |
+            Missing required template variables/config
+            (`"Cannot send WhatsApp template — missing required field(s): …"`) or a bad
+            `header_config.media_type`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            `"This contact is blocked"`, or
+            `"This phone number is on the blacklist and cannot be messaged"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "404":
+          description: |
+            Template not in this workspace, or `"No connected WhatsApp instance found"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+        "502":
+          description: |
+            WhatsApp/Meta refused the send. **The failed message row is persisted** —
+            `message_id`/`conversation_id` are included so you can retry or inspect it in
+            the Inbox.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    description: The provider error.
+                  message_id:
+                    type: string
+                    format: uuid
+                  conversation_id:
+                    type: string
+                    format: uuid
+
+  # ───────────────────────────── Pipelines & Deals ─────────────────────────────
+  /v1/pipelines:
+    get:
+      operationId: listPipelines
+      tags: [Pipelines]
+      summary: List pipelines with their stages
+      description: |
+        Returns a JSON **array** (no pagination envelope) of the workspace's pipelines,
+        ordered by position, each with its ordered `stages`. Exactly one pipeline per
+        workspace has `is_default: true`. Use this to map stage ids before creating or
+        moving deals.
+      responses:
+        "200":
+          description: All pipelines with stages.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Pipeline"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/deals:
+    get:
+      operationId: listDeals
+      tags: [Deals]
+      summary: List deals
+      description: |
+        Uses dedicated query parameters (not the generic `filter`) and its own pagination
+        defaults: `limit` default 25 clamped to 1–100, `offset` min 0. Out-of-range or
+        non-numeric values are **silently clamped/defaulted**; unrecognized enum filter
+        values are silently ignored rather than returning 400. Results are ordered
+        newest-first. Rows include the joined `contact_name`/`contact_phone`/`contact_email`.
+      parameters:
+        - name: pipeline_id
+          in: query
+          description: Exact match. Send a valid UUID — take the id from `GET /v1/pipelines`.
+          schema:
+            type: string
+            format: uuid
+        - name: stage_id
+          in: query
+          description: Exact match (valid UUID only).
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          description: Any other value is silently ignored (unfiltered result).
+          schema:
+            type: string
+            enum: [open, won, lost]
+        - name: contact_id
+          in: query
+          description: Exact match (valid UUID only).
+          schema:
+            type: string
+            format: uuid
+        - name: owner_user_id
+          in: query
+          description: Exact match (valid UUID only).
+          schema:
+            type: string
+            format: uuid
+        - name: external_reference
+          in: query
+          description: Exact match — look up a deal by your idempotency reference.
+          schema:
+            type: string
+        - name: search
+          in: query
+          description: Case-insensitive match over deal title + contact name/phone/email.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated deal list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Deal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertDeal
+      tags: [Deals]
+      summary: Create a deal (idempotent upsert via `external_reference`)
+      description: |
+        Creates a deal — or, when `external_reference` matches an existing deal in the
+        workspace, **updates it**:
+
+        - Fields updated (only those present in the body): `product_id` (when a product
+          reference resolves), `title` (still ignored while a product is attached),
+          `amount`, `currency`, `owner_user_id`, `expected_close_at`, `note`.
+        - `contact_id` is always re-applied from the freshly resolved contact — a repeat
+          POST with different phone/email re-points the deal to that contact. Every repeat
+          POST must still carry `contact_id` or `phone`/`email`.
+        - `stage_id`, if present and different from the current stage, **moves** the deal
+          (same ledger/automation effects as `POST /v1/deals/{id}/stage`).
+        - `status` is never touched on a match; `pipeline_id` is ignored on a match.
+
+        Contact resolution is shared with the contacts upsert: `contact_id` wins; otherwise
+        `phone`/`email` are upserted (phone match wins, email fallback). While a product is
+        attached, the deal's `title` derives from the product name and any client-sent
+        title is ignored; a missing `amount` defaults to the product's price.
+
+        The response is **201 in both cases** with no created-vs-updated marker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DealCreate"
+      responses:
+        "201":
+          description: The deal (created or updated) + joined contact identity fields.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deal"
+        "400":
+          description: |
+            Coded errors (as `error_code`): `MISSING_TITLE`, `STAGE_PIPELINE_MISMATCH`,
+            `NO_PIPELINE`, `PIPELINE_HAS_NO_STAGES`, `INVALID_DEAL_OWNER`,
+            `INVALID_PRODUCT`, `PRODUCT_INACTIVE` — or a missing contact reference
+            (`"Provide contact_id, or a phone/email…"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Plan access, or `error_code: PLAN_LIMIT_EXCEEDED` — deal cap reached (only when
+            a cap is set on the workspace).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "404":
+          description: '`"Contact not found"` / `"Pipeline not found"` / `"Stage not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          $ref: "#/components/responses/ContactMergeRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/deals/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getDeal
+      tags: [Deals]
+      summary: Get one deal
+      responses:
+        "200":
+          description: The deal + `contact_name`/`contact_phone`/`contact_email`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateDeal
+      tags: [Deals]
+      summary: Update deal fields
+      description: |
+        Field updates do **not** write stage-history entries and do **not** fire deal
+        automations — only the `/stage` and `/status` routes do.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DealPatch"
+      responses:
+        "200":
+          description: The updated deal + joined contact fields.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deal"
+        "400":
+          description: "`INVALID_PRODUCT` / `PRODUCT_INACTIVE` / `INVALID_DEAL_OWNER` / validation."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"Deal not found"` / `"Contact not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/deals/{id}/stage:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: moveDealStage
+      tags: [Deals]
+      summary: Move a deal to a stage
+      description: |
+        Move a deal to any stage in the workspace — cross-pipeline moves are supported; the
+        deal's `pipeline_id` follows the target stage. A move to the deal's **current**
+        stage is a pure reorder (no history entry, no automations). A genuine stage change
+        stamps `stage_entered_at`, records a stage-transition history entry and activity
+        row, and fires deal-stage-changed automations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [stage_id]
+              properties:
+                stage_id:
+                  type: string
+                  format: uuid
+                  description: Target stage.
+                index:
+                  type: integer
+                  minimum: 0
+                  maximum: 100000
+                  description: Position within the stage column, 0 = top. Omitted → top.
+      responses:
+        "201":
+          description: The updated deal row (no joined contact fields on this route).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deal"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"Deal not found"` / `"Stage not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/deals/{id}/status:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: setDealStatus
+      tags: [Deals]
+      summary: "Set status: open / won / lost"
+      description: |
+        Closing (`won`/`lost`) stamps `closed_at` and keeps the deal on its last stage.
+        Reopening (`open`) clears `closed_at` and `lost_reason`. `won`/`lost` fire the
+        corresponding deal automations (reopen fires none). If the deal already has the
+        requested status, the current row is returned unchanged (no history entry, no
+        automations).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [open, won, lost]
+                  description: "`open` reopens a closed deal."
+                lost_reason:
+                  type: string
+                  maxLength: 1000
+                  description: Stored only when status is `lost`; cleared otherwise.
+      responses:
+        "201":
+          description: The updated deal row (no joined contact fields).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Deal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Payments ─────────────────────────────
+  /v1/payments:
+    get:
+      operationId: listPayments
+      tags: [Payments]
+      summary: List payments
+      description: |
+        Uses dedicated query parameters and its own pagination defaults (`limit` default 25
+        clamped 1–100; invalid values silently clamped; unrecognized enum values silently
+        ignored). Ordered by `purchase_date` descending. Rows include joined
+        `contact_name`/`contact_phone`/`contact_email`. **List rows do not include entries.**
+      parameters:
+        - name: type
+          in: query
+          description: Other values are silently ignored.
+          schema:
+            type: string
+            enum: [one_time, recurring, installments]
+        - name: status
+          in: query
+          description: "Arrangement status: other values silently ignored."
+          schema:
+            type: string
+            enum: [active, completed, cancelled]
+        - name: search
+          in: query
+          description: Case-insensitive match over payment title + contact name/phone/email.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated payment list (headers only, no entries).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Payment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertPayment
+      tags: [Payments]
+      summary: Create a payment (idempotent upsert via `external_reference`)
+      description: |
+        Creates a payment — or, when `external_reference` matches an existing payment,
+        **updates it**. Only mutable fields are applied on a match:
+
+        - Always (when present): `product_id`, `title` (subject to the product title lock),
+          `note`, `method`.
+        - Only when the existing payment is `one_time`: `amount`, `status`.
+        - Only when it is `recurring`: `auto_generate`, `recurring_end_at`,
+          `recurring_max_occurrences`.
+        - Never restructured on a match: `type`, `interval`, `installment_count`,
+          `purchase_date` — and, unlike deals, **the contact is NOT re-pointed** on a match.
+
+        Entry creation per type: **one_time** — one entry with the given `status`
+        (the header's `arrangement_status` mirrors it); **recurring** — the first cycle is
+        recorded now when `record_first_payment` is true (default), further cycles record
+        automatically when `auto_generate` is on; **installments** — `installment_count`
+        monthly entries starting at `purchase_date`, recognized as revenue immediately.
+
+        Contact resolution is identical to deals (409 `CONTACT_MERGE_REQUIRED` on identity
+        conflict). Unlike deals, `amount` is always required — the product price does not
+        substitute for it. The response is **201 in both cases** with no
+        created-vs-updated marker.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentCreate"
+      responses:
+        "201":
+          description: The payment (created or updated) with its entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentWithEntries"
+        "400":
+          description: |
+            Bad type/amount, installment/schedule validation, `INVALID_PRODUCT` /
+            `PRODUCT_INACTIVE`, or a missing contact reference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"Contact not found"` — `contact_id` not in this workspace.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          $ref: "#/components/responses/ContactMergeRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/payments/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getPayment
+      tags: [Payments]
+      summary: Get a payment with its entries
+      responses:
+        "200":
+          description: "`{ ...header, entries: [...] }` with entries ordered by `sequence`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentWithEntries"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updatePayment
+      tags: [Payments]
+      summary: Update a payment
+      description: |
+        A one-time `amount`/`status` change flows into the payment's single entry and
+        re-maps the header's `arrangement_status`. Shortening a recurring plan's end
+        conditions may auto-complete it; extending them never silently reactivates a
+        completed plan. A one-time status change fires the matching automation after the
+        update.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentPatch"
+      responses:
+        "200":
+          description: The payment with entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentWithEntries"
+        "400":
+          description: |
+            `"This charge already has refunds; reverse those instead of marking it
+            refunded/failed"` — use `/refund` — or recurring end-condition validation errors.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/payments/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: cancelPayment
+      tags: [Payments]
+      summary: Cancel a recurring plan
+      description: |
+        Cancels a **recurring** plan. No request body. Already-recorded entries are
+        untouched.
+      responses:
+        "201":
+          description: |
+            The payment with `arrangement_status: "cancelled"`, `recurring_cancelled_at`
+            set, auto-generation off, and no next due date.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentWithEntries"
+        "400":
+          description: '`"Only recurring payments can be cancelled"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/payments/{id}/entries/{entryId}/mark:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+      - name: entryId
+        in: path
+        required: true
+        description: The entry to mark; must belong to the payment in the URL.
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: markPaymentEntry
+      tags: [Payments]
+      summary: Set one entry's status
+      description: |
+        Marking `completed` stamps `paid_at` and recognizes the revenue. A one-time header
+        mirrors its entry's status; recurring/installment headers are **not** changed by
+        marking one cycle. Status-change automations fire as on PATCH (payment-recorded only
+        for a newly recognized completion).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [pending, completed, failed, refunded]
+      responses:
+        "201":
+          description: The full parent payment with entries.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentWithEntries"
+        "400":
+          description: |
+            `"Refund entries cannot be marked directly"` or `"This charge already has
+            refunds; reverse those instead of marking it refunded/failed"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: |
+            `"Payment entry not found"` (unknown, foreign, or not an entry of this payment)
+            or `"Payment not found"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/payments/{id}/refund:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: refundPayment
+      tags: [Payments]
+      summary: Record a refund against a charge
+      description: |
+        Records a refund entry against a completed charge. Multiple partial refunds against
+        one charge are supported, up to its recognized value; refunds are race-safe —
+        concurrent refund requests cannot over-refund a charge. A fully refunded
+        **one-time** payment's header becomes `arrangement_status: "cancelled"`; partial
+        refunds and multi-entry deals keep their status. Fires the payment-refunded
+        automation with the refunded amount.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                entry_id:
+                  type: string
+                  format: uuid
+                  description: |
+                    The charge entry to refund. May be omitted only when the payment has
+                    exactly one charge.
+                amount:
+                  type: number
+                  exclusiveMinimum: 0
+                  description: Partial refund amount. Omitted → the full remaining refundable balance.
+                note:
+                  type: string
+                  maxLength: 1000
+                  description: Stored on the refund entry.
+      responses:
+        "201":
+          description: |
+            The payment with a new entry: `kind: "refund"`, negative
+            `amount`/`recognized_amount`, `status: "refunded"`, `refunds_entry_id` pointing
+            at the charge.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentWithEntries"
+        "400":
+          description: |
+            Refund validation: `"entryId is required to refund a payment with multiple
+            charges"`, `"Only a completed (recognized) charge can be refunded"`, `"This
+            charge is not recognized as revenue yet and cannot be refunded"`, `"Refund
+            amount must be a positive number"`, `"This charge is no longer refundable"` /
+            `"This charge is already fully refunded"`, or `"Refund amount exceeds the
+            refundable balance (<max>)"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"Payment not found"` / `"Payment entry not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Emails ─────────────────────────────
+  /v1/emails:
+    post:
+      operationId: sendEmail
+      tags: [Emails]
+      summary: Send a transactional email (idempotent)
+      description: |
+        Sends a single transactional email through your workspace's verified sending
+        domain. **Raw-content endpoint**: your HTML/text is delivered verbatim — no
+        marketing footer, no unsubscribe link, and no tracking is injected unless you opt
+        in. Requires at least one verified sending domain with a sender profile configured
+        in the app.
+
+        Rate limit: **300 requests / minute per key** (higher than the API default).
+        Errors on this endpoint use the structured envelope `{"error": {"code","message"}}`.
+
+        **Idempotency:** the `idempotency_key` is claimed before any quota/deliverability
+        gate, so two concurrent requests with the same key can't both send. Replaying a
+        resolved key returns **200** with `duplicate: true`. Validation failures and most
+        pre-send errors release the key. At-least-once corner case: in a rare
+        crash-and-retry overlap right after a successful provider handoff, the message can
+        be delivered twice while your retry receives `200 duplicate: true` — design
+        receivers so a duplicate email is acceptable.
+
+        **Suppressed recipients are a 2xx, not an error** — check `status` in the body; do
+        not treat 2xx alone as "delivered to the provider". The suppression reason is
+        deliberately coarse.
+
+        **Tracking (opt-in):** `opens` appends a 1×1 pixel to the HTML part; `clicks` wraps
+        absolute http(s) links in the HTML part in a first-party redirect that forwards to
+        your URL verbatim (`mailto:`, in-page anchors, relative URLs, and extremely long
+        URLs are never wrapped). The plain-text part is never modified. If the deployment
+        lacks a usable signing secret for tracking links, the message is sent untracked
+        rather than failing. Open/click events arrive via the opt-in
+        `email.opened`/`email.clicked` webhooks (first open / first click per send only).
+
+        Consent is your responsibility: this endpoint neither checks marketing consent nor
+        creates oToK contact records for recipients. The suppression list is still enforced
+        (fail-closed).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailSendRequest"
+      responses:
+        "201":
+          description: This request performed the send (fresh idempotency key).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailSendResult"
+        "200":
+          description: "Idempotent replay of an already-processed key (`duplicate: true`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailSendResult"
+        "400":
+          description: |
+            Request-shape violations (standard validation body), or `validation_failed`
+            (structured envelope): both `html` and `text` missing; disallowed or invalid
+            custom header; `metadata` over 2048 bytes.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/DomainError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: "`quota_exceeded` — monthly email quota exhausted; resets at the next billing period or after an upgrade."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`sender_profile_not_found` — `sender_profile_id` not found in this workspace."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: |
+            `send_in_progress` — same idempotency key currently processing; retry shortly
+            (a claim stuck by a crash is automatically recoverable after ~3 minutes).
+            Or `no_verified_sender` — no sender profile with a verified domain.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "422":
+          description: "`invalid_recipient` — `to` is not a valid email address; permanent, do not retry unchanged."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          description: |
+            `warming_cap_exceeded` (structured envelope) — domain-warming daily cap
+            reached, transient, retry after the daily reset — or the standard rate-limit
+            body (300/min per key); honor `Retry-After`.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying (rate-limit case).
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "502":
+          description: |
+            `provider_error` — the email provider rejected the send; the message includes
+            only a coarse signal. The idempotency key is released — safe to retry with the
+            same key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "503":
+          description: "`workspace_paused` — workspace email sending is paused by deliverability protection; resolve in the app."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+
+  # ───────────────────────────── Webhook endpoints ─────────────────────────────
+  /v1/webhook-endpoints:
+    get:
+      operationId: listWebhookEndpoints
+      tags: [Webhook endpoints]
+      summary: List endpoints
+      description: No parameters (max 3 rows, unpaginated). Secrets are never included.
+      responses:
+        "200":
+          description: The workspace's registered endpoints.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/WebhookEndpoint"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createWebhookEndpoint
+      tags: [Webhook endpoints]
+      summary: Register an endpoint (secret returned once)
+      description: |
+        Maximum **3 endpoints per workspace** (409 `endpoint_limit_reached`); the cap is
+        enforced safely under concurrency.
+
+        > **The `secret` is returned only here, once.** It cannot be retrieved again.
+        > There is no rotation endpoint: to rotate, register a new endpoint with the same
+        > URL, switch verification to the new secret, then delete the old endpoint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  minLength: 1
+                  maxLength: 2048
+                  description: |
+                    `http://` or `https://` only. URLs pointing at private, loopback,
+                    link-local, and other reserved IP ranges are rejected
+                    (400 `unsafe_url`) — re-checked on every delivery attempt. Prefer
+                    `https://`: plain `http://` is accepted but the HMAC signature is then
+                    your only integrity protection.
+                events:
+                  type: array
+                  minItems: 1
+                  items:
+                    $ref: "#/components/schemas/EmailEventType"
+                  description: |
+                    Event types to receive. Must be non-empty when present. **Omitted →
+                    the four delivery events only** (`email.delivered`, `email.bounced`,
+                    `email.complained`, `email.failed`) — the engagement events
+                    `email.opened`/`email.clicked` are received only when explicitly
+                    listed.
+      responses:
+        "201":
+          description: The created endpoint, including the one-time `secret`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookEndpointWithSecret"
+        "400":
+          description: "`unsafe_url` — non-http(s) scheme or a reserved/private address."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "`endpoint_limit_reached` — already at 3 endpoints; delete one first."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/webhook-endpoints/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: |
+          Endpoint id. Unlike other routes, a malformed (non-UUID) id returns **404**, not
+          400 — deliberately indistinguishable from an unknown id.
+        schema:
+          type: string
+    delete:
+      operationId: deleteWebhookEndpoint
+      tags: [Webhook endpoints]
+      summary: Delete an endpoint
+      description: |
+        Deliveries stop immediately; anything still queued for the deleted endpoint is
+        dropped.
+      responses:
+        "204":
+          description: Deleted — no body.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: |
+            `endpoint_not_found` — unknown id, another workspace's id, or a malformed
+            (non-UUID) id — deliberately indistinguishable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Meeting types & bookings ─────────────────────────────
+  /v1/meeting-types:
+    get:
+      operationId: listMeetingTypes
+      tags: [Meeting types]
+      summary: List meeting types
+      description: Standard list conventions apply.
+      parameters:
+        - $ref: "#/components/parameters/FilterParam"
+        - $ref: "#/components/parameters/SortParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+        - $ref: "#/components/parameters/SearchParam"
+      responses:
+        "200":
+          description: Paginated meeting type list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/MeetingType"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/meeting-types/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getMeetingType
+      tags: [Meeting types]
+      summary: Get one meeting type
+      responses:
+        "200":
+          description: A meeting type object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingType"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/meeting-types/{id}/slots:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getMeetingTypeSlots
+      tags: [Meeting types]
+      summary: Get open slots for a date range
+      description: |
+        Returns the open start instants for the meeting type — the same availability the
+        public booking page offers. Slot instants are UTC ISO timestamps; `timezone` is the
+        host schedule's IANA zone.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Range start (inclusive), ISO 8601.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          description: Range end (exclusive); must be after `from`; range may not exceed 62 days.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Open slots in the range.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SlotsResult"
+        "400":
+          description: |
+            `"Meeting type is not active"`, `"from/to must be valid ISO dates"`,
+            `` "`to` must be after `from`" ``, or
+            `"Requested range may not exceed 62 days"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/bookings:
+    get:
+      operationId: listBookings
+      tags: [Bookings]
+      summary: List bookings
+      description: All filters optional and combined with AND. Malformed values → 400.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [confirmed, cancelled, completed, no_show]
+        - name: meeting_type_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          description: "`start_at >= from` (ISO 8601)."
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: "`start_at <= to` (ISO 8601)."
+          schema:
+            type: string
+            format: date-time
+        - name: sort
+          in: query
+          description: "Default `-start_at`; `-` prefix for descending."
+          schema:
+            type: string
+            default: "-start_at"
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: Paginated booking list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Booking"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createBooking
+      tags: [Bookings]
+      summary: Create a booking
+      description: |
+        Books a slot. The slot must be open at booking time; slot-taking is race-safe. The
+        usual booking side effects run (confirmation email, calendar/Zoom setup where
+        configured).
+
+        **Idempotency is server-derived** — you do not send a key. A double submit of the
+        same slot + meeting type + contact (+ pinned host, when used) returns the existing
+        confirmed booking as a success instead of failing or double-booking. There is no
+        marker distinguishing a replay from a fresh create. For round-robin types, a pinned
+        create can never silently replay onto a different host than the one pinned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingCreate"
+      responses:
+        "201":
+          description: The booking object with its `hosts` roster.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: |
+            `"Either contact_id or an invitee object is required"`, `"Meeting type is not
+            active"`, `"start_at must be a valid ISO date"`, `"timezone must be a valid
+            IANA time zone id"`, or bad `host_user_id`
+            (`"Host pinning is only supported on round-robin meeting types"` / `"The
+            pinned host is not an active member of this meeting type's pool"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"No availability schedule configured for this meeting type"` — meeting type misconfigured.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code: "SLOT_TAKEN"` — the selected time is no longer available (taken
+            concurrently, host pool exhausted, pinned host busy); **never forceable** —
+            re-fetch slots and pick another time. Or `error_code: "CONTACT_MERGE_REQUIRED"`
+            — the invitee's phone and email resolve to two different existing contacts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/bookings/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getBooking
+      tags: [Bookings]
+      summary: Get one booking
+      responses:
+        "200":
+          description: A booking object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/bookings/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: cancelBooking
+      tags: [Bookings]
+      summary: Cancel a booking
+      description: API cancellations are attributed to the host side.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason:
+                  type: string
+                  maxLength: 1000
+      responses:
+        "201":
+          description: |
+            The booking with `status: "cancelled"` and
+            `cancelled_at`/`cancelled_by`/`cancellation_reason` set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: '`"Only confirmed bookings can be cancelled"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/bookings/{id}/reschedule:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: rescheduleBooking
+      tags: [Bookings]
+      summary: Move a booking to a new slot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [start_at]
+              properties:
+                start_at:
+                  type: string
+                  format: date-time
+                  description: ISO 8601 — a new open slot.
+                timezone:
+                  type: string
+                  maxLength: 64
+                  description: Updates the invitee timezone; omitted keeps the existing one.
+      responses:
+        "201":
+          description: |
+            The booking with `previous_start_at`, `rescheduled_at`, and an incremented
+            `reschedule_count`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: |
+            `"Only confirmed bookings can be rescheduled"`, `"start_at must be a valid ISO
+            date"`, or `"The meeting type for this booking no longer exists"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"Booking not found"` / `"No availability schedule configured for this meeting type"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: '`error_code: "SLOT_TAKEN"` — the target slot is no longer open.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/bookings/{id}/reassign:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: reassignBooking
+      tags: [Bookings]
+      summary: Change the assigned host
+      description: |
+        Change which host owns a confirmed booking. Reassignment is **pre-start only** and
+        not available for collective meeting types (where every pool host attends).
+
+        409 handling: `HOST_UNAVAILABLE` is overridable by repeating the request with
+        `"force": true`; `SLOT_TAKEN` (a genuine conflicting booking) is **never
+        overridable**, even with `force`; `BOOKING_MODIFIED` means the booking changed
+        concurrently — re-read and retry.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+                  description: |
+                    Any **active** workspace member. Omitted → automatic round-robin
+                    re-pick excluding the current host (round-robin types only).
+                reason:
+                  type: string
+                  maxLength: 1000
+                  description: Recorded on the assignment history.
+                force:
+                  type: boolean
+                  const: true
+                  description: Override host-availability failures. Must be literally `true`.
+      responses:
+        "201":
+          description: The booking with its new `hosts` roster.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Booking"
+        "400":
+          description: |
+            State guards (`"Only confirmed bookings can be reassigned"`, `"This booking
+            has already started"`), collective type, no-op target, omitted `user_id` on a
+            non-round-robin type, or a target host that is not an active workspace member.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: '`"Booking not found"` / `"The meeting type for this booking no longer exists"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code: "HOST_UNAVAILABLE"` (soft availability failure — overridable with
+            `force: true`), `"SLOT_TAKEN"` (genuine conflicting booking — never
+            overridable), or `"BOOKING_MODIFIED"` (concurrent change — re-read and retry).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+# ───────────────────────────── Webhooks (outbound events) ─────────────────────────────
+webhooks:
+  email.delivered:
+    post:
+      operationId: emailDeliveredEvent
+      tags: [Webhook endpoints]
+      summary: email.delivered — the provider confirmed delivery of an API send
+      description: Default-subscription delivery event.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailDeliveredEvent"
+      responses:
+        "200":
+          description: |
+            Return any 2xx within 10 seconds to settle the delivery. Non-2xx (including
+            3xx — redirects are not followed) counts as a failure and is retried.
+  email.bounced:
+    post:
+      operationId: emailBouncedEvent
+      tags: [Webhook endpoints]
+      summary: email.bounced — the send bounced
+      description: |
+        Default-subscription delivery event. `data.bounce_type` is included when known:
+        `hard`, `soft`, or `block`.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailBouncedEvent"
+            examples:
+              hardBounce:
+                value:
+                  id: b2c3d4e5-f607-1829-3a4b-5c6d7e8f9012
+                  type: email.bounced
+                  created_at: "2026-07-14T10:05:32.000Z"
+                  data:
+                    send_id: f0e1d2c3-b4a5-9687-7869-5a4b3c2d1e0f
+                    idempotency_key: order-88123-receipt
+                    to: customer@example.com
+                    reason: 550 5.1.1 user unknown
+                    bounce_type: hard
+                    metadata:
+                      order_id: "88123"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  email.complained:
+    post:
+      operationId: emailComplainedEvent
+      tags: [Webhook endpoints]
+      summary: email.complained — the recipient marked the message as spam (feedback loop)
+      description: Default-subscription delivery event.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailComplainedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  email.failed:
+    post:
+      operationId: emailFailedEvent
+      tags: [Webhook endpoints]
+      summary: email.failed — reserved for future use (not currently emitted)
+      description: |
+        **Reserved for future use — not currently emitted.** Subscriptions are accepted so
+        existing registrations keep working when it ships; today a provider-rejected API
+        send surfaces synchronously as the sender's `502 provider_error` instead.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailFailedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  email.opened:
+    post:
+      operationId: emailOpenedEvent
+      tags: [Webhook endpoints]
+      summary: email.opened — first open only (opt-in)
+      description: |
+        Opt-in engagement event: at most one per send, for sends with `tracking.opens`.
+        `data.machine_open` is always present — `true` means the open was attributed to an
+        automated mail scanner / prefetcher (e.g. Apple Mail privacy) rather than a human.
+        Machine opens are forwarded flagged, never dropped.
+
+        A click does **not** emit an implied `email.opened` event — treat a send as opened
+        when you've received *either* `email.opened` or `email.clicked`.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailOpenedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  email.clicked:
+    post:
+      operationId: emailClickedEvent
+      tags: [Webhook endpoints]
+      summary: email.clicked — first click only (opt-in)
+      description: |
+        Opt-in engagement event: at most one per send, for sends with `tracking.clicks`.
+        `data.url` is always present: the original destination URL (may be an empty string
+        in rare cases). Clicks carry no machine flag.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailClickedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: otok_live_ API key
+      description: |
+        Workspace API key sent as a bearer token: `Authorization: Bearer otok_live_...`.
+        Keys are created in Settings → Developers, shown exactly once, and grant access to
+        the entire `/v1` surface on behalf of their workspace (no per-key scopes). Writes
+        are attributed to the workspace, not to any individual agent. Missing/non-Bearer
+        header → 401 "Missing API key"; malformed, unknown, or revoked key → 401 "Invalid
+        API key".
+
+  parameters:
+    UuidPathId:
+      name: id
+      in: path
+      required: true
+      description: Record UUID. A non-UUID value returns 400.
+      schema:
+        type: string
+        format: uuid
+    FilterParam:
+      name: filter
+      in: query
+      description: |
+        String-encoded JSON object. Invalid JSON → 400 `"Invalid filter: must be valid
+        JSON"`; a non-object → 400 `"Invalid filter: must be a JSON object"`. Any
+        `workspace_id` in the filter is ignored and replaced with your authenticated
+        workspace.
+
+        Grammar: exact match (`{"lifecycle_stage": "lead"}`; array values match any
+        member), `$where` (nested condition tree, max 100 nodes, max 200 items per array
+        value), and `$gt` (the only top-level comparison shortcut). Contacts additionally
+        support `$jsonb_contains`, `$event_attendance`, and virtual consent fields. Note:
+        the full set of `$where` operators is not exhaustively enumerated in the public
+        docs — see the Getting Started guide for the documented examples.
+      schema:
+        type: string
+        default: "{}"
+      example: '{"lifecycle_stage":"lead"}'
+    SortParam:
+      name: sort
+      in: query
+      description: "Field name; `-` prefix for descending."
+      schema:
+        type: string
+        default: "-created_at"
+    LimitParam:
+      name: limit
+      in: query
+      description: Hard cap 500. Non-integer or negative → 400.
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 500
+        default: 50
+    OffsetParam:
+      name: offset
+      in: query
+      description: Non-integer or negative → 400.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    SearchParam:
+      name: search
+      in: query
+      description: Free-text search (fields vary per resource).
+      schema:
+        type: string
+    ClampedLimitParam:
+      name: limit
+      in: query
+      description: Default 25, clamped to 1–100; non-numeric values silently become 25.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+    ClampedOffsetParam:
+      name: offset
+      in: query
+      description: Default 0, min 0; invalid values silently defaulted.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+    WebhookEventHeader:
+      name: X-Otok-Event
+      in: header
+      required: true
+      description: The event type (e.g. `email.bounced`).
+      schema:
+        $ref: "#/components/schemas/EmailEventType"
+    WebhookEventIdHeader:
+      name: X-Otok-Event-Id
+      in: header
+      required: true
+      description: |
+        The event id (same as the payload `id`). Stable across retries and shared across
+        your endpoints — use it as your dedup key.
+      schema:
+        type: string
+        format: uuid
+    WebhookSignatureHeader:
+      name: X-Otok-Signature
+      in: header
+      required: true
+      description: |
+        `t=<unix seconds>,v1=<hex HMAC>`. The signed payload is the string
+        `"<t>" + "." + <raw request body>` (the exact bytes on the wire). `v1` is the
+        lowercase hex HMAC-SHA256 of that string, keyed with the **entire secret string
+        including the `whsec_` prefix**. `t` is the unix-seconds timestamp of **this
+        delivery attempt** — retries carry fresh timestamps, so you can enforce a replay
+        window. Exactly one `v1` value is sent per request. Compare with a timing-safe
+        comparison.
+      schema:
+        type: string
+        pattern: '^t=\d+,v1=[0-9a-f]{64}$'
+
+  responses:
+    BadRequest:
+      description: |
+        Invalid request — validation failure, unknown body fields, invalid
+        `filter`/`limit`/`offset`, or a non-UUID path id.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FrameworkError"
+    Unauthorized:
+      description: |
+        Missing or non-`Bearer` `Authorization` header ("Missing API key"), or a
+        malformed, unknown, or revoked key ("Invalid API key").
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FrameworkError"
+    Forbidden:
+      description: |
+        The workspace's plan lacks API access (Growth or higher required).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FrameworkError"
+          example:
+            statusCode: 403
+            message: The REST API requires a plan with API access (Growth or higher)
+            error: Forbidden
+    NotFound:
+      description: Record not found in this workspace.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FrameworkError"
+    TooManyRequests:
+      description: |
+        Rate limit exceeded (100 requests/min per key by default; 300/min per source IP
+        across all API-key traffic). Honor `Retry-After` with exponential backoff.
+      headers:
+        Retry-After:
+          description: How long to wait before retrying.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/FrameworkError"
+    ContactMergeRequired:
+      description: |
+        `error_code: "CONTACT_MERGE_REQUIRED"` — the provided phone and email belong to two
+        different existing contacts. A merge request has been opened (repeated conflicting
+        requests for the same pair reuse it); resolve it in the app, then retry. The
+        response includes `merge_request_id`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/CodedError"
+          example:
+            statusCode: 409
+            error: Conflict
+            error_code: CONTACT_MERGE_REQUIRED
+            merge_request_id: 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
+            message: "The provided phone and email belong to two different existing contacts. A merge request has been opened — resolve it in the app, then retry."
+
+  schemas:
+    # ── Errors ──
+    FrameworkError:
+      type: object
+      title: Framework error
+      description: |
+        Standard error shape used by validation failures, authentication, authorization,
+        rate limiting, and most resource errors. `message` is a string for most errors and
+        an array of per-field messages for request-validation failures.
+      properties:
+        statusCode:
+          type: integer
+        message:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        error:
+          type: string
+          description: HTTP reason phrase (e.g. "Bad Request").
+        error_code:
+          type: string
+          description: |
+            Machine-readable code present on some 4xx responses (deals, payments,
+            bookings, contacts). Prefer it over matching on message text when documented.
+      additionalProperties: true
+    CodedError:
+      title: Coded error
+      description: |
+        A framework error carrying a machine-readable `error_code` (and occasionally extra
+        fields such as `merge_request_id`).
+      allOf:
+        - $ref: "#/components/schemas/FrameworkError"
+        - type: object
+          required: [error_code]
+          properties:
+            error_code:
+              type: string
+            merge_request_id:
+              type: string
+              format: uuid
+              description: Present on `CONTACT_MERGE_REQUIRED` responses.
+    DomainError:
+      type: object
+      title: Domain error envelope
+      description: |
+        Structured envelope used for business-rule failures on the email and
+        webhook-endpoint APIs. Key on `error.code` — the `message` text is informative and
+        may change.
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              examples: [quota_exceeded, unsafe_url, send_in_progress]
+            message:
+              type: string
+
+    # ── Shared ──
+    ListEnvelope:
+      type: object
+      title: List envelope
+      description: |
+        Consistent list envelope. `total` is the count of all matches, so
+        `offset + limit < total` means there are more pages.
+      required: [data, total, limit, offset]
+      properties:
+        data:
+          type: array
+          items: {}
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    # ── Contacts ──
+    Contact:
+      type: object
+      title: Contact
+      description: |
+        The full contact record plus computed fields. Note: the public docs do not
+        exhaustively enumerate every stored column returned on reads — this schema models
+        the documented writable fields plus the documented computed fields, and allows
+        additional properties.
+
+        **Round-trip warning:** `tags`/`groups` are returned as **ids** here but accepted
+        as **names** on writes. Never echo the ids from a GET back into a write —
+        unrecognized names are auto-created.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        phone:
+          type: [string, "null"]
+          description: E.164-normalized.
+        name:
+          type: [string, "null"]
+        first_name:
+          type: [string, "null"]
+        last_name:
+          type: [string, "null"]
+        email:
+          type: [string, "null"]
+        avatar_url:
+          type: [string, "null"]
+        notes:
+          type: [string, "null"]
+        lifecycle_stage:
+          type: [string, "null"]
+          enum: [lead, prospect, customer, inactive, archived, null]
+        source:
+          type: [string, "null"]
+          enum: [manual, import, widget, campaign, api, form, null]
+        block_state:
+          type: [string, "null"]
+          enum: [none, workspace, global, null]
+        company_name:
+          type: [string, "null"]
+        vat_number:
+          type: [string, "null"]
+        job_title:
+          type: [string, "null"]
+        industry:
+          type: [string, "null"]
+        company_website:
+          type: [string, "null"]
+        annual_revenue:
+          type: [number, "null"]
+        employee_count:
+          type: [integer, "null"]
+        currency_preference:
+          type: [string, "null"]
+        address_line1:
+          type: [string, "null"]
+        address_line2:
+          type: [string, "null"]
+        city:
+          type: [string, "null"]
+        state:
+          type: [string, "null"]
+        country:
+          type: [string, "null"]
+        postal_code:
+          type: [string, "null"]
+        gender:
+          type: [string, "null"]
+          enum: [male, female, other, prefer_not_to_say, null]
+        date_of_birth:
+          type: [string, "null"]
+          format: date
+        language:
+          type: [string, "null"]
+        utm_source:
+          type: [string, "null"]
+        utm_medium:
+          type: [string, "null"]
+        utm_campaign:
+          type: [string, "null"]
+        utm_term:
+          type: [string, "null"]
+        utm_content:
+          type: [string, "null"]
+        gclid:
+          type: [string, "null"]
+        fbclid:
+          type: [string, "null"]
+        lead_score:
+          type: [number, "null"]
+          description: |
+            Engine-owned while workspace lead scoring is enabled — reads echo the computed
+            score.
+        linkedin_url:
+          type: [string, "null"]
+        facebook_url:
+          type: [string, "null"]
+        instagram_handle:
+          type: [string, "null"]
+        twitter_handle:
+          type: [string, "null"]
+        custom_fields:
+          type: [object, "null"]
+          additionalProperties: true
+        tags:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Tag **ids** (names on input — see round-trip warning).
+        groups:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Group **ids** (names on input — see round-trip warning).
+        event_attendances:
+          type: array
+          description: |
+            `[{id, event_id, status, registered_at, attended_at, unregistered_at}]`. The
+            full `status` enum for attendances is not enumerated in the public docs (the
+            filter examples show values like "attended").
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              event_id:
+                type: string
+                format: uuid
+              status:
+                type: string
+              registered_at:
+                type: [string, "null"]
+                format: date-time
+              attended_at:
+                type: [string, "null"]
+                format: date-time
+              unregistered_at:
+                type: [string, "null"]
+                format: date-time
+        whatsapp_subscribed:
+          type: boolean
+          description: Contacts without a subscription record report `false`.
+        email_subscribed:
+          type: boolean
+          description: Contacts without a subscription record report `false`.
+        whatsapp_deliverability:
+          type: string
+          description: |
+            Per-channel deliverability state. The public docs document `"unknown"` for
+            contacts without a subscription record but do not enumerate the full value set.
+        email_deliverability:
+          type: string
+          description: |
+            Per-channel deliverability state. The public docs document `"unknown"` for
+            contacts without a subscription record but do not enumerate the full value set.
+        score_band:
+          type: [string, "null"]
+          enum: [cold, warm, hot, null]
+          description: Read-only lead-scoring band.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    ContactWrite:
+      type: object
+      title: Contact write payload
+      description: |
+        Payload for `POST /v1/contacts` (upsert — tags/groups **added**) and
+        `PATCH /v1/contacts/{id}` (tags/groups **replace** the full set). Every field is
+        optional; unknown fields → 400.
+      additionalProperties: false
+      properties:
+        phone:
+          type: string
+          maxLength: 32
+          description: Normalized to E.164 (local numbers use the workspace default country).
+        name:
+          type: string
+          maxLength: 200
+        first_name:
+          type: string
+          maxLength: 100
+        last_name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        avatar_url:
+          type: string
+          maxLength: 500
+        notes:
+          type: string
+          maxLength: 5000
+        lifecycle_stage:
+          type: string
+          enum: [lead, prospect, customer, inactive, archived]
+        source:
+          type: string
+          enum: [manual, import, widget, campaign, api, form]
+        block_state:
+          type: string
+          enum: [none, workspace, global]
+          description: |
+            Changes route through the consent/blocking subsystem. Global blocks cannot be
+            lifted via the API. A non-`none` value without a blacklist match is recorded
+            with an import block source.
+        company_name:
+          type: string
+          maxLength: 200
+        vat_number:
+          type: string
+          maxLength: 40
+        job_title:
+          type: string
+          maxLength: 120
+        industry:
+          type: string
+          maxLength: 80
+        company_website:
+          type: string
+          maxLength: 500
+        annual_revenue:
+          type: number
+        employee_count:
+          type: integer
+        currency_preference:
+          type: string
+          maxLength: 8
+        address_line1:
+          type: string
+          maxLength: 200
+        address_line2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        state:
+          type: string
+          maxLength: 100
+        country:
+          type: string
+          maxLength: 100
+        postal_code:
+          type: string
+          maxLength: 20
+        gender:
+          type: string
+          enum: [male, female, other, prefer_not_to_say]
+        date_of_birth:
+          type: string
+          format: date
+          description: ISO 8601 date.
+        language:
+          type: string
+          maxLength: 12
+        utm_source:
+          type: string
+          maxLength: 200
+        utm_medium:
+          type: string
+          maxLength: 200
+        utm_campaign:
+          type: string
+          maxLength: 200
+        utm_term:
+          type: string
+          maxLength: 200
+        utm_content:
+          type: string
+          maxLength: 200
+        gclid:
+          type: string
+          maxLength: 200
+        fbclid:
+          type: string
+          maxLength: 200
+        lead_score:
+          type: number
+          description: |
+            **Engine-owned:** silently ignored while workspace lead scoring is enabled —
+            the response echoes the computed score. Writable only when scoring is disabled.
+        linkedin_url:
+          type: string
+          maxLength: 500
+        facebook_url:
+          type: string
+          maxLength: 500
+        instagram_handle:
+          type: string
+          maxLength: 100
+        twitter_handle:
+          type: string
+          maxLength: 100
+        custom_fields:
+          type: object
+          additionalProperties: true
+          description: |
+            Arbitrary keys; **shallow-merged** into the existing object on update. Set a
+            key to `null` to remove it.
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+          description: Tag **names**. Missing tags are auto-created.
+        groups:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+          description: Group **names**. Missing groups are auto-created.
+    Note:
+      type: object
+      title: Contact note
+      description: |
+        Plain-text annotation on a contact. Notes created via the API have no author user
+        and are attributed to source `api`. `author_name` is included on list responses
+        only.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: string
+          format: uuid
+        author_user_id:
+          type: [string, "null"]
+          format: uuid
+        author_name:
+          type: [string, "null"]
+          description: List responses only.
+        source:
+          type: string
+        body:
+          type: string
+        body_json:
+          type: ["object", "null"]
+          description: Rich-text body — in-app feature; `null` for API-created notes.
+        mentioned_user_ids:
+          type: [array, "null"]
+          items:
+            type: string
+            format: uuid
+        pinned_at:
+          type: [string, "null"]
+          format: date-time
+        conversation_id:
+          type: [string, "null"]
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Tags & groups ──
+    Tag:
+      type: object
+      title: Tag
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        color:
+          type: [string, "null"]
+        type:
+          type: string
+          enum: [contact, conversation, both]
+        usage_count:
+          type: integer
+          description: Computed — the number of contacts currently carrying the tag.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    TagWrite:
+      type: object
+      title: Tag write payload
+      description: For POST, `name` is required; on PATCH all fields are optional.
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        color:
+          type: string
+          maxLength: 20
+        type:
+          type: string
+          enum: [contact, conversation, both]
+          default: both
+    ContactGroup:
+      type: object
+      title: Contact group
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        color:
+          type: [string, "null"]
+        is_system:
+          type: boolean
+        contact_count:
+          type: integer
+          description: Computed — the number of member contacts.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ContactGroupWrite:
+      type: object
+      title: Contact group write payload
+      description: For POST, `name` is required; on PATCH all fields are optional.
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 500
+        color:
+          type: string
+          maxLength: 20
+
+    # ── Campaigns ──
+    Campaign:
+      type: object
+      title: Campaign (WhatsApp)
+      description: |
+        List rows omit `variables` and `audience_filters` — fetch a single campaign to read
+        them. Note: the public docs list the field names of the full campaign object but do
+        not document the type/shape of `audience_baseline`; it is modeled loosely here.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        status:
+          type: string
+          description: |
+            Only `draft` and `scheduled` can be set via the API; execution states are
+            system-managed. The full status value set is not enumerated in the public docs.
+        type:
+          type: string
+          enum: [broadcast, drip, triggered]
+        template_id:
+          type: [string, "null"]
+          format: uuid
+        template_name:
+          type: [string, "null"]
+        audience_baseline:
+          description: Not documented in detail in the public docs.
+          type: [string, "null"]
+        audience_id:
+          type: [string, "null"]
+          format: uuid
+        audience_filters:
+          type: [object, "null"]
+          description: A `$where` condition tree. Omitted on list rows.
+        custom_message:
+          type: [string, "null"]
+        scheduled_at:
+          type: [string, "null"]
+          format: date-time
+        timezone:
+          type: [string, "null"]
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        completed_at:
+          type: [string, "null"]
+          format: date-time
+        total_recipients:
+          type: [integer, "null"]
+        sent_count:
+          type: [integer, "null"]
+        delivered_count:
+          type: [integer, "null"]
+        read_count:
+          type: [integer, "null"]
+        failed_count:
+          type: [integer, "null"]
+        reply_count:
+          type: [integer, "null"]
+        pending_retry_count:
+          type: [integer, "null"]
+        instance_id:
+          type: [string, "null"]
+          format: uuid
+        variables:
+          type: [object, "null"]
+          description: Template variable mappings. Omitted on list rows.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    CampaignWrite:
+      type: object
+      title: Campaign write payload
+      description: For POST, `name` is required; on PATCH all fields are optional.
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 2000
+        status:
+          type: string
+          enum: [draft, scheduled]
+          description: |
+            `draft`, `scheduled` only — execution states cannot be set via the API.
+            Omitted on create → `draft`.
+        type:
+          type: string
+          enum: [broadcast, drip, triggered]
+          description: Omitted on create → `broadcast`.
+        template_id:
+          type: string
+          format: uuid
+          description: WhatsApp template to send.
+        template_name:
+          type: string
+          maxLength: 512
+        audience_id:
+          type: string
+          format: uuid
+          description: A saved audience; takes precedence over `audience_filters`. Must belong to your workspace (404 otherwise).
+        audience_filters:
+          type: object
+          description: |
+            A `$where` condition tree (same grammar as the contacts `filter` `$where`);
+            validated structurally and test-compiled at write time — failures return 400
+            with an `errors` array.
+        custom_message:
+          type: string
+        scheduled_at:
+          type: string
+          format: date-time
+        timezone:
+          type: string
+          maxLength: 64
+          description: Omitted → `UTC`.
+        instance_id:
+          type: string
+          format: uuid
+          description: WhatsApp instance (phone number connection) to send from.
+        variables:
+          type: object
+          description: Template variable mappings.
+    CampaignExecuteResult:
+      type: object
+      title: Campaign execute result
+      description: Always delivered with HTTP 201 — check `success`.
+      required: [success, message]
+      properties:
+        success:
+          type: boolean
+        message:
+          type: string
+        jobId:
+          type: string
+          description: Per-campaign execution job id — present on success only.
+
+    # ── Templates ──
+    Template:
+      type: object
+      title: WhatsApp template
+      description: |
+        Note: the public docs list the row's field names but do not document the item shape
+        of `buttons` or the exact value sets of `category`/`status`/`header_type`; they are
+        modeled loosely here. Only templates with an approved `status` can be delivered.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        display_name:
+          type: [string, "null"]
+        category:
+          type: [string, "null"]
+        language:
+          type: [string, "null"]
+        status:
+          type: [string, "null"]
+        header_type:
+          type: [string, "null"]
+        header_text:
+          type: [string, "null"]
+        body_text:
+          type: [string, "null"]
+        body_variables_examples:
+          type: [array, "null"]
+          items:
+            type: string
+        footer_text:
+          type: [string, "null"]
+        buttons:
+          type: [array, "null"]
+          items:
+            type: object
+            additionalProperties: true
+        meta_template_id:
+          type: [string, "null"]
+        rejection_reason:
+          type: [string, "null"]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    TemplateSendRequest:
+      type: object
+      title: Template send payload
+      additionalProperties: false
+      required: [to]
+      properties:
+        to:
+          type: string
+          description: Recipient phone, international format (e.g. `+972501234567`).
+        body_variables:
+          type: array
+          description: |
+            Values for the template's body placeholders. `param_name` matches named
+            placeholders; otherwise values apply by position. The nested shape is validated
+            when the message is built.
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                const: text
+              text:
+                type: string
+              param_name:
+                type: string
+        header_config:
+          type: object
+          description: |
+            `{ "type": "text", "variables": ["..."] }` for text headers, or
+            `{ "type": "media", "media_type": "image"|"video"|"document",
+            "media_link": "https://..." }` for media headers.
+          properties:
+            type:
+              type: string
+              enum: [text, media]
+            variables:
+              type: array
+              items:
+                type: string
+            media_type:
+              type: string
+              enum: [image, video, document]
+            media_link:
+              type: string
+        button_configs:
+          type: array
+          description: |
+            Values for dynamic buttons (e.g. dynamic-URL suffixes). The set of valid
+            `type` values is not enumerated in the public docs.
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+              index:
+                type: integer
+              parameters:
+                type: array
+                items:
+                  type: string
+    TemplateSendResult:
+      type: object
+      title: Template send result
+      properties:
+        success:
+          type: boolean
+        wamid:
+          type: string
+          description: WhatsApp's message id.
+        message_id:
+          type: string
+          format: uuid
+          description: The persisted oToK inbox record for the sent message.
+        conversation_id:
+          type: string
+          format: uuid
+          description: The persisted oToK inbox conversation.
+
+    # ── Pipelines & deals ──
+    Pipeline:
+      type: object
+      title: Pipeline
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        is_default:
+          type: boolean
+          description: "Exactly one pipeline per workspace has `is_default: true`."
+        position:
+          type: integer
+        created_by:
+          type: [string, "null"]
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/PipelineStage"
+    PipelineStage:
+      type: object
+      title: Pipeline stage
+      properties:
+        id:
+          type: string
+          format: uuid
+        pipeline_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        color:
+          type: [string, "null"]
+        position:
+          type: integer
+        win_probability:
+          type: [integer, "null"]
+          minimum: 0
+          maximum: 100
+          description: Integer 0–100 used for forecasting; `null` behaves as 100%.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Deal:
+      type: object
+      title: Deal
+      description: |
+        `GET /v1/deals`, `GET /v1/deals/{id}`, `POST /v1/deals`, and
+        `PATCH /v1/deals/{id}` additionally join the contact's identity
+        (`contact_name`/`contact_phone`/`contact_email`); the `/stage` and `/status`
+        action routes return the bare deal row without them. Note: documented response
+        examples show `amount` serialized as a decimal **string** (e.g. `"3600.00"`) even
+        though it is written as a number.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        pipeline_id:
+          type: string
+          format: uuid
+        stage_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: string
+          format: uuid
+        product_id:
+          type: [string, "null"]
+          format: uuid
+        owner_user_id:
+          type: [string, "null"]
+          format: uuid
+        title:
+          type: string
+          description: Derived from the product name while a product is attached.
+        amount:
+          type: [string, "null"]
+          description: 'Decimal string in responses (e.g. "3600.00").'
+        currency:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [open, won, lost]
+        lost_reason:
+          type: [string, "null"]
+        expected_close_at:
+          type: [string, "null"]
+          format: date-time
+        closed_at:
+          type: [string, "null"]
+          format: date-time
+        stage_entered_at:
+          type: [string, "null"]
+          format: date-time
+        position:
+          type: [number, "null"]
+          description: Fractional Kanban position within the stage column.
+        note:
+          type: [string, "null"]
+        external_reference:
+          type: [string, "null"]
+          description: Idempotency key, unique per workspace.
+        source:
+          type: [string, "null"]
+          description: '`"api"` for API writes.'
+        created_by:
+          type: [string, "null"]
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        contact_name:
+          type: [string, "null"]
+          description: Joined contact identity — absent on `/stage` and `/status` responses.
+        contact_phone:
+          type: [string, "null"]
+          description: Joined contact identity — absent on `/stage` and `/status` responses.
+        contact_email:
+          type: [string, "null"]
+          description: Joined contact identity — absent on `/stage` and `/status` responses.
+      additionalProperties: true
+    DealCreate:
+      type: object
+      title: Deal create/upsert payload
+      description: |
+        Provide `contact_id`, or `phone`/`email` (upserted like `POST /v1/contacts`).
+        `title` is required unless a product is attached.
+      additionalProperties: false
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+          description: Existing contact (404 if not in this workspace). Wins over `phone`/`email`.
+        phone:
+          type: string
+          maxLength: 32
+          description: International format preferred.
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+          maxLength: 200
+          description: Used only when a **new** contact is created.
+        title:
+          type: string
+          maxLength: 200
+          description: Required unless a product is attached (then derived from the product name).
+        product_id:
+          type: string
+          format: uuid
+          description: Attach a product by id.
+        product_sku:
+          type: string
+          maxLength: 120
+          description: Attach by SKU.
+        product_external_id:
+          type: string
+          maxLength: 255
+          description: Attach by your external product id.
+        amount:
+          type: number
+          minimum: 0
+          maximum: 9999999999
+          description: |
+            Rounded to 2 decimals. Omitted → product price if a product is attached,
+            else 0.
+        currency:
+          type: string
+          maxLength: 8
+          description: Uppercased. Omitted → workspace default currency.
+        pipeline_id:
+          type: string
+          format: uuid
+          description: Omitted → the workspace default pipeline. Ignored on an `external_reference` match.
+        stage_id:
+          type: string
+          format: uuid
+          description: Omitted → the pipeline's first stage. On an `external_reference` match, a different stage moves the deal.
+        owner_user_id:
+          type: string
+          format: uuid
+          description: Must be a workspace agent. Omitted → the deal is unowned.
+        expected_close_at:
+          type: string
+          format: date-time
+        note:
+          type: string
+          maxLength: 4000
+        external_reference:
+          type: string
+          maxLength: 255
+          description: "**Idempotency key**, unique per workspace."
+    DealPatch:
+      type: object
+      title: Deal patch payload
+      description: All fields optional. Does not write stage history or fire deal automations.
+      additionalProperties: false
+      properties:
+        product_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            UUID attaches/replaces (must be active unless it's the already-attached
+            product); `null` detaches — the title keeps its current text.
+        title:
+          type: string
+          maxLength: 200
+          description: Ignored while a product is (or ends up) attached.
+        amount:
+          type: number
+          minimum: 0
+          maximum: 9999999999
+          description: Rounded to 2 decimals.
+        currency:
+          type: string
+          maxLength: 8
+          description: Uppercased.
+        contact_id:
+          type: string
+          format: uuid
+          description: Re-points the deal; 404 "Contact not found" if not in this workspace.
+        owner_user_id:
+          type: [string, "null"]
+          format: uuid
+          description: "`null` unassigns; a UUID must be a workspace agent (400 INVALID_DEAL_OWNER)."
+        expected_close_at:
+          type: [string, "null"]
+          format: date-time
+          description: "`null` clears."
+        note:
+          type: [string, "null"]
+          maxLength: 4000
+          description: Trimmed; empty becomes `null`.
+
+    # ── Payments ──
+    Payment:
+      type: object
+      title: Payment (header)
+      description: |
+        The payment header (the arrangement). Note: documented response examples show
+        monetary values serialized as decimal **strings** (e.g. `"350.00"`). List rows
+        include joined `contact_name`/`contact_phone`/`contact_email` and do **not**
+        include entries.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: string
+          format: uuid
+        product_id:
+          type: [string, "null"]
+          format: uuid
+        type:
+          type: string
+          enum: [one_time, recurring, installments]
+        title:
+          type: [string, "null"]
+          description: Derived from the product name while a product is attached.
+        note:
+          type: [string, "null"]
+        currency:
+          type: [string, "null"]
+        total_amount:
+          type: [string, "null"]
+          description: Decimal string in responses.
+        arrangement_status:
+          type: string
+          enum: [active, completed, cancelled]
+        method:
+          type: [string, "null"]
+          enum: [cash, card, bank_transfer, other, null]
+        purchase_date:
+          type: [string, "null"]
+          format: date-time
+        recurring_interval:
+          type: [string, "null"]
+          enum: [weekly, monthly, quarterly, yearly, null]
+        recurring_next_due_at:
+          type: [string, "null"]
+          format: date-time
+        recurring_auto_generate:
+          type: [boolean, "null"]
+        recurring_cancelled_at:
+          type: [string, "null"]
+          format: date-time
+        recurring_end_at:
+          type: [string, "null"]
+          format: date-time
+        recurring_max_occurrences:
+          type: [integer, "null"]
+        installment_count:
+          type: [integer, "null"]
+        external_reference:
+          type: [string, "null"]
+          description: Idempotency key, unique per workspace.
+        source:
+          type: [string, "null"]
+          description: '`"api"` for API writes.'
+        metadata:
+          type: [object, "null"]
+        created_by:
+          type: [string, "null"]
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        contact_name:
+          type: [string, "null"]
+          description: Joined on list rows.
+        contact_phone:
+          type: [string, "null"]
+          description: Joined on list rows.
+        contact_email:
+          type: [string, "null"]
+          description: Joined on list rows.
+      additionalProperties: true
+    PaymentEntry:
+      type: object
+      title: Payment entry
+      description: |
+        An individual charge/refund in the payment's schedule. Refund entries carry
+        **negative** `amount`/`recognized_amount` and point at the charge they reverse via
+        `refunds_entry_id`. Monetary values are decimal strings in responses.
+      properties:
+        id:
+          type: string
+          format: uuid
+        payment_id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: string
+          format: uuid
+        sequence:
+          type: integer
+        amount:
+          type: [string, "null"]
+          description: Decimal string; negative on refund entries.
+        currency:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [pending, completed, failed, refunded]
+        due_date:
+          type: [string, "null"]
+          format: date-time
+        paid_at:
+          type: [string, "null"]
+          format: date-time
+        recognized_amount:
+          type: [string, "null"]
+          description: Decimal string; negative on refund entries.
+        recognized_at:
+          type: [string, "null"]
+          format: date-time
+        kind:
+          type: string
+          enum: [charge, refund]
+        refunds_entry_id:
+          type: [string, "null"]
+          format: uuid
+          description: On refund entries, the charge entry being reversed.
+        note:
+          type: [string, "null"]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    PaymentWithEntries:
+      title: Payment with entries
+      description: |
+        Single-payment responses (`GET /{id}` and all write routes) return the header plus
+        `entries` ordered by `sequence`.
+      allOf:
+        - $ref: "#/components/schemas/Payment"
+        - type: object
+          required: [entries]
+          properties:
+            entries:
+              type: array
+              items:
+                $ref: "#/components/schemas/PaymentEntry"
+    PaymentCreate:
+      type: object
+      title: Payment create/upsert payload
+      description: Provide `contact_id`, or `phone`/`email` (upserted like `POST /v1/contacts`).
+      additionalProperties: false
+      required: [type, amount]
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+          description: Existing contact (404 if not in this workspace). Wins over `phone`/`email`.
+        phone:
+          type: string
+          maxLength: 32
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+          maxLength: 200
+          description: Used only for a newly created contact.
+        type:
+          type: string
+          enum: [one_time, recurring, installments]
+        amount:
+          type: number
+          minimum: 0
+          description: |
+            one_time: the charge amount; recurring: amount **per cycle**; installments:
+            the **total** deal amount. Always required — the product price does not
+            substitute for it.
+        product_id:
+          type: string
+          format: uuid
+        product_sku:
+          type: string
+          maxLength: 120
+        product_external_id:
+          type: string
+          maxLength: 255
+        title:
+          type: string
+          maxLength: 200
+          description: Ignored while a product is attached (title derives from the product name).
+        note:
+          type: string
+          maxLength: 1000
+        method:
+          type: string
+          enum: [cash, card, bank_transfer, other]
+        currency:
+          type: string
+          maxLength: 3
+          description: Uppercased. Omitted → workspace default currency.
+        purchase_date:
+          type: string
+          description: |
+            ISO 8601. A date-only value ("2026-07-14") is interpreted as start of that day
+            in the workspace timezone. Omitted → now.
+        status:
+          type: string
+          enum: [pending, completed, failed, refunded]
+          description: "**One-time only.** Omitted → `completed`."
+        interval:
+          type: string
+          enum: [weekly, monthly, quarterly, yearly]
+          description: "**Recurring only.** Omitted → `monthly`."
+        auto_generate:
+          type: boolean
+          description: "Recurring only: automatically record each cycle when due."
+        record_first_payment:
+          type: boolean
+          default: true
+          description: "Recurring only: record the first cycle immediately."
+        recurring_end_at:
+          type: string
+          description: |
+            Recurring only; ISO 8601 — a date-only value means **end** of that day in the
+            workspace timezone; must be after the purchase date.
+        recurring_max_occurrences:
+          type: integer
+          minimum: 1
+          description: Recurring only — total charge cycles ever.
+        installment_count:
+          type: integer
+          minimum: 2
+          description: "**Required when `type` is `installments`.**"
+        external_reference:
+          type: string
+          maxLength: 255
+          description: "**Idempotency key**, unique per workspace."
+    PaymentPatch:
+      type: object
+      title: Payment patch payload
+      description: All fields optional. Type-restricted fields are silently ignored on other types.
+      additionalProperties: false
+      properties:
+        product_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Attach/replace (must be active unless already attached) or detach (`null`);
+            title derives from the product while attached.
+        title:
+          type: string
+          maxLength: 200
+          description: Ignored while a product is attached.
+        note:
+          type: string
+          maxLength: 1000
+        method:
+          type: string
+          enum: [cash, card, bank_transfer, other]
+        amount:
+          type: number
+          minimum: 0
+          description: "**One-time only** (silently ignored otherwise)."
+        status:
+          type: string
+          enum: [pending, completed, failed, refunded]
+          description: "**One-time only.**"
+        auto_generate:
+          type: boolean
+          description: Recurring only.
+        recurring_end_at:
+          type: [string, "null"]
+          description: Recurring only; `null` clears; must be after the purchase date.
+        recurring_max_occurrences:
+          type: [integer, "null"]
+          minimum: 1
+          description: Recurring only; `null` clears.
+
+    # ── Emails ──
+    EmailSendRequest:
+      type: object
+      title: Transactional email send payload
+      additionalProperties: false
+      required: [to, subject, idempotency_key]
+      properties:
+        to:
+          type: string
+          minLength: 1
+          maxLength: 320
+          description: Must be a syntactically valid email (else 422 `invalid_recipient`).
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 998
+          description: No line breaks or control characters.
+        html:
+          type: string
+          description: |
+            ≤500 KB. Delivered verbatim. At least one of `html`/`text` is required; the
+            missing part is derived from the other.
+        text:
+          type: string
+          description: |
+            ≤100 KB. At least one of `html`/`text` is required (text → HTML-escaped with
+            line breaks preserved; html → a plain-text rendering).
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Unique per workspace — makes retries safe.
+        sender_profile_id:
+          type: string
+          format: uuid
+          description: |
+            Sender identity to use. Omitted → the workspace's default verified sender
+            profile. An id from another workspace behaves like a nonexistent id (404).
+        reply_to:
+          type: string
+          format: email
+        headers:
+          type: object
+          description: |
+            **Allowlist: only `List-Unsubscribe` and `List-Unsubscribe-Post`**
+            (case-insensitive). Values: strings, ≤1000 chars, no control characters. Any
+            other header key → 400 `validation_failed`.
+          additionalProperties:
+            type: string
+            maxLength: 1000
+        metadata:
+          type: object
+          description: |
+            ≤2048 bytes JSON-serialized. Stored with the send and echoed verbatim in
+            webhook events (`data.metadata`).
+          additionalProperties: true
+        tracking:
+          type: object
+          additionalProperties: false
+          description: Both default `false`. Preferences are not persisted across replays.
+          properties:
+            opens:
+              type: boolean
+              default: false
+            clicks:
+              type: boolean
+              default: false
+    EmailSendResult:
+      type: object
+      title: Transactional email send result
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The send's id — matches `data.send_id` in webhook events.
+        status:
+          type: string
+          enum: [sent, suppressed]
+        duplicate:
+          type: boolean
+          description: "`true` when this response replays a previously processed key."
+        to:
+          type: string
+        idempotency_key:
+          type: string
+        provider_message_id:
+          type: [string, "null"]
+          description: Provider's message id; always `null` when suppressed.
+        reason:
+          type: [string, "null"]
+          description: '`null`, or `"suppressed"` when the recipient was suppressed (deliberately coarse).'
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Webhook endpoints ──
+    EmailEventType:
+      type: string
+      title: Email event type
+      enum:
+        - email.delivered
+        - email.bounced
+        - email.complained
+        - email.failed
+        - email.opened
+        - email.clicked
+      description: |
+        `email.delivered`/`email.bounced`/`email.complained`/`email.failed` are the default
+        subscription; `email.opened`/`email.clicked` are opt-in. `email.failed` is reserved
+        for future use and not currently emitted.
+    WebhookEndpoint:
+      type: object
+      title: Webhook endpoint
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmailEventType"
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+    WebhookEndpointWithSecret:
+      title: Webhook endpoint (with one-time secret)
+      allOf:
+        - $ref: "#/components/schemas/WebhookEndpoint"
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: |
+                `whsec_…` signing secret — returned only on creation, once. It cannot be
+                retrieved again.
+
+    # ── Email webhook events ──
+    EmailEventBase:
+      type: object
+      title: Email event (base)
+      description: |
+        Every delivery is an HTTP POST with this JSON body. Optional fields are **omitted,
+        never null**. The retry policy is 10 attempts with exponential backoff (30s, 90s,
+        4.5m, 13.5m, 40m, 2h, then 4h between later attempts — ≈16 hours total window);
+        per-attempt timeout 10 seconds; redirects not followed; responses over 1 MB are
+        failures; exhausted deliveries are not replayed.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it as
+            your dedup key.
+        type:
+          $ref: "#/components/schemas/EmailEventType"
+        created_at:
+          type: string
+          format: date-time
+          description: When the event occurred.
+        data:
+          type: object
+          additionalProperties: true
+          required: [send_id, idempotency_key, to]
+          properties:
+            send_id:
+              type: string
+              format: uuid
+              description: The `id` returned by `POST /v1/emails`.
+            idempotency_key:
+              type: string
+              description: Your idempotency key from the send.
+            to:
+              type: string
+              description: Recipient address.
+            reason:
+              type: string
+              description: |
+                Bounce diagnostic or complaint feedback type — omitted when absent.
+            metadata:
+              type: object
+              additionalProperties: true
+              description: Your `metadata` object, echoed verbatim — omitted when none.
+    EmailDeliveredEvent:
+      title: email.delivered event
+      allOf:
+        - $ref: "#/components/schemas/EmailEventBase"
+        - type: object
+          properties:
+            type:
+              const: email.delivered
+    EmailBouncedEvent:
+      title: email.bounced event
+      allOf:
+        - $ref: "#/components/schemas/EmailEventBase"
+        - type: object
+          properties:
+            type:
+              const: email.bounced
+            data:
+              type: object
+              additionalProperties: true
+              properties:
+                bounce_type:
+                  type: string
+                  enum: [hard, soft, block]
+                  description: Included when known; omitted when unknown.
+    EmailComplainedEvent:
+      title: email.complained event
+      allOf:
+        - $ref: "#/components/schemas/EmailEventBase"
+        - type: object
+          properties:
+            type:
+              const: email.complained
+    EmailFailedEvent:
+      title: email.failed event (reserved)
+      description: |
+        Reserved for future use — not currently emitted. The payload shape when it ships is
+        not documented beyond the shared event base.
+      allOf:
+        - $ref: "#/components/schemas/EmailEventBase"
+        - type: object
+          properties:
+            type:
+              const: email.failed
+    EmailOpenedEvent:
+      title: email.opened event
+      allOf:
+        - $ref: "#/components/schemas/EmailEventBase"
+        - type: object
+          properties:
+            type:
+              const: email.opened
+            data:
+              type: object
+              additionalProperties: true
+              required: [machine_open]
+              properties:
+                machine_open:
+                  type: boolean
+                  description: |
+                    Always present on opens. `true` means the open was attributed to an
+                    automated mail scanner / prefetcher rather than a human.
+    EmailClickedEvent:
+      title: email.clicked event
+      allOf:
+        - $ref: "#/components/schemas/EmailEventBase"
+        - type: object
+          properties:
+            type:
+              const: email.clicked
+            data:
+              type: object
+              additionalProperties: true
+              required: [url]
+              properties:
+                url:
+                  type: string
+                  description: |
+                    Always present on clicks — the original destination URL (may be an
+                    empty string in rare cases).
+
+    # ── Meeting types & bookings ──
+    MeetingType:
+      type: object
+      title: Meeting type
+      description: |
+        Internal configuration (schedules, booking-page questions, buffers, etc.) is not
+        exposed. Note: the public docs describe `scheduling_kind` as `single` or "a team
+        kind such as round-robin/collective" without enumerating the exact string values;
+        it is modeled as a free string here.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: [string, "null"]
+        description:
+          type: [string, "null"]
+        duration_minutes:
+          type: integer
+        location_type:
+          type: [string, "null"]
+          description: Value set not enumerated in the public docs (example shows `zoom`).
+        is_active:
+          type: boolean
+        scheduling_kind:
+          type: string
+          description: '`single` (default; one host), or a team kind such as round-robin/collective.'
+        host:
+          type: object
+          description: Back-compat convenience; its `id` is `null` for team kinds.
+          properties:
+            id:
+              type: [string, "null"]
+              format: uuid
+            name:
+              type: [string, "null"]
+        hosts:
+          type: array
+          description: The configured host pool (exactly one entry for `single`).
+          items:
+            type: object
+            properties:
+              user_id:
+                type: string
+                format: uuid
+              name:
+                type: string
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    SlotsResult:
+      type: object
+      title: Open slots
+      properties:
+        meeting_type_id:
+          type: string
+          format: uuid
+        timezone:
+          type: string
+          description: The host schedule's IANA zone.
+        duration_minutes:
+          type: integer
+        slots:
+          type: array
+          items:
+            type: object
+            properties:
+              start:
+                type: string
+                format: date-time
+              end:
+                type: string
+                format: date-time
+    Booking:
+      type: object
+      title: Booking
+      description: |
+        Internal fields (calendar ids, invitee management tokens, booking-page answers) are
+        never exposed. `hosts` lists the assigned host first, then any co-hosts.
+      properties:
+        id:
+          type: string
+          format: uuid
+        meeting_type_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: [string, "null"]
+          format: uuid
+        host_user_id:
+          type: [string, "null"]
+          format: uuid
+        hosts:
+          type: array
+          items:
+            type: object
+            properties:
+              user_id:
+                type: string
+                format: uuid
+              name:
+                type: string
+              role:
+                type: string
+                description: 'e.g. "assigned"; the full role value set is not enumerated in the public docs.'
+        status:
+          type: string
+          enum: [confirmed, cancelled, completed, no_show]
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        host_timezone:
+          type: [string, "null"]
+        invitee_timezone:
+          type: [string, "null"]
+        invitee_name:
+          type: [string, "null"]
+        invitee_email:
+          type: [string, "null"]
+        invitee_phone:
+          type: [string, "null"]
+        join_url:
+          type: [string, "null"]
+        notes:
+          type: [string, "null"]
+        source:
+          type: [string, "null"]
+        cancelled_at:
+          type: [string, "null"]
+          format: date-time
+        cancelled_by:
+          type: [string, "null"]
+          description: The docs do not document the value type (user id vs role label).
+        cancellation_reason:
+          type: [string, "null"]
+        rescheduled_at:
+          type: [string, "null"]
+          format: date-time
+        previous_start_at:
+          type: [string, "null"]
+          format: date-time
+        reschedule_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    BookingCreate:
+      type: object
+      title: Booking create payload
+      description: Provide `contact_id` or an `invitee` object (when both are given, `contact_id` wins).
+      additionalProperties: false
+      required: [meeting_type_id, start_at, timezone]
+      properties:
+        meeting_type_id:
+          type: string
+          format: uuid
+          description: Must be active.
+        start_at:
+          type: string
+          format: date-time
+          description: Must be an open slot (use the slots endpoint).
+        timezone:
+          type: string
+          description: Valid IANA zone (e.g. `Europe/Berlin`) — recorded as the invitee's timezone.
+        contact_id:
+          type: string
+          format: uuid
+          description: Existing contact.
+        invitee:
+          type: object
+          additionalProperties: false
+          required: [name, email]
+          description: |
+            Upserted into contacts by phone/email; the email receives the confirmation and
+            manage link.
+          properties:
+            name:
+              type: string
+              maxLength: 200
+            email:
+              type: string
+              format: email
+              maxLength: 320
+            phone:
+              type: string
+              maxLength: 40
+        notes:
+          type: string
+          maxLength: 2000
+        host_user_id:
+          type: string
+          format: uuid
+          description: |
+            **Round-robin meeting types only:** pin the booking to this pool host (must be
+            an active pool member with the slot free). Pinned bookings still count toward
+            round-robin fairness.
