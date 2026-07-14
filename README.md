@@ -28,3 +28,7 @@ curl "https://<your-host>/api/v1/contacts?limit=5" \
 - Auth: workspace API keys (`otok_live_…`), created in **Settings → Developers**
 - Interactive Swagger docs: `https://<your-host>/api/v1/docs`
 - Requires a plan with API access (Growth or higher)
+
+## License
+
+MIT — see [LICENSE](LICENSE).
