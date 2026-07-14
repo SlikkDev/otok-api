@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "otok"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Official Python SDK for the oToK marketing platform public API (/v1) — contacts, deals, transactional email, webhooks, and a high-level e-commerce layer."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -40,18 +40,25 @@ dependencies = []
 # Pins keep dev tooling compatible with the package's 3.9 floor:
 # mypy 2.x cannot target python_version = 3.9, and pytest 9.x sources use
 # 3.10+ syntax that mypy would refuse to analyze under the 3.9 target.
-dev = ["pytest>=7.4,<9", "ruff>=0.5", "mypy>=1.10,<2"]
+# ruff is bounded so a future release adding rules cannot turn CI red
+# without a code change.
+dev = ["pytest>=7.4,<9", "ruff>=0.5,<0.16", "mypy>=1.10,<2"]
 
 [project.urls]
 Homepage = "https://github.com/SlikkDev/otok-api/tree/main/sdk/python#readme"
 Repository = "https://github.com/SlikkDev/otok-api"
 Issues = "https://github.com/SlikkDev/otok-api/issues"
 
+[tool.hatch.version]
+path = "src/otok/_version.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/otok"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/otok", "README.md", "pyproject.toml"]
+# Patterns are anchored ("/...") so stray files at other depths in a
+# maintainer's working tree can never leak into a published sdist.
+include = ["/src/otok", "/tests", "/README.md", "/LICENSE", "/pyproject.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

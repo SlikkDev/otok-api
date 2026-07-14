@@ -28,6 +28,7 @@ from .types import OtokWebhookEvent
 DEFAULT_TOLERANCE_SECONDS = 300
 
 _HEX_SIGNATURE_RE = re.compile(r"^[0-9a-f]{64}$")
+_TIMESTAMP_RE = re.compile(r"^[0-9]+$")
 
 
 def compute_webhook_signature(
@@ -65,13 +66,11 @@ def parse_signature_header(header: str) -> Optional[ParsedSignatureHeader]:
         key = part[:eq].strip()
         value = part[eq + 1 :].strip()
         if key == "t":
-            try:
-                parsed = int(value)
-            except ValueError:
+            # Strict non-negative decimal digits only (no sign, exponent,
+            # underscores, or non-ASCII digits).
+            if not _TIMESTAMP_RE.match(value):
                 return None
-            if parsed < 0:
-                return None
-            timestamp = parsed
+            timestamp = int(value)
         elif key == "v1" and _HEX_SIGNATURE_RE.match(value):
             signatures.append(value)
     if timestamp is None or not signatures:
@@ -148,8 +147,10 @@ def construct_event(
         now=now,
     ):
         raise OtokWebhookVerificationError("Webhook signature verification failed")
-    text = payload if isinstance(payload, str) else payload.decode("utf-8")
     try:
+        # UnicodeDecodeError is a ValueError, so a signature-valid but
+        # non-UTF-8 payload also surfaces as a verification error.
+        text = payload if isinstance(payload, str) else payload.decode("utf-8")
         event = json.loads(text)
     except ValueError:
         raise OtokWebhookVerificationError("Webhook payload is not valid JSON") from None

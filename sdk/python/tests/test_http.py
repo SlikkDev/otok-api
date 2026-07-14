@@ -170,6 +170,76 @@ class TestRetries:
         assert transport.calls == 1
 
 
+class TestRedirects:
+    def test_urllib_transport_returns_a_302_instead_of_following_it(self) -> None:
+        """The default transport must treat 3xx as terminal — following it
+        would re-send the Authorization header to the redirect target.
+        """
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+
+        from otok import UrllibTransport
+
+        hits: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                hits.append(self.path)
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/target")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                else:
+                    body = b"followed"
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass  # keep test output quiet
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            transport = UrllibTransport()
+            response = transport.send(
+                TransportRequest(
+                    method="GET",
+                    url=f"http://127.0.0.1:{port}/redirect",
+                    headers={"Authorization": "Bearer otok_live_testkey"},
+                    body=None,
+                    timeout=5.0,
+                )
+            )
+            assert response.status == 302
+            assert response.headers.get("location") == "/target"
+            # The redirect target was never requested.
+            assert hits == ["/redirect"]
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_a_3xx_response_surfaces_as_an_api_error_not_a_retry(self) -> None:
+        transport = MockTransport(
+            [
+                TransportResponse(
+                    status=302,
+                    headers={"location": "https://elsewhere.example/steal"},
+                    body=b"",
+                )
+            ]
+        )
+        client = make_client(transport)
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.request("GET", "/v1/tags")
+        assert excinfo.value.status == 302
+        assert len(transport.requests) == 1  # not followed, not retried
+
+
 class TestErrorParsing:
     def test_parses_the_domain_error_envelope(self) -> None:
         body = {"error": {"code": "endpoint_not_found", "message": "Webhook endpoint not found"}}

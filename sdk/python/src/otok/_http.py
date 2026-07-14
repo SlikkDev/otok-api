@@ -45,7 +45,9 @@ class TransportRequest:
     url: str
     headers: Mapping[str, str]
     body: Optional[bytes]
-    #: Per-attempt timeout in seconds.
+    #: Timeout in seconds. With the default urllib transport this bounds
+    #: each blocking socket operation (connect, each read) rather than the
+    #: attempt's total wall-clock time.
     timeout: float
 
 
@@ -62,17 +64,51 @@ class Transport(Protocol):
     """Minimal transport contract.
 
     Implementations perform exactly one HTTP round trip per ``send`` call
-    (no retries — the client owns retry policy), return a
-    ``TransportResponse`` for ANY HTTP status (including 4xx/5xx), and raise
-    ``OtokTimeoutError`` when the per-attempt timeout elapses.
+    (no retries and no redirect following — the client owns retry policy,
+    and a 3xx is a terminal response), return a ``TransportResponse`` for
+    ANY HTTP status (including 3xx/4xx/5xx), and raise ``OtokTimeoutError``
+    when the request times out.
     """
 
     def send(self, request: TransportRequest) -> TransportResponse:  # pragma: no cover
         ...
 
 
+class _NoRedirectFollowHandler(urllib.request.HTTPRedirectHandler):
+    """Treat every 3xx as a terminal response instead of following it.
+
+    urllib's default redirect handler re-sends the original headers —
+    including ``Authorization: Bearer otok_live_…`` — to the redirect
+    target, even cross-origin. The API never redirects, so the safe
+    behavior is to surface the 3xx to the caller (the same posture as
+    oToK's own outbound webhook dispatcher, which follows no redirects).
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        # Returning None makes HTTPRedirectHandler raise HTTPError for the
+        # 3xx, which UrllibTransport converts into a TransportResponse.
+        return None
+
+
 class UrllibTransport:
-    """Default zero-dependency transport built on ``urllib.request``."""
+    """Default zero-dependency transport built on ``urllib.request``.
+
+    Redirects are NOT followed — a 3xx comes back as a plain
+    ``TransportResponse`` — so the bearer API key is never re-sent to a
+    redirect target. The per-request ``timeout`` bounds each socket
+    operation (connect, each read), not the whole attempt.
+    """
+
+    def __init__(self) -> None:
+        self._opener = urllib.request.build_opener(_NoRedirectFollowHandler())
 
     def send(self, request: TransportRequest) -> TransportResponse:
         req = urllib.request.Request(
@@ -82,15 +118,16 @@ class UrllibTransport:
             method=request.method,
         )
         try:
-            with urllib.request.urlopen(req, timeout=request.timeout) as response:
+            with self._opener.open(req, timeout=request.timeout) as response:
                 return TransportResponse(
                     status=response.status,
                     headers=_lower_headers(response.headers.items()),
                     body=response.read(),
                 )
         except urllib.error.HTTPError as err:
-            # Non-2xx responses are data, not exceptions: the client decides
-            # whether to retry or raise OtokAPIError.
+            # Non-2xx responses (including unfollowed 3xx) are data, not
+            # exceptions: the client decides whether to retry or raise
+            # OtokAPIError.
             return TransportResponse(
                 status=err.code,
                 headers=_lower_headers(err.headers.items()),
@@ -155,8 +192,12 @@ def _is_retryable_status(status: int) -> bool:
 
 class HttpClient:
     """Minimal HTTP client: auth header injection, JSON (de)serialization,
-    per-attempt timeout, and exponential-backoff retries on 429/5xx
-    respecting ``Retry-After``.
+    request timeouts, and exponential-backoff retries on 429/5xx respecting
+    ``Retry-After``.
+
+    ``timeout`` is passed to the transport per attempt; with the default
+    urllib transport it bounds each socket operation (connect, each read),
+    not the attempt's total wall-clock time.
     """
 
     def __init__(

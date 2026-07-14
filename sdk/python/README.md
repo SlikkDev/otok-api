@@ -127,6 +127,8 @@ Events are POSTed with an `X-Otok-Signature: t=<unix>,v1=<hex>` header (HMAC-SHA
 #### Flask
 
 ```python
+import os
+
 from flask import Flask, request
 
 from otok import OtokWebhookVerificationError, construct_event
@@ -153,6 +155,8 @@ def otok_events():
 #### FastAPI
 
 ```python
+import os
+
 from fastapi import FastAPI, Request, Response
 
 from otok import OtokWebhookVerificationError, construct_event
@@ -177,6 +181,8 @@ async def otok_events(request: Request) -> Response:
 #### Django
 
 ```python
+import os
+
 from django.http import HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
@@ -221,7 +227,8 @@ Request/response field names match the wire contract (snake_case) exactly, so th
 ## Errors, timeouts, retries
 
 - Non-2xx responses raise **`OtokAPIError`** with `status`, `code` (machine-readable, when the endpoint uses the `{"error": {"code", "message"}}` envelope, e.g. `endpoint_not_found`, `SLOT_TAKEN`), and the parsed `body`.
-- Requests time out after `timeout` seconds (default 30) and raise **`OtokTimeoutError`**.
+- Slow requests raise **`OtokTimeoutError`** — with the default urllib transport the `timeout` option (default 30 s) bounds each socket operation (connect, each read) rather than a whole attempt's wall-clock time.
+- Redirects are never followed: a 3xx comes back as an `OtokAPIError`, so the bearer API key is never re-sent to a redirect target.
 - `429` and `5xx` responses are retried up to `max_retries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header (both delta-seconds and HTTP-date forms). Network errors are **not** retried automatically in v0.1 — use idempotency keys (`external_reference`, `idempotency_key`) and retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
 

@@ -139,6 +139,11 @@ class TestParseSignatureHeader:
     def test_returns_none_for_a_negative_timestamp(self) -> None:
         assert parse_signature_header(f"t=-2,v1={'a' * 64}") is None
 
+    @pytest.mark.parametrize("literal", ["1_000", "1e3", "0x10", "", "+5", " "])
+    def test_rejects_non_decimal_timestamp_literals(self, literal: str) -> None:
+        # Only plain non-negative decimal digits are accepted for `t`.
+        assert parse_signature_header(f"t={literal},v1={'a' * 64}") is None
+
     def test_ignores_unknown_keys(self) -> None:
         parsed = parse_signature_header(f"{sign(EVENT_BODY)},v0=whatever")
         assert parsed is not None
@@ -187,4 +192,11 @@ class TestConstructEvent:
     def test_raises_on_a_verified_json_payload_that_is_not_an_event_envelope(self) -> None:
         body = json.dumps({"hello": "world"})
         with pytest.raises(OtokWebhookVerificationError, match="not a recognized event"):
+            construct_event(body, sign(body), SECRET, now=NOW)
+
+    def test_raises_verification_error_for_a_signed_non_utf8_payload(self) -> None:
+        # A correctly signed body that is not valid UTF-8 must surface as
+        # OtokWebhookVerificationError, never UnicodeDecodeError.
+        body = b'\xff\xfe{"id": "x", "type": "email.delivered"}'
+        with pytest.raises(OtokWebhookVerificationError, match="not valid JSON"):
             construct_event(body, sign(body), SECRET, now=NOW)

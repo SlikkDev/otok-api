@@ -43,7 +43,9 @@ class OtokClient:
 
     :param api_key: API key (``otok_live_…``), sent as
         ``Authorization: Bearer <key>``.
-    :param timeout: Per-attempt request timeout in seconds. Default 30.
+    :param timeout: Request timeout in seconds. Default 30. With the default
+        urllib transport this bounds each socket operation (connect, each
+        read), not a whole attempt's wall-clock time.
     :param max_retries: Retry attempts after the first request (429 and 5xx
         responses only). Default 2 (i.e. up to 3 requests total). Set 0 to
         disable retries.
