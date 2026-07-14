@@ -20,13 +20,13 @@ Quick links:
 ## At a glance
 
 ```bash
-curl "https://<your-host>/api/v1/contacts?limit=5" \
+curl "https://app.otok.io/api/v1/contacts?limit=5" \
   -H "Authorization: Bearer otok_live_..."
 ```
 
-- Base URL: `https://<your-host>/api/v1/`
+- Base URL: `https://app.otok.io/api/v1/`
 - Auth: workspace API keys (`otok_live_…`), created in **Settings → Developers**
-- Interactive Swagger docs: `https://<your-host>/api/v1/docs`
+- Interactive Swagger docs: `https://app.otok.io/api/v1/docs`
 - Requires a plan with API access (Growth or higher)
 
 ## License

@@ -3,13 +3,13 @@
  * idempotent deal keyed by the order id, and send a receipt email once.
  *
  * Run (after `npm run build` in sdk/node):
- *   OTOK_API_KEY=otok_live_… OTOK_BASE_URL=https://your-otok-host/api node examples/track-order.mjs
+ *   OTOK_API_KEY=otok_live_… node examples/track-order.mjs
  */
 import { OtokClient } from "../dist/index.js";
 
 const otok = new OtokClient({
   apiKey: process.env.OTOK_API_KEY,
-  baseUrl: process.env.OTOK_BASE_URL, // e.g. https://your-otok-host/api
+  baseUrl: process.env.OTOK_BASE_URL, // optional override; defaults to https://app.otok.io/api
 });
 
 const order = {

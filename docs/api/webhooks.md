@@ -22,7 +22,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/webhook-endpoints" \
+curl -X POST "https://app.otok.io/api/v1/webhook-endpoints" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{

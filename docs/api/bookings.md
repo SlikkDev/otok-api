@@ -47,7 +47,7 @@ Meeting type object:
 Standard [list conventions](getting-started.md#list-conventions) (`filter`, `sort` default `-created_at`, `limit` default 50 / cap 500, `offset`, `search`).
 
 ```bash
-curl -G "https://<your-host>/api/v1/meeting-types" \
+curl -G "https://app.otok.io/api/v1/meeting-types" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'filter={"is_active":true}'
 ```
@@ -68,7 +68,7 @@ Returns the open start instants for the meeting type — the same availability t
 | `to` | ISO 8601 | yes | Range end (exclusive); must be after `from`; **range may not exceed 62 days** |
 
 ```bash
-curl -G "https://<your-host>/api/v1/meeting-types/mt-1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809/slots" \
+curl -G "https://app.otok.io/api/v1/meeting-types/mt-1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809/slots" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'from=2026-07-20T00:00:00Z' \
   --data-urlencode 'to=2026-07-27T00:00:00Z'
@@ -168,7 +168,7 @@ Books a slot. The slot must be open at booking time; slot-taking is race-safe.
 | `host_user_id` | UUID | no | **Round-robin meeting types only:** pin the booking to this pool host (must be an active pool member with the slot free). Pinned bookings still count toward round-robin fairness |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/bookings" \
+curl -X POST "https://app.otok.io/api/v1/bookings" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{

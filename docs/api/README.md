@@ -2,10 +2,10 @@
 
 The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts, tags and groups, WhatsApp campaigns and templates, deals and pipelines, payments, transactional email, outbound webhooks, and bookings.
 
-- **Base URL:** `https://<your-host>/api/v1/`
+- **Base URL:** `https://app.otok.io/api/v1/`
 - **Auth:** `Authorization: Bearer otok_live_…` API keys (created in Settings → Developers)
 - **Plan:** requires a plan with API access (Growth or higher)
-- **Interactive docs:** Swagger UI at `https://<your-host>/api/v1/docs`
+- **Interactive docs:** Swagger UI at `https://app.otok.io/api/v1/docs`
 
 Start with **[Getting Started](getting-started.md)** — authentication, error envelopes, rate limits, and list/filter conventions shared by all endpoints.
 

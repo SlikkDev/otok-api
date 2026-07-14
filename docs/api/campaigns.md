@@ -21,7 +21,7 @@ Full campaigns include: `id`, `workspace_id`, `name`, `description`, `status`, `
 ## GET /api/v1/campaigns
 
 ```bash
-curl -G "https://<your-host>/api/v1/campaigns" \
+curl -G "https://app.otok.io/api/v1/campaigns" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'filter={"status":"scheduled"}' \
   --data-urlencode 'sort=-created_at'
@@ -70,7 +70,7 @@ If the campaign is saved with `status: "scheduled"` **and** a `scheduled_at`, it
 ### Example
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/campaigns" \
+curl -X POST "https://app.otok.io/api/v1/campaigns" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -130,7 +130,7 @@ Possible response bodies (all HTTP `201`):
 Execution is queued with a per-campaign job id, so repeated execute calls while a run is queued do not enqueue duplicates.
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/campaigns/1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60718/execute" \
+curl -X POST "https://app.otok.io/api/v1/campaigns/1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60718/execute" \
   -H "Authorization: Bearer otok_live_abc123..."
 ```
 

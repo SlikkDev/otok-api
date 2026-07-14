@@ -17,7 +17,7 @@ Template rows include: `id`, `name`, `display_name`, `category`, `language`, `st
 ## GET /api/v1/templates
 
 ```bash
-curl -G "https://<your-host>/api/v1/templates" \
+curl -G "https://app.otok.io/api/v1/templates" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'filter={"status":"approved"}'
 ```
@@ -50,7 +50,7 @@ The nested shapes of `body_variables` / `header_config` / `button_configs` are v
 ### Example
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/templates/1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60718/send" \
+curl -X POST "https://app.otok.io/api/v1/templates/1f2e3d4c-5b6a-7980-a1b2-c3d4e5f60718/send" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{

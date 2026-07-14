@@ -4,9 +4,9 @@ export interface HttpClientOptions {
   /** API key (`otok_live_…`), sent as `Authorization: Bearer <key>`. */
   apiKey: string;
   /**
-   * Base URL of the oToK API, **including** the `/api` path segment,
-   * e.g. `https://app.otok.io/api` or `https://your-otok-host/api`.
-   * Endpoint paths (`/v1/...`) are appended to it.
+   * Base URL of the oToK API, **including** the `/api` path segment.
+   * Defaults to `https://app.otok.io/api` — you normally don't need to set
+   * this. Endpoint paths (`/v1/...`) are appended to it.
    */
   baseUrl?: string;
   /** Per-attempt request timeout in milliseconds. Default 30 000. */

@@ -5,15 +5,13 @@ The oToK REST API lets you manage contacts, tags, groups, campaigns, deals, paym
 ## Base URL
 
 ```
-https://<your-host>/api/v1/
+https://app.otok.io/api/v1/
 ```
-
-Replace `<your-host>` with the host your oToK workspace runs on.
 
 Interactive API documentation (Swagger UI) is served at:
 
 ```
-https://<your-host>/api/v1/docs
+https://app.otok.io/api/v1/docs
 ```
 
 ## Creating an API key
@@ -57,7 +55,7 @@ A revoked key is indistinguishable from an unknown key — both return `401 "Inv
 ## First request
 
 ```bash
-curl "https://<your-host>/api/v1/contacts?limit=5" \
+curl "https://app.otok.io/api/v1/contacts?limit=5" \
   -H "Authorization: Bearer otok_live_abc123..."
 ```
 
@@ -166,7 +164,7 @@ The `filter` object supports:
 Example — contacts in a group, subscribed to email:
 
 ```bash
-curl -G "https://<your-host>/api/v1/contacts" \
+curl -G "https://app.otok.io/api/v1/contacts" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'filter={"$jsonb_contains":{"groups":["7f6e5d4c-0000-0000-0000-000000000002"]},"email_subscribed":true}'
 ```
@@ -190,7 +188,7 @@ See [Deals](deals.md) and [Payments](payments.md).
 
 ## CORS and calling context
 
-The API is designed for **server-to-server** use. If you self-host oToK and call the API from server-side code (curl, backend jobs), make sure your deployment's CORS allowlist admits origin-less requests (include the literal token `(none)` in the allowed-origins configuration). Browser-based calls from arbitrary origins are rejected by CORS.
+The API is designed for **server-to-server** use. Call it from backend code (curl, server jobs) — origin-less requests are accepted. Browser-based calls from arbitrary origins are rejected by CORS; never embed an API key in client-side code.
 
 ## Request logging
 

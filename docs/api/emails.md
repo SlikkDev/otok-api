@@ -82,7 +82,7 @@ Open/click events are delivered via the opt-in `email.opened` / `email.clicked` 
 ## Example
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/emails" \
+curl -X POST "https://app.otok.io/api/v1/emails" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{

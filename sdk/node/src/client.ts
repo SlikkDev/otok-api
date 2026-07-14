@@ -23,7 +23,6 @@ export type OtokClientOptions = HttpClientOptions;
  * ```ts
  * const otok = new OtokClient({
  *   apiKey: process.env.OTOK_API_KEY!,          // "otok_live_…"
- *   baseUrl: "https://your-otok-host/api",      // include the /api segment
  * });
  * const contact = await otok.contacts.upsert({ email: "jane@example.com" });
  * ```
