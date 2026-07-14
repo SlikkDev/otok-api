@@ -36,7 +36,7 @@ Standard [list conventions](getting-started.md#list-conventions) apply (`filter`
 `search` matches `name`, `first_name`, `last_name`, `email`, `phone`, `company_name` (case-insensitive substring), plus an exact match on the E.164-normalized form of the term and the contact's historical phone/email identifiers.
 
 ```bash
-curl -G "https://<your-host>/api/v1/contacts" \
+curl -G "https://app.otok.io/api/v1/contacts" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'filter={"lifecycle_stage":"customer"}' \
   --data-urlencode 'sort=-updated_at' \
@@ -134,7 +134,7 @@ The non-identity fields of your request are parked with the merge request and ap
 ### Example
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/contacts" \
+curl -X POST "https://app.otok.io/api/v1/contacts" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -203,7 +203,7 @@ Semantics that differ from POST:
 | `id` | UUID (path) | Non-UUID → 400 |
 
 ```bash
-curl -X PATCH "https://<your-host>/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c" \
+curl -X PATCH "https://app.otok.io/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "lifecycle_stage": "customer", "tags": ["VIP"] }'
@@ -262,7 +262,7 @@ Returns a JSON **array** of all the contact's notes — this endpoint is not pag
 | `pinned` | boolean | no | `true` pins the note immediately |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c/notes" \
+curl -X POST "https://app.otok.io/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c/notes" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "body": "Asked for a demo next week", "pinned": true }'

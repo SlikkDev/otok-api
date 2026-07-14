@@ -39,7 +39,7 @@ This route uses dedicated query parameters and its own pagination defaults — s
 Ordered by `purchase_date` descending. Rows include joined `contact_name` / `contact_phone` / `contact_email`.
 
 ```bash
-curl -G "https://<your-host>/api/v1/payments" \
+curl -G "https://app.otok.io/api/v1/payments" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'type=recurring' \
   --data-urlencode 'status=active'
@@ -108,7 +108,7 @@ The response is **201 in both cases** with no created-vs-updated marker.
 ### Example
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/payments" \
+curl -X POST "https://app.otok.io/api/v1/payments" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -224,7 +224,7 @@ Sets one entry's status. The entry must belong to the payment in the URL.
 | `status` | enum | yes | `pending`, `completed`, `failed`, `refunded` |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/payments/7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d/entries/e1d2c3b4-5a6b-7c8d-9e0f-1a2b3c4d5e6f/mark" \
+curl -X POST "https://app.otok.io/api/v1/payments/7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d/entries/e1d2c3b4-5a6b-7c8d-9e0f-1a2b3c4d5e6f/mark" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "status": "completed" }'
@@ -251,7 +251,7 @@ Records a refund entry against a completed charge. All body fields optional:
 | `note` | string | ≤1000 — stored on the refund entry |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/payments/7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d/refund" \
+curl -X POST "https://app.otok.io/api/v1/payments/7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d/refund" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "amount": 100, "note": "Partial refund — unused session" }'

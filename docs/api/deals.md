@@ -19,7 +19,7 @@ All endpoints require [authentication](getting-started.md#authentication). Deals
 Returns a JSON **array** (no pagination envelope) of the workspace's pipelines, ordered by position, each with its ordered `stages`. Use this to map stage ids before creating or moving deals.
 
 ```bash
-curl "https://<your-host>/api/v1/pipelines" \
+curl "https://app.otok.io/api/v1/pipelines" \
   -H "Authorization: Bearer otok_live_abc123..."
 ```
 
@@ -70,7 +70,7 @@ This route uses dedicated query parameters (not the generic `filter`), and its o
 Results are ordered newest-first.
 
 ```bash
-curl -G "https://<your-host>/api/v1/deals" \
+curl -G "https://app.otok.io/api/v1/deals" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'status=open' \
   --data-urlencode 'pipeline_id=aa11bb22-3344-5566-7788-99aabbccddee'
@@ -139,7 +139,7 @@ The response is **201 in both cases** with no created-vs-updated marker; compare
 ### Example
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/deals" \
+curl -X POST "https://app.otok.io/api/v1/deals" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{
@@ -233,7 +233,7 @@ Move a deal to a stage (any stage in the workspace — cross-pipeline moves are 
 | `index` | integer | no | 0–100000 — position within the stage column, 0 = top. Omitted → top |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/deals/d3a1b2c4-5e6f-7081-92a3-b4c5d6e7f809/stage" \
+curl -X POST "https://app.otok.io/api/v1/deals/d3a1b2c4-5e6f-7081-92a3-b4c5d6e7f809/stage" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "stage_id": "st-2222…" }'
@@ -257,7 +257,7 @@ Set the deal's status.
 | `lost_reason` | string | no | ≤1000 — stored only when status is `lost`; cleared otherwise |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/deals/d3a1b2c4-5e6f-7081-92a3-b4c5d6e7f809/status" \
+curl -X POST "https://app.otok.io/api/v1/deals/d3a1b2c4-5e6f-7081-92a3-b4c5d6e7f809/status" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "status": "won" }'

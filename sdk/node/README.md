@@ -24,8 +24,8 @@ import { OtokClient } from "otok-node";
 
 const otok = new OtokClient({
   apiKey: process.env.OTOK_API_KEY!,
-  // Point at your oToK instance — include the /api segment:
-  baseUrl: "https://your-otok-host/api",
+  // baseUrl defaults to https://app.otok.io/api — override only if oToK
+  // support gives you a different URL (include the /api segment).
 });
 ```
 
@@ -204,7 +204,7 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 | `otok.webhookEndpoints` | `GET/POST /v1/webhook-endpoints`, `DELETE /v1/webhook-endpoints/:id` |
 | `otok.commerce` | High-level: `identifyCustomer(customer)`, `trackOrder(order)` |
 
-Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://your-otok-host/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier camelCase objects and maps them for you.
+Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier camelCase objects and maps them for you.
 
 ## Errors, timeouts, retries
 

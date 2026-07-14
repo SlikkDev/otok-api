@@ -43,7 +43,7 @@ Tag object:
 ### GET /api/v1/tags
 
 ```bash
-curl -G "https://<your-host>/api/v1/tags" \
+curl -G "https://app.otok.io/api/v1/tags" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'search=vip'
 ```
@@ -63,7 +63,7 @@ Response `200` — a tag object. `404` — `"tags with ID <id> not found"`. Non-
 | `type` | enum | no | `contact`, `conversation`, `both` (default `both`) |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/tags" \
+curl -X POST "https://app.otok.io/api/v1/tags" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "name": "VIP", "color": "#f59e0b", "type": "contact" }'
@@ -125,7 +125,7 @@ Response `200` — a group object. `404` — `"contactGroups with ID <id> not fo
 | `color` | string | no | ≤20 chars |
 
 ```bash
-curl -X POST "https://<your-host>/api/v1/contact-groups" \
+curl -X POST "https://app.otok.io/api/v1/contact-groups" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{ "name": "Beta testers", "description": "Contacts enrolled in the beta program" }'
@@ -160,7 +160,7 @@ Group membership and tag assignment are managed **through the contact endpoints*
 To list a group's members, filter contacts by group id:
 
 ```bash
-curl -G "https://<your-host>/api/v1/contacts" \
+curl -G "https://app.otok.io/api/v1/contacts" \
   -H "Authorization: Bearer otok_live_abc123..." \
   --data-urlencode 'filter={"$jsonb_contains":{"groups":["7f6e5d4c-0000-0000-0000-000000000002"]}}'
 ```

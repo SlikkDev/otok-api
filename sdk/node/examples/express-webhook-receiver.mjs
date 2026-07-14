@@ -4,7 +4,7 @@
  * Setup:
  *   1. npm install express          (example-only dependency)
  *   2. Register the endpoint once and save the whsec_… secret:
- *        const ep = await otok.webhookEndpoints.create({ url: "https://your-host/otok-events" });
+ *        const ep = await otok.webhookEndpoints.create({ url: "https://your-server.example.com/otok-events" });
  *        console.log(ep.secret);    // shown only once
  *   3. OTOK_WEBHOOK_SECRET=whsec_… node examples/express-webhook-receiver.mjs
  *
