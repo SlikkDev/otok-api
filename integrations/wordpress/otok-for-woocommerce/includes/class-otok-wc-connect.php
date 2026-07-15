@@ -9,8 +9,8 @@ defined( 'ABSPATH' ) || exit;
 
 if ( ! defined( 'OTOK_WC_PAIRING_PATH' ) ) {
 	/**
-	 * FROZEN — pairing-token exchange endpoint path (normative wire contract
-	 * §9, `docs/integrations/otok-wc-plugin-contract.md` in the oToK repo):
+	 * FROZEN — pairing-token exchange endpoint path (the normative oToK
+	 * e-commerce wire contract §9):
 	 * one-time token in, `{connection_id, signing_secret}` out (plaintext
 	 * exactly once); every failure is a uniform 404. The constant + the
 	 * `otok_wc_pairing_path` filter remain as a coordinated-version-bump

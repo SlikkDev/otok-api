@@ -2,14 +2,14 @@
 # This file is distributed under the GPL-2.0-or-later.
 msgid ""
 msgstr ""
-"Project-Id-Version: oToK for WooCommerce 0.1.0\n"
-"Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/otok-for-woocommerce\n"
+"Project-Id-Version: oToK for WooCommerce 1.0.0\n"
+"Report-Msgid-Bugs-To: we@otok.io\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"POT-Creation-Date: 2026-07-14T19:05:53+00:00\n"
+"POT-Creation-Date: 2026-07-15T22:04:02+00:00\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "X-Generator: WP-CLI 2.12.0\n"
 "X-Domain: otok-for-woocommerce\n"
@@ -310,12 +310,12 @@ msgid "Copy diagnostics"
 msgstr ""
 
 #. translators: %s: support email address link.
-#: includes/admin/views/settings-page.php:233
+#: includes/admin/views/settings-page.php:235
 #, php-format
 msgid "Need help? Email %s."
 msgstr ""
 
-#: includes/class-otok-wc-connect.php:92
+#: includes/class-otok-wc-connect.php:91
 msgid "The oToK service URL must use HTTPS."
 msgstr ""
 
@@ -323,39 +323,39 @@ msgstr ""
 msgid "Another connection attempt is already in progress. Please wait a moment and try again."
 msgstr ""
 
-#: includes/class-otok-wc-connect.php:130
+#: includes/class-otok-wc-connect.php:167
 msgid "This store is already connected to oToK. Disconnect first to connect with a new code."
 msgstr ""
 
-#: includes/class-otok-wc-connect.php:139
+#: includes/class-otok-wc-connect.php:176
 msgid "That connect code does not look valid. Paste the one-time code exactly as shown in oToK."
 msgstr ""
 
 #. translators: %s: sanitized transport error detail (e.g. timeout, DNS, or TLS message).
-#: includes/class-otok-wc-connect.php:182
+#: includes/class-otok-wc-connect.php:219
 #, php-format
 msgid "Could not reach the oToK service. Check that this server can make outbound HTTPS requests and try again. Details: %s"
 msgstr ""
 
-#: includes/class-otok-wc-connect.php:185
+#: includes/class-otok-wc-connect.php:222
 msgid "Could not reach the oToK service. Check that this server can make outbound HTTPS requests and try again."
 msgstr ""
 
-#: includes/class-otok-wc-connect.php:197
+#: includes/class-otok-wc-connect.php:234
 msgid "Too many connection attempts. Wait a minute and try again with the same code."
 msgstr ""
 
-#: includes/class-otok-wc-connect.php:204
+#: includes/class-otok-wc-connect.php:241
 msgid "oToK rejected the connect code. Codes are one-time and expire quickly — generate a fresh code in oToK and try again."
 msgstr ""
 
 #. translators: %s: sanitized error detail (HTTP status and response excerpt).
-#: includes/class-otok-wc-connect.php:216
+#: includes/class-otok-wc-connect.php:253
 #, php-format
 msgid "The oToK service returned an unexpected error. Please try again in a few minutes. Details: %s"
 msgstr ""
 
-#: includes/class-otok-wc-connect.php:234
+#: includes/class-otok-wc-connect.php:271
 msgid "The oToK service returned an unexpected response. Please try again; if it keeps failing, contact we@otok.io."
 msgstr ""
 

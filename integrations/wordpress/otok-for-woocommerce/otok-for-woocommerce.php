@@ -3,7 +3,7 @@
  * Plugin Name:          oToK for WooCommerce
  * Plugin URI:           https://otok.io/woocommerce
  * Description:          Connects your WooCommerce store to oToK — marketing consent at checkout plus cart and order events for automation flows. Talks only to the oToK service you explicitly connect.
- * Version:              0.1.0
+ * Version:              1.0.0
  * Requires at least:    6.6
  * Requires PHP:         8.1
  * Requires Plugins:     woocommerce
@@ -22,7 +22,7 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'OTOK_WC_VERSION', '0.1.0' );
+define( 'OTOK_WC_VERSION', '1.0.0' );
 define( 'OTOK_WC_PLUGIN_FILE', __FILE__ );
 define( 'OTOK_WC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'OTOK_WC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

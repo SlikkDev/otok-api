@@ -1,7 +1,6 @@
 <?php
 /**
- * Payload shape checks against the frozen wire contract
- * (docs/integrations/otok-wc-plugin-contract.md in the oToK repo):
+ * Payload shape checks against the frozen oToK e-commerce wire contract:
  * `updated_at` + `refunds[]` on order payloads, the confirmation that order
  * contacts carry NO consent fields (consent authority on the plugin path is
  * exclusively otok/consent_updated), the `cart_token` completion join key

@@ -13,9 +13,8 @@ defined( 'ABSPATH' ) || exit;
  * FROZEN SHAPES — read before editing or depending on field names
  * -----------------------------------------------------------------------
  * The envelope, topic vocabulary and every `data` payload shape below
- * conform to the NORMATIVE wire contract frozen with the oToK e-commerce
- * framework: `docs/integrations/otok-wc-plugin-contract.md` in the oToK
- * repository. Changes require a coordinated version bump on both sides.
+ * conform to the normative oToK e-commerce wire contract.
+ * Changes require a coordinated version bump on both sides.
  * ALL serializers live in this single class so a contract change is a
  * one-file diff. Do not construct wire payloads anywhere else.
  *
