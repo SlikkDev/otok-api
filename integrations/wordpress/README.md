@@ -11,9 +11,9 @@ integrations/wordpress/
 │   ├── includes/
 │   │   ├── class-otok-wc-plugin.php        # Bootstrap singleton
 │   │   ├── class-otok-wc-credentials.php   # Connection record + encrypted signing secret + site-URL snapshot
-│   │   ├── class-otok-wc-connect.php       # Pairing-code exchange client (endpoint path PROVISIONAL)
+│   │   ├── class-otok-wc-connect.php       # Pairing-token exchange client (frozen endpoint, contract §9)
 │   │   ├── class-otok-wc-consent.php       # Consent checkbox (both checkouts) + order-meta capture
-│   │   ├── class-otok-wc-payloads.php      # ALL wire payload serializers (envelope + data shapes, PROVISIONAL)
+│   │   ├── class-otok-wc-payloads.php      # ALL wire payload serializers (envelope + data shapes, frozen contract)
 │   │   ├── class-otok-wc-outbox.php        # Durable event queue table (frozen payloads, retention purges)
 │   │   ├── class-otok-wc-delivery.php      # Action Scheduler dispatcher: signing, retry/revocation policy
 │   │   ├── class-otok-wc-guest-email.php   # Guest email capture (AJAX + Store API) + strict-mode setting
@@ -92,8 +92,9 @@ Every PR body states what was verified: `php -l` on all files, PHPCS clean again
 
 ## Contract notes for contributors
 
-- The pairing-exchange endpoint path is **PROVISIONAL** — it lives behind the `OTOK_WC_PAIRING_PATH` constant + `otok_wc_pairing_path` filter in `class-otok-wc-connect.php`; when the oToK e-commerce contract freezes the path, updating it is a one-line change.
-- **All wire payloads are built in `class-otok-wc-payloads.php` and nowhere else.** The topic vocabulary is FROZEN; the envelope field names and `data` shapes are PROVISIONAL until the oToK e-commerce contract freezes the envelope — keeping every serializer in that one file makes the freeze a one-file diff.
+- **The wire contract is FROZEN and normative:** `docs/integrations/otok-wc-plugin-contract.md` in the oToK repository. The plugin and the server must both conform to it; changes require a coordinated version bump on both sides.
+- The pairing exchange is `POST /api/ecommerce/pair/woocommerce` (contract §9), body `{"token": "<one-time token>"}` — every failure is a uniform 404 (get a fresh token); per-IP throttled with a native 429 + `Retry-After` (retry the SAME token). The path lives behind the `OTOK_WC_PAIRING_PATH` constant + `otok_wc_pairing_path` filter in `class-otok-wc-connect.php` as a coordinated-version-bump seam only.
+- **All wire payloads are built in `class-otok-wc-payloads.php` and nowhere else.** The envelope, topic vocabulary and `data` shapes conform to the frozen contract — keeping every serializer in that one file makes any coordinated contract change a one-file diff. Completed orders echo the cart token they concluded (`data.cart_token`, omitted when unknown) so the server can tombstone the purchased cart in the abandoned-cart pipeline.
 - **Event producers enqueue via `Otok_WC_Plugin::instance()->delivery()->enqueue_event( $topic, $data )`** (topic = an `Otok_WC_Payloads::TOPIC_*` constant, data = the matching serializer's output). Enqueue mints `event_id` + `occurred_at` and FREEZES the payload — coalescing/debounce must happen strictly pre-enqueue; a newer snapshot after enqueue is a new event with a new `event_id`.
 - The delivery policy (backoff ladder, Retry-After, entitlement pause via 429 + `{"code":"entitlement_paused"}`, 3-consecutive-401/404 revocation, single clock-skew retry off the response Date header) is implemented in `class-otok-wc-delivery.php` and documented in its class docblock — it mirrors the frozen wire contract; do not "simplify" it.
 - One oToK connection per site; `site_url` is snapshotted at connect time and checked before EVERY dispatch run — a cloned/moved site suspends delivery until the admin explicitly reconnects or accepts the new URL.

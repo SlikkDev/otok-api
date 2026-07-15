@@ -73,9 +73,9 @@ class Otok_WC_Delivery {
 	const STATE_LOCK_TIMEOUT = 2;
 
 	/**
-	 * PROVISIONAL — ingest endpoint path prefix (the connection id is
-	 * appended). Route shape is stable per the oToK e-commerce contract; isolated
-	 * here so a freeze-time change is one line.
+	 * FROZEN — ingest endpoint path prefix (the connection id is appended).
+	 * Normative wire contract §1, `docs/integrations/otok-wc-plugin-contract.md`
+	 * in the oToK repo; isolated here so a coordinated version bump is one line.
 	 */
 	const ENDPOINT_PATH = '/api/ecommerce/webhooks/woocommerce/';
 

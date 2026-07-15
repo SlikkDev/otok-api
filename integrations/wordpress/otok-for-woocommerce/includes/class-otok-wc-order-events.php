@@ -294,7 +294,8 @@ class Otok_WC_Order_Events {
 					'email'          => $email,
 					'phone'          => (string) $order->get_billing_phone(),
 					// Billing country: canonicalization input for the phone
-					// (E.164-or-omit contract) — never emitted itself.
+					// (E.164-or-omit contract) AND emitted as the optional
+					// `billing.country` enrichment (contract §4/§7).
 					'country'        => (string) $order->get_billing_country(),
 					'first_name'     => (string) $order->get_billing_first_name(),
 					'last_name'      => (string) $order->get_billing_last_name(),
@@ -346,6 +347,8 @@ class Otok_WC_Order_Events {
 			$product = is_callable( array( $item, 'get_product' ) ) ? $item->get_product() : null;
 
 			$items[] = array(
+				// The stable Woo order-item id — the wire `external_id`.
+				'external_id'   => is_callable( array( $item, 'get_id' ) ) ? (string) $item->get_id() : '',
 				'product_id'    => $item->get_variation_id() ? $item->get_variation_id() : $item->get_product_id(),
 				// 'edit' context: a variation's get_sku('view') INHERITS the
 				// parent SKU, which would collapse distinct variations onto

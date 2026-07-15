@@ -372,7 +372,7 @@ class Otok_WC_Cart_Events {
 		$cart  = WC()->cart;
 		$items = array();
 
-		foreach ( (array) $cart->get_cart() as $cart_item ) {
+		foreach ( (array) $cart->get_cart() as $cart_item_key => $cart_item ) {
 			if ( ! is_array( $cart_item ) ) {
 				continue;
 			}
@@ -381,6 +381,8 @@ class Otok_WC_Cart_Events {
 			$product = ( isset( $cart_item['data'] ) && is_object( $cart_item['data'] ) ) ? $cart_item['data'] : null;
 
 			$items[] = array(
+				// The stable Woo cart-item key — the wire `external_id`.
+				'external_id'   => (string) $cart_item_key,
 				'product_id'    => ! empty( $cart_item['variation_id'] ) ? $cart_item['variation_id'] : ( isset( $cart_item['product_id'] ) ? $cart_item['product_id'] : 0 ),
 				// 'edit' context: a variation's get_sku('view') INHERITS the
 				// parent SKU (see the order producer note).

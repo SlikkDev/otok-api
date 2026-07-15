@@ -1,10 +1,14 @@
 <?php
 /**
- * Order-payload shape check — executable check for the wire-contract
- * additions (oToK e-commerce contract addendum 2026-07-14): `updated_at` and
- * `refunds[]` on order payloads, and the frozen confirmation that order
+ * Payload shape checks against the frozen wire contract
+ * (docs/integrations/otok-wc-plugin-contract.md in the oToK repo):
+ * `updated_at` + `refunds[]` on order payloads, the confirmation that order
  * contacts carry NO consent fields (consent authority on the plugin path is
- * exclusively otok/consent_updated).
+ * exclusively otok/consent_updated), the `cart_token` completion join key
+ * (present when the order concluded a tracked cart, omitted entirely when
+ * unknown), the consent payload's optional `billing.country` enrichment,
+ * the cart payload's normative top-level `total` + `currency`, and the
+ * shared line-item `external_id`.
  *
  * Shims the minimal WP surface Otok_WC_Payloads touches, same pattern as
  * check-phone-matrix.php.
@@ -121,6 +125,95 @@ foreach ( $consent_fields as $field ) {
 	check( "order contact carries no {$field}", ! array_key_exists( $field, $contact ) );
 }
 check( 'order contact fields are identity-only', array() === array_diff( array_keys( $contact ), array( 'email', 'phone', 'first_name', 'last_name' ) ) );
+
+// cart_token (contract §6): the completion join key — present verbatim when
+// the order concluded a tracked cart, OMITTED ENTIRELY when unknown
+// (admin-created orders, untracked carts). Never null, never ''.
+$payload = Otok_WC_Payloads::order( $base );
+check( 'cart_token omitted when unknown', ! array_key_exists( 'cart_token', $payload ) );
+
+$with_token               = $base;
+$with_token['cart_token'] = '11111111-1111-4111-8111-111111111111';
+
+$payload = Otok_WC_Payloads::order( $with_token );
+check( 'cart_token carried verbatim', '11111111-1111-4111-8111-111111111111' === ( isset( $payload['cart_token'] ) ? $payload['cart_token'] : null ) );
+
+$with_empty_token               = $base;
+$with_empty_token['cart_token'] = '';
+
+$payload = Otok_WC_Payloads::order( $with_empty_token );
+check( 'empty cart_token omitted, not sent blank', ! array_key_exists( 'cart_token', $payload ) );
+
+// Line items (contract §5/§6 shared shape): `external_id` = the stable
+// line-item id, carried when the producer supplies one.
+check( 'item external_id absent when producer has none', ! array_key_exists( 'external_id', $payload['items'][0] ) );
+
+$with_item_id                            = $base;
+$with_item_id['items'][0]['external_id'] = 88;
+
+$payload = Otok_WC_Payloads::order( $with_item_id );
+check( 'item external_id stringified', '88' === ( isset( $payload['items'][0]['external_id'] ) ? $payload['items'][0]['external_id'] : null ) );
+check( 'item external_product_id preserved alongside', '7' === $payload['items'][0]['external_product_id'] );
+
+// Consent payload (contract §4/§7): the billing country rides the optional
+// `billing` enrichment object as `billing.country` (server-side
+// belt-and-suspenders for phone canonicalization); omitted entirely when the
+// country is unknown or not alpha-2. E.164-or-omit for `phone` is unchanged.
+$consent_base = array(
+	'email'          => 'shopper@example.test',
+	'phone'          => '+972501234567',
+	'consent'        => 'granted',
+	'consent_source' => 'checkout_checkbox',
+	'consented_at'   => '2026-07-14T10:00:00+00:00',
+);
+
+$consent = Otok_WC_Payloads::consent_updated( $consent_base );
+check( 'consent billing omitted without country', ! array_key_exists( 'billing', $consent ) );
+check( 'consent E.164 phone kept without country', '+972501234567' === ( isset( $consent['phone'] ) ? $consent['phone'] : null ) );
+
+$consent = Otok_WC_Payloads::consent_updated( array_merge( $consent_base, array( 'country' => 'IL' ) ) );
+check( 'consent billing.country emitted', array( 'country' => 'IL' ) === ( isset( $consent['billing'] ) ? $consent['billing'] : null ) );
+
+$consent = Otok_WC_Payloads::consent_updated( array_merge( $consent_base, array( 'country' => 'il' ) ) );
+check( 'consent billing.country uppercased', array( 'country' => 'IL' ) === ( isset( $consent['billing'] ) ? $consent['billing'] : null ) );
+
+$consent = Otok_WC_Payloads::consent_updated( array_merge( $consent_base, array( 'country' => 'ISR' ) ) );
+check( 'consent billing omitted for non-alpha-2 country', ! array_key_exists( 'billing', $consent ) );
+
+// Cart payload (contract §5): normative top-level `total` + `currency`
+// (decimal string / upper-case ISO 4217); the `totals` breakdown rides along
+// as a tolerated extra and must agree with the top-level values.
+$cart = Otok_WC_Payloads::cart(
+	array(
+		'cart_token'   => '22222222-2222-4222-8222-222222222222',
+		'contact'      => array( 'email' => 'shopper@example.test' ),
+		'items'        => array(
+			array(
+				'external_id' => 'ci_key_1',
+				'product_id'  => 7,
+				'sku'         => 'SKU-7',
+				'title'       => 'Widget',
+				'qty'         => 2,
+				'unit_price'  => 5.0,
+			),
+		),
+		'totals'       => array(
+			'subtotal' => 10,
+			'discount' => 0,
+			'shipping' => 0,
+			'tax'      => 1.7,
+			'total'    => 11.7,
+		),
+		'currency'     => 'ILS',
+		'recovery_url' => 'https://example.test/checkout/',
+		'updated_at'   => '2026-07-14T10:00:00+00:00',
+	)
+);
+check( 'cart top-level total is a decimal string', '11.70' === ( isset( $cart['total'] ) ? $cart['total'] : null ) );
+check( 'cart top-level currency present', 'ILS' === ( isset( $cart['currency'] ) ? $cart['currency'] : null ) );
+check( 'cart totals breakdown agrees with top-level', isset( $cart['totals']['total'], $cart['totals']['currency'] ) && $cart['totals']['total'] === $cart['total'] && $cart['totals']['currency'] === $cart['currency'] );
+check( 'cart item external_id carried', 'ci_key_1' === ( isset( $cart['items'][0]['external_id'] ) ? $cart['items'][0]['external_id'] : null ) );
+check( 'cart_token required field carried', '22222222-2222-4222-8222-222222222222' === $cart['cart_token'] );
 
 printf( "%d checks, %d failures\n", $count, $fails );
 exit( $fails > 0 ? 1 : 0 );
