@@ -91,13 +91,20 @@ class ContactsApi:
     def upsert(self, params: ContactUpsertParams) -> Contact:
         """Create OR update (upsert) a contact. Matches by phone (canonicalized
         to E.164), falling back to email. ``tags``/``groups`` are ADDED on
-        upsert.
+        upsert. The response carries ``duplicate: True`` when an existing
+        contact was matched and updated (201 either way).
         """
         return cast(Contact, self._http.request("POST", "/v1/contacts", body=params))
 
     def update(self, contact_id: str, params: ContactUpsertParams) -> Contact:
         """Update by id (404 when unknown). ``tags``/``groups`` REPLACE the
         full set.
+
+        Changing ``phone``/``email`` to an identifier that belongs (or
+        previously belonged) to another contact raises a 409 with
+        ``err.code == "CONTACT_MERGE_REQUIRED"`` and a ``merge_request_id``
+        in ``err.body``: the write is NOT applied — it is parked on a merge
+        request to resolve (merge or dismiss) in oToK.
         """
         return cast(
             Contact,
@@ -167,9 +174,13 @@ class TagsApi:
         return cast(Tag, self._http.request("GET", f"/v1/tags/{tag_id}"))
 
     def create(self, params: TagCreateParams) -> Tag:
+        """Create a tag. A name that already exists in the workspace
+        (case-insensitive) raises a 409.
+        """
         return cast(Tag, self._http.request("POST", "/v1/tags", body=params))
 
     def update(self, tag_id: str, params: TagUpdateParams) -> Tag:
+        """Update a tag. Renaming to an existing name raises a 409."""
         return cast(Tag, self._http.request("PATCH", f"/v1/tags/{tag_id}", body=params))
 
 
@@ -190,9 +201,13 @@ class ContactGroupsApi:
         return cast(ContactGroup, self._http.request("GET", f"/v1/contact-groups/{group_id}"))
 
     def create(self, params: ContactGroupCreateParams) -> ContactGroup:
+        """Create a contact group. A name that already exists in the
+        workspace (case-insensitive) raises a 409.
+        """
         return cast(ContactGroup, self._http.request("POST", "/v1/contact-groups", body=params))
 
     def update(self, group_id: str, params: ContactGroupUpdateParams) -> ContactGroup:
+        """Update a contact group. Renaming to an existing name raises a 409."""
         return cast(
             ContactGroup,
             self._http.request("PATCH", f"/v1/contact-groups/{group_id}", body=params),
@@ -203,6 +218,10 @@ class ContactGroupsApi:
 
 
 class PipelinesApi:
+    """Requires the Deals feature on the workspace's plan — without it every
+    call raises a 403 with ``err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
@@ -212,6 +231,10 @@ class PipelinesApi:
 
 
 class DealsApi:
+    """Requires the Deals feature on the workspace's plan — without it every
+    call raises a 403 with ``err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
@@ -227,7 +250,8 @@ class DealsApi:
     def create(self, params: DealCreateParams) -> Deal:
         """Create a deal. Idempotent when ``external_reference`` is set: a
         repeat POST with the same reference updates that deal instead of
-        creating a duplicate.
+        creating a duplicate — the response then carries ``duplicate: True``
+        (201 either way).
         """
         return cast(Deal, self._http.request("POST", "/v1/deals", body=params))
 
@@ -289,6 +313,11 @@ class WebhookEndpointsApi:
 
 
 class CampaignsApi:
+    """Requires the Campaigns feature on the workspace's plan — without it
+    every call raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
@@ -311,9 +340,13 @@ class CampaignsApi:
         )
 
     def execute(self, campaign_id: str) -> dict[str, Any]:
-        """Enqueue a campaign for background execution. The campaign must be
-        in "scheduled" status; otherwise ``{"success": False}`` is returned
-        (this endpoint reports failures in the body, not the status code).
+        """Enqueue a campaign for background execution. Success answers 200
+        with ``{"success": True, "message": …, "jobId": …}``. Failures raise
+        ``OtokAPIError``: 404 (``code="campaign_not_found"``) for an unknown
+        id, 409 (``code="campaign_not_scheduled"``) when the campaign is not
+        in "scheduled" status. Campaigns created without an explicit
+        ``status`` default to "draft" — set ``status: "scheduled"`` (on
+        create or via ``update``) before executing.
         """
         return cast(
             dict[str, Any],
@@ -352,6 +385,11 @@ class TemplatesApi:
 
 
 class PaymentsApi:
+    """Requires the Payments feature on the workspace's plan — without it
+    every call raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
@@ -366,7 +404,10 @@ class PaymentsApi:
         return cast(Payment, self._http.request("GET", f"/v1/payments/{payment_id}"))
 
     def create(self, params: PaymentCreateParams) -> Payment:
-        """Create a payment (idempotent upsert via ``external_reference``)."""
+        """Create a payment (idempotent upsert via ``external_reference`` —
+        a match updates that payment's mutable fields and the response
+        carries ``duplicate: True``; 201 either way).
+        """
         return cast(Payment, self._http.request("POST", "/v1/payments", body=params))
 
     def update(self, payment_id: str, params: PaymentUpdateParams) -> Payment:
@@ -406,6 +447,11 @@ class PaymentsApi:
 
 
 class MeetingTypesApi:
+    """Requires the Booking feature on the workspace's plan — without it
+    every call raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
@@ -434,6 +480,11 @@ class MeetingTypesApi:
 
 
 class BookingsApi:
+    """Requires the Booking feature on the workspace's plan — without it
+    every call raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
     def __init__(self, http: HttpClient) -> None:
         self._http = http
 
@@ -447,7 +498,10 @@ class BookingsApi:
         return cast(Booking, self._http.request("GET", f"/v1/bookings/{booking_id}"))
 
     def create(self, params: BookingCreateParams) -> Booking:
-        """Book a slot server-to-server. A taken slot raises 409 SLOT_TAKEN."""
+        """Book a slot server-to-server. A taken slot raises 409 SLOT_TAKEN.
+        A double-submit of the same slot/invitee returns the original
+        booking with ``duplicate: True`` (201 either way).
+        """
         return cast(Booking, self._http.request("POST", "/v1/bookings", body=params))
 
     def cancel(self, booking_id: str, reason: Optional[str] = None) -> Booking:

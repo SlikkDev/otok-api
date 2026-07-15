@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see table below). Must be non-empty when present. **Omitted → the four delivery events only** (`email.delivered`, `email.bounced`, `email.complained`, `email.failed`) — the engagement events `email.opened`/`email.clicked` are received only when explicitly listed |
+| `events` | string[] | no | Event types to receive (see table below). Must be non-empty when present. **Omitted → the three delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — the engagement events `email.opened`/`email.clicked` are received only when explicitly listed. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -60,7 +60,7 @@ Response `200`:
 ```json
 {
   "data": [
-    { "id": "c9b8a7d6-…", "url": "https://hooks.example.com/otok-email", "events": ["email.delivered", "email.bounced", "email.complained", "email.failed"], "is_active": true, "created_at": "2026-07-14T10:00:00.000Z" }
+    { "id": "c9b8a7d6-…", "url": "https://hooks.example.com/otok-email", "events": ["email.delivered", "email.bounced", "email.complained"], "is_active": true, "created_at": "2026-07-14T10:00:00.000Z" }
   ]
 }
 ```
@@ -84,7 +84,7 @@ Response **204**, no body. Deliveries stop immediately; anything still queued fo
 | `email.delivered` | default | The provider confirmed delivery of an API send |
 | `email.bounced` | default | The send bounced. `data.bounce_type` is included when known: `hard`, `soft`, or `block` |
 | `email.complained` | default | The recipient marked the message as spam (feedback loop) |
-| `email.failed` | default | **Reserved for future use — not currently emitted.** Subscriptions are accepted so existing registrations keep working when it ships; today a provider-rejected API send surfaces synchronously as the sender's `502 provider_error` instead |
+| `email.failed` | **deprecated** — accepted, never fires | **Deprecated — never delivered; nothing produces this event.** It is no longer part of the default set. Listing it explicitly at registration still succeeds (no error, no warning; it is echoed in `events`) so existing integrations keep working, but no delivery will ever arrive. A failing `POST /v1/emails` send fails synchronously on the request itself (e.g. `502 provider_error`, `409 send_in_progress`) — handle send failures from the send response, not from webhooks |
 | `email.opened` | **opt-in** | **First open only** — at most one per send, for sends with `tracking.opens`. `data.machine_open` is always present: `true` means the open was attributed to an automated mail scanner / prefetcher (e.g. Apple Mail privacy) rather than a human. Machine opens are forwarded flagged, never dropped |
 | `email.clicked` | **opt-in** | **First click only** — at most one per send, for sends with `tracking.clicks`. `data.url` is always present: the original destination URL (may be an empty string in rare cases). Clicks carry no machine flag |
 

@@ -30,6 +30,11 @@ class ListParams(TypedDict, total=False):
     """Shared list query params (contacts, tags, contact-groups, campaigns,
     templates, meeting-types). ``filter`` is a JSON object of exact-match
     field filters, e.g. ``{"lifecycle_stage": "lead"}``.
+
+    Filter values are type-checked against the target field: a mistyped
+    value (bad date, UUID, enum, number, or boolean) raises a 400 with a
+    descriptive message, e.g.
+    ``Invalid filter value for "created_at": "not-a-date" is not a date``.
     """
 
     filter: dict[str, Any]
@@ -112,6 +117,9 @@ class ContactUpsertParams(TypedDict, total=False):
 
 
 #: Contact record as returned by the API (open — servers may add fields).
+#: ``POST /v1/contacts`` responses additionally carry a top-level
+#: ``duplicate: bool`` — ``True`` when the upsert matched (and updated) an
+#: existing contact instead of creating one (201 either way).
 Contact = dict[str, Any]
 
 #: Contact note record (``GET /v1/contacts/:id/notes`` et al.).
@@ -173,7 +181,8 @@ class DealCreateParams(TypedDict, total=False):
     matching contact is used, or created — ``name`` applies only on create).
     A repeat POST with the same ``external_reference`` updates that deal's
     mutable fields (and moves it when ``stage_id`` differs) instead of
-    creating a duplicate; status is never changed on a match.
+    creating a duplicate; status is never changed on a match. The response
+    carries ``duplicate: true`` when an existing deal was matched.
     """
 
     contact_id: str
@@ -248,6 +257,10 @@ class DealListParams(TypedDict, total=False):
     offset: int
 
 
+#: Deal record as returned by the API (open — servers may add fields).
+#: ``POST /v1/deals`` responses additionally carry a top-level
+#: ``duplicate: bool`` — ``True`` when ``external_reference`` matched an
+#: existing deal that was updated instead (201 either way).
 Deal = dict[str, Any]
 
 # ─────────────────────────── Transactional email ───────────────────────────
@@ -319,6 +332,10 @@ EmailWebhookEventType = Literal[
     "email.clicked",
 ]
 
+#: Every event type accepted at registration. ``email.failed`` is DEPRECATED:
+#: still accepted in ``events`` for backward compatibility, but never
+#: delivered — a failing ``POST /v1/emails`` fails synchronously on the
+#: request itself, so there is no asynchronous failure callback.
 EMAIL_WEBHOOK_EVENT_TYPES: tuple[EmailWebhookEventType, ...] = (
     "email.delivered",
     "email.bounced",
@@ -326,6 +343,14 @@ EMAIL_WEBHOOK_EVENT_TYPES: tuple[EmailWebhookEventType, ...] = (
     "email.failed",
     "email.opened",
     "email.clicked",
+)
+
+#: The server-side default subscription when ``events`` is omitted at
+#: registration: the three delivery events.
+DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES: tuple[EmailWebhookEventType, ...] = (
+    "email.delivered",
+    "email.bounced",
+    "email.complained",
 )
 
 
@@ -336,9 +361,11 @@ class _WebhookEndpointCreateRequired(TypedDict):
 class WebhookEndpointCreateParams(_WebhookEndpointCreateRequired, total=False):
     """``POST /v1/webhook-endpoints`` (max 3 per workspace).
 
-    ``events`` defaults to the four delivery events; the engagement types
+    ``events`` defaults to the three delivery events (``email.delivered``,
+    ``email.bounced``, ``email.complained``); the engagement types
     (``email.opened``, ``email.clicked``) must be listed explicitly. An
-    empty list is rejected.
+    empty list is rejected. ``email.failed`` is deprecated — accepted at
+    registration, but it never fires.
     """
 
     events: list[EmailWebhookEventType]
@@ -410,6 +437,12 @@ class EmailComplainedEvent(TypedDict):
 
 
 class EmailFailedEvent(TypedDict):
+    """DEPRECATED — never delivered. Subscriptions to ``email.failed`` are
+    accepted at registration for backward compatibility, but nothing
+    produces this event: a failing ``POST /v1/emails`` fails synchronously
+    on the request itself. Handle send failures from that response.
+    """
+
     id: str
     type: Literal["email.failed"]
     created_at: str
@@ -551,7 +584,8 @@ class _PaymentCreateRequired(TypedDict):
 class PaymentCreateParams(_PaymentCreateRequired, total=False):
     """``POST /v1/payments`` — idempotent upsert via ``external_reference``
     (a repeat POST updates that payment's mutable fields; the type/schedule
-    is never restructured on a match). Contact resolution as in deals.
+    is never restructured on a match — the response then carries
+    ``duplicate: true``). Contact resolution as in deals.
     """
 
     contact_id: str
@@ -617,6 +651,10 @@ class PaymentRefundParams(TypedDict, total=False):
     note: str
 
 
+#: Payment record as returned by the API (open — servers may add fields).
+#: ``POST /v1/payments`` responses additionally carry a top-level
+#: ``duplicate: bool`` — ``True`` when ``external_reference`` matched an
+#: existing payment that was updated instead (201 either way).
 Payment = dict[str, Any]
 
 # ─────────────────────────── Bookings ───────────────────────────
@@ -689,6 +727,10 @@ class BookingReassignParams(TypedDict, total=False):
     force: bool
 
 
+#: Booking record as returned by the API (open — servers may add fields).
+#: ``POST /v1/bookings`` responses additionally carry a top-level
+#: ``duplicate: bool`` — ``True`` when a double-submit of the same
+#: slot/invitee returned the original booking (201 either way).
 Booking = dict[str, Any]
 MeetingType = dict[str, Any]
 

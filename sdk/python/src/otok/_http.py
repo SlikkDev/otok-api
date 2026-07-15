@@ -308,9 +308,15 @@ def _to_api_error(response: TransportResponse) -> OtokAPIError:
                 code = error["code"]
             if isinstance(error.get("message"), str):
                 message = error["message"]
-        elif isinstance(body.get("message"), str):
-            # Framework shape: { "statusCode", "message", "error" }
-            message = body["message"]
-        elif isinstance(body.get("message"), list):
-            message = "; ".join(str(item) for item in body["message"])
+        else:
+            # Standard shape: { "statusCode"?, "message", "error"? } — some
+            # carry a machine-readable top-level error_code
+            # (FEATURE_NOT_INCLUDED_IN_PLAN, CONTACT_MERGE_REQUIRED) plus
+            # extra fields (e.g. merge_request_id), all kept on `body`.
+            if isinstance(body.get("message"), str):
+                message = body["message"]
+            elif isinstance(body.get("message"), list):
+                message = "; ".join(str(item) for item in body["message"])
+            if isinstance(body.get("error_code"), str):
+                code = body["error_code"]
     return OtokAPIError(response.status, message, code=code, body=body)

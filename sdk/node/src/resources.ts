@@ -2,19 +2,23 @@ import type { HttpClient, QueryValue } from "./http";
 import type {
   Booking,
   BookingCreateParams,
+  BookingCreateResult,
   BookingListParams,
   BookingReassignParams,
   BookingRescheduleParams,
   Campaign,
   CampaignCreateParams,
+  CampaignExecuteResult,
   CampaignUpdateParams,
   Contact,
   ContactGroup,
   ContactGroupCreateParams,
   ContactGroupUpdateParams,
   ContactUpsertParams,
+  ContactUpsertResult,
   Deal,
   DealCreateParams,
+  DealCreateResult,
   DealListParams,
   DealMoveStageParams,
   DealSetStatusParams,
@@ -27,6 +31,7 @@ import type {
   Paginated,
   Payment,
   PaymentCreateParams,
+  PaymentCreateResult,
   PaymentEntryStatus,
   PaymentListParams,
   PaymentRefundParams,
@@ -69,12 +74,22 @@ export class ContactsApi {
   /**
    * Create OR update (upsert) a contact. Matches by phone (canonicalized to
    * E.164), falling back to email. `tags`/`groups` are ADDED on upsert.
+   * Both outcomes return 201 — `duplicate` on the result is `true` when an
+   * existing contact was matched and updated.
    */
-  upsert(params: ContactUpsertParams): Promise<Contact> {
+  upsert(params: ContactUpsertParams): Promise<ContactUpsertResult> {
     return this.http.request("POST", "/v1/contacts", { body: params });
   }
 
-  /** Update by id (404 when unknown). `tags`/`groups` REPLACE the full set. */
+  /**
+   * Update by id (404 when unknown). `tags`/`groups` REPLACE the full set.
+   *
+   * Setting `phone`/`email` to an identifier another contact holds (or
+   * previously held) throws 409 `CONTACT_MERGE_REQUIRED` and the write is
+   * NOT applied — a merge request is parked for review in oToK instead. Its
+   * id is on the error body (`merge_request_id`), and non-identity fields
+   * from the same call are applied when the request is resolved.
+   */
   update(id: string, params: ContactUpsertParams): Promise<Contact> {
     return this.http.request("PATCH", `/v1/contacts/${id}`, { body: params });
   }
@@ -93,10 +108,12 @@ export class TagsApi {
     return this.http.request("GET", `/v1/tags/${id}`);
   }
 
+  /** A name that already exists in the workspace (case-insensitive) throws 409. */
   create(params: TagCreateParams): Promise<Tag> {
     return this.http.request("POST", "/v1/tags", { body: params });
   }
 
+  /** Renaming to a name that already exists (case-insensitive) throws 409. */
   update(id: string, params: TagUpdateParams): Promise<Tag> {
     return this.http.request("PATCH", `/v1/tags/${id}`, { body: params });
   }
@@ -117,10 +134,12 @@ export class ContactGroupsApi {
     return this.http.request("GET", `/v1/contact-groups/${id}`);
   }
 
+  /** A name that already exists in the workspace (case-insensitive) throws 409. */
   create(params: ContactGroupCreateParams): Promise<ContactGroup> {
     return this.http.request("POST", "/v1/contact-groups", { body: params });
   }
 
+  /** Renaming to a name that already exists (case-insensitive) throws 409. */
   update(id: string, params: ContactGroupUpdateParams): Promise<ContactGroup> {
     return this.http.request("PATCH", `/v1/contact-groups/${id}`, {
       body: params,
@@ -130,6 +149,10 @@ export class ContactGroupsApi {
 
 // ─────────────────────────── Pipelines / deals ───────────────────────────
 
+/**
+ * Requires the Deals feature on the workspace's plan — every route throws
+ * 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
 export class PipelinesApi {
   constructor(private readonly http: HttpClient) {}
 
@@ -139,6 +162,10 @@ export class PipelinesApi {
   }
 }
 
+/**
+ * Requires the Deals feature on the workspace's plan — every route throws
+ * 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
 export class DealsApi {
   constructor(private readonly http: HttpClient) {}
 
@@ -154,9 +181,11 @@ export class DealsApi {
 
   /**
    * Create a deal. Idempotent when `external_reference` is set: a repeat POST
-   * with the same reference updates that deal instead of creating a duplicate.
+   * with the same reference updates that deal instead of creating a duplicate
+   * — the result then carries `duplicate: true` (status is never changed on
+   * a match).
    */
-  create(params: DealCreateParams): Promise<Deal> {
+  create(params: DealCreateParams): Promise<DealCreateResult> {
     return this.http.request("POST", "/v1/deals", { body: params });
   }
 
@@ -216,6 +245,10 @@ export class WebhookEndpointsApi {
 
 // ─────────────────────────── Campaigns ───────────────────────────
 
+/**
+ * Requires the Campaigns feature on the workspace's plan — every route
+ * throws 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
 export class CampaignsApi {
   constructor(private readonly http: HttpClient) {}
 
@@ -238,10 +271,13 @@ export class CampaignsApi {
   }
 
   /**
-   * Enqueue a campaign for background execution. The campaign must be in
-   * "scheduled" status; otherwise `{ success: false }` is returned.
+   * Enqueue a campaign for background execution — resolves (HTTP 200) only
+   * when the campaign was queued. Failures throw OtokApiError: 404
+   * `campaign_not_found` (unknown id) or 409 `campaign_not_scheduled` (only
+   * "scheduled" campaigns can be executed; campaigns are created as "draft"
+   * unless `status: "scheduled"` is set on create or via update).
    */
-  execute(id: string): Promise<{ success: boolean } & Record<string, unknown>> {
+  execute(id: string): Promise<CampaignExecuteResult> {
     return this.http.request("POST", `/v1/campaigns/${id}/execute`);
   }
 }
@@ -277,6 +313,10 @@ export class TemplatesApi {
 
 // ─────────────────────────── Payments ───────────────────────────
 
+/**
+ * Requires the Payments feature on the workspace's plan — every route
+ * throws 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
 export class PaymentsApi {
   constructor(private readonly http: HttpClient) {}
 
@@ -289,8 +329,12 @@ export class PaymentsApi {
     return this.http.request("GET", `/v1/payments/${id}`);
   }
 
-  /** Create a payment (idempotent upsert via `external_reference`). */
-  create(params: PaymentCreateParams): Promise<Payment> {
+  /**
+   * Create a payment (idempotent upsert via `external_reference` — a repeat
+   * POST updates that payment's mutable fields and the result carries
+   * `duplicate: true`).
+   */
+  create(params: PaymentCreateParams): Promise<PaymentCreateResult> {
     return this.http.request("POST", "/v1/payments", { body: params });
   }
 
@@ -324,6 +368,10 @@ export class PaymentsApi {
 
 // ─────────────────────────── Bookings ───────────────────────────
 
+/**
+ * Requires the Booking feature on the workspace's plan — every route throws
+ * 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
 export class MeetingTypesApi {
   constructor(private readonly http: HttpClient) {}
 
@@ -345,6 +393,10 @@ export class MeetingTypesApi {
   }
 }
 
+/**
+ * Requires the Booking feature on the workspace's plan — every route throws
+ * 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
 export class BookingsApi {
   constructor(private readonly http: HttpClient) {}
 
@@ -356,8 +408,12 @@ export class BookingsApi {
     return this.http.request("GET", `/v1/bookings/${id}`);
   }
 
-  /** Book a slot server-to-server. A taken slot throws 409 SLOT_TAKEN. */
-  create(params: BookingCreateParams): Promise<Booking> {
+  /**
+   * Book a slot server-to-server. A taken slot throws 409 SLOT_TAKEN; a
+   * double-submit of the same slot/invitee returns the original booking
+   * with `duplicate: true`.
+   */
+  create(params: BookingCreateParams): Promise<BookingCreateResult> {
     return this.http.request("POST", "/v1/bookings", { body: params });
   }
 

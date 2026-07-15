@@ -4,6 +4,8 @@ Manage sales deals on your workspace's pipelines. A deal belongs to exactly one 
 
 All endpoints require [authentication](getting-started.md#authentication). Deals cannot be deleted via the API.
 
+> **Plan feature required:** every route on this page (including `GET /v1/pipelines`) requires the **Deals** feature on the workspace's plan, in addition to API access. Without it, all calls return `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/pipelines` | List pipelines with their stages |
@@ -57,15 +59,15 @@ This route uses dedicated query parameters (not the generic `filter`), and its o
 
 | Param | Type | Notes |
 |---|---|---|
-| `pipeline_id` | UUID | Exact match. **Send a valid UUID** — take the id from `GET /v1/pipelines` |
-| `stage_id` | UUID | Exact match (valid UUID only) |
+| `pipeline_id` | UUID | Exact match — take the id from `GET /v1/pipelines`. Malformed → 400 `"Invalid pipeline_id: must be a UUID"`; empty (`?pipeline_id=`) is treated as absent |
+| `stage_id` | UUID | Exact match. Malformed → 400 `"Invalid stage_id: must be a UUID"` |
 | `status` | enum | `open`, `won`, `lost` — any other value is **silently ignored** (unfiltered result) |
-| `contact_id` | UUID | Exact match (valid UUID only) |
-| `owner_user_id` | UUID | Exact match (valid UUID only) |
+| `contact_id` | UUID | Exact match. Malformed → 400 `"Invalid contact_id: must be a UUID"` |
+| `owner_user_id` | UUID | Exact match. Malformed → 400 `"Invalid owner_user_id: must be a UUID"` |
 | `external_reference` | string | Exact match — look up a deal by your idempotency reference |
 | `search` | string | Case-insensitive match over deal title + contact name/phone/email |
-| `limit` | number | Default **25**, clamped to 1–100; non-numeric values silently become 25 |
-| `offset` | number | Default 0, min 0 |
+| `limit` | integer | Default **25**, cap 100. Absent or empty defaults; malformed → 400 `"Invalid limit: must be a non-negative integer"` |
+| `offset` | integer | Default 0, min 0. Malformed → 400 `"Invalid offset: must be a non-negative integer"` |
 
 Results are ordered newest-first.
 
@@ -77,6 +79,11 @@ curl -G "https://app.otok.io/api/v1/deals" \
 ```
 
 Response `200` — `{ data, total, limit, offset }`.
+
+| Status | Meaning |
+|---|---|
+| 400 | Malformed UUID query param (`Invalid pipeline_id: must be a UUID`, …) or malformed `limit`/`offset` |
+| 403 | `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — plan lacks the Deals feature |
 
 ## GET /api/v1/deals/:id
 
@@ -134,7 +141,7 @@ A product reference is resolved in order: `product_id` → `product_sku` → `pr
 - **`status` is never touched** on a match — use `POST /v1/deals/:id/status`.
 - **`pipeline_id` is ignored** on a match (only stage moves apply).
 
-The response is **201 in both cases** with no created-vs-updated marker; compare `created_at`/`updated_at` if you need to distinguish.
+The response is **201 in both cases**, with a top-level boolean **`duplicate`** field: `false` when this request created the deal, `true` when the `external_reference` matched an existing deal (fields updated / stage moved, status untouched).
 
 ### Example
 
@@ -172,6 +179,7 @@ Response `201`:
   "contact_name": "Dana Levi",
   "contact_phone": "+972501234567",
   "contact_email": "dana@example.com",
+  "duplicate": false,
   "created_at": "2026-07-14T10:00:00.000Z",
   "updated_at": "2026-07-14T10:00:00.000Z"
 }
@@ -189,6 +197,7 @@ Response `201`:
 | 400 | `INVALID_PRODUCT` | Product reference didn't resolve in this workspace |
 | 400 | `PRODUCT_INACTIVE` | Product exists but is inactive |
 | 400 | `"Provide contact_id, or a phone/email…"` | No contact reference |
+| 403 | `FEATURE_NOT_INCLUDED_IN_PLAN` | Plan lacks the Deals feature (body has no `statusCode` field — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups)) |
 | 403 | `PLAN_LIMIT_EXCEEDED` | Deal cap reached (only applies when a cap is set on the workspace) |
 | 404 | `"Contact not found"` / `"Pipeline not found"` / `"Stage not found"` | Referenced record not in this workspace |
 | 409 | `CONTACT_MERGE_REQUIRED` | Phone and email resolve to two different contacts |

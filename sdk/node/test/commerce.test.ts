@@ -12,8 +12,13 @@ interface CapturedRequest {
   body: any;
 }
 
-/** Mock fetch that records requests and answers by path. */
-function makeMockApi() {
+/**
+ * Mock fetch that records requests and answers by path. With
+ * `replay: true` it mimics a re-run of the same order: every idempotent
+ * create matches the existing record and answers `duplicate: true`
+ * (the email replay also switches from 201 to 200, as on the wire).
+ */
+function makeMockApi({ replay = false }: { replay?: boolean } = {}) {
   const requests: CapturedRequest[] = [];
   const fetchMock = vi.fn(async (url: any, init: any) => {
     const path = new URL(String(url)).pathname;
@@ -21,16 +26,21 @@ function makeMockApi() {
     requests.push({ method: init.method, path, body });
 
     if (init.method === "POST" && path === "/api/v1/contacts") {
-      return json(200, { id: "contact-1", ...body });
+      return json(201, { id: "contact-1", duplicate: replay, ...body });
     }
     if (init.method === "POST" && path === "/api/v1/deals") {
-      return json(201, { id: "deal-1", status: "open", ...body });
+      return json(201, {
+        id: "deal-1",
+        status: "open",
+        duplicate: replay,
+        ...body,
+      });
     }
     if (init.method === "POST" && path === "/api/v1/emails") {
-      return json(201, {
+      return json(replay ? 200 : 201, {
         id: "send-1",
         status: "sent",
-        duplicate: false,
+        duplicate: replay,
         to: body.to,
         idempotency_key: body.idempotency_key,
         provider_message_id: "prov-1",
@@ -133,8 +143,11 @@ describe("commerce.trackOrder", () => {
     });
 
     expect(result.contact.id).toBe("contact-1");
+    expect(result.contact.duplicate).toBe(false);
     expect(result.deal.id).toBe("deal-1");
+    expect(result.deal.duplicate).toBe(false);
     expect(result.receipt?.id).toBe("send-1");
+    expect(result.receipt?.duplicate).toBe(false);
 
     expect(requests.map((r) => r.path)).toEqual([
       "/api/v1/contacts",
@@ -159,6 +172,22 @@ describe("commerce.trackOrder", () => {
       idempotency_key: "order:A-1001:receipt",
       metadata: { order_id: "A-1001" },
     });
+  });
+
+  it("surfaces duplicate: true on contact, deal, and receipt when replayed", async () => {
+    const { fetchMock } = makeMockApi({ replay: true });
+    const otok = makeClient(fetchMock as any);
+
+    const result = await otok.commerce.trackOrder({
+      orderId: "A-1001",
+      customer: { email: "jane@example.com", name: "Jane Doe" },
+      total: 249.9,
+      receipt: { subject: "Your order A-1001", html: "<p>Thanks!</p>" },
+    });
+
+    expect(result.contact.duplicate).toBe(true);
+    expect(result.deal.duplicate).toBe(true);
+    expect(result.receipt?.duplicate).toBe(true);
   });
 
   it("omits the title so it derives from the product when a SKU is attached", async () => {

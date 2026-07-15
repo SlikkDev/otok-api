@@ -47,7 +47,7 @@ Response `200` — `{ data, total, limit, offset }`.
 
 | Status | Meaning |
 |---|---|
-| 400 | Invalid `filter` JSON / non-object filter / invalid `limit`/`offset` |
+| 400 | Invalid `filter` JSON / non-object filter / invalid `limit`/`offset` / a mistyped filter value (`Invalid filter value for "<field>": …` — see [filter-value validation](getting-started.md#filter-value-validation)) |
 | 401 / 403 / 429 | Auth, plan, rate limit |
 
 ## GET /api/v1/contacts/:id
@@ -89,7 +89,7 @@ Every field is optional. Unknown fields → 400.
 | `industry` | string | ≤80 |
 | `company_website` | string | ≤500 |
 | `annual_revenue` | number | |
-| `employee_count` | integer | |
+| `employee_count` | integer | 0 – 2,147,483,647 |
 | `currency_preference` | string | ≤8 |
 | `address_line1` / `address_line2` | string | ≤200 each |
 | `city` / `state` / `country` | string | ≤100 each |
@@ -113,7 +113,7 @@ Every field is optional. Unknown fields → 400.
 4. Match found → **update**: scalar fields overwrite, `custom_fields` shallow-merge, and `tags`/`groups` are **added** to the existing set (never removed by this route).
 5. No match → **create**. Concurrent creates of the same identity are safe — the loser of the race is retried as an update of the winner.
 
-The response is **201 in both cases** (create and update) with the full contact object. There is no created-vs-updated marker; compare `created_at`/`updated_at` if you need to distinguish.
+The response is **201 in both cases** (create and update) with the full contact object, plus a top-level boolean **`duplicate`** field: `false` when this request created the contact, `true` when it matched and updated an existing one.
 
 ### Identity conflict — 409 `CONTACT_MERGE_REQUIRED`
 
@@ -165,6 +165,7 @@ Response `201`:
   "whatsapp_subscribed": true,
   "email_subscribed": false,
   "score_band": null,
+  "duplicate": false,
   "created_at": "2026-07-14T10:00:00.000Z",
   "updated_at": "2026-07-14T10:00:00.000Z"
 }
@@ -196,7 +197,23 @@ Semantics that differ from POST:
 - `name` and `first_name`/`last_name` stay in sync: patching only `first_name` recombines it with the stored `last_name`; patching only `name` re-splits it on the first whitespace.
 - `block_state` changes route through the consent/blocking subsystem; lifting a block re-evaluates blacklist rules, and global blocks cannot be lifted via the API.
 
-> **Changing phone/email: prefer the POST upsert.** This route does not perform identity-conflict resolution. `POST /v1/contacts` is the supported way to change a contact's phone or email — it detects when the new identifier already belongs to another contact and opens a merge request instead of failing.
+### Identity conflict — 409 `CONTACT_MERGE_REQUIRED` (PATCH)
+
+Setting `phone`/`email` to an identifier that belongs to a *different* contact does **not** apply the write. Like the POST upsert's conflict path, the API opens a merge request for the workspace to resolve in-app and responds:
+
+```json
+{
+  "statusCode": 409,
+  "error": "Conflict",
+  "error_code": "CONTACT_MERGE_REQUIRED",
+  "merge_request_id": "3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+  "message": "This change would give the contact a phone or email that already belongs to another contact. A merge request was opened — resolve it (merge or dismiss) to apply the change."
+}
+```
+
+The non-identity fields sent in the same PATCH are held on the merge request and applied when it is resolved (merge **or** dismiss).
+
+> **The conflict check is history-aware.** A PATCH that sets a phone/email no contact *currently* holds but that another contact *previously* held also parks a merge request and returns this 409 — matching the in-app editor's behavior.
 
 | Param | Type | Notes |
 |---|---|---|
@@ -216,6 +233,7 @@ Response `200` — the updated contact object.
 | 400 | validation / unknown fields / non-UUID id | |
 | 400 | `error_code: "PHONE_BLACKLISTED"` | Only when the patch *changes* the phone to a blacklisted number |
 | 404 | `"Contact <id> not found"` | Unknown in this workspace |
+| 409 | `error_code: "CONTACT_MERGE_REQUIRED"` | The new phone/email belongs (or previously belonged) to another contact — see above |
 
 ---
 

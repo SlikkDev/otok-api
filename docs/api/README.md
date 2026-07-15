@@ -4,7 +4,7 @@ The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts,
 
 - **Base URL:** `https://app.otok.io/api/v1/`
 - **Auth:** `Authorization: Bearer otok_live_…` API keys (created in Settings → Developers)
-- **Plan:** requires a plan with API access (Growth or higher)
+- **Plan:** requires a plan with API access (Growth or higher); deals/pipelines, payments, campaigns, and bookings/meeting-types additionally require the matching plan feature — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups)
 - **Interactive docs:** Swagger UI at `https://app.otok.io/api/v1/docs`
 
 Start with **[Getting Started](getting-started.md)** — authentication, error envelopes, rate limits, and list/filter conventions shared by all endpoints.
@@ -44,8 +44,9 @@ Start with **[Getting Started](getting-started.md)** — authentication, error e
 
 ## Conventions at a glance
 
-- **Success codes:** `GET`/`PATCH` → 200; `POST` → 201 (including action routes); `DELETE /v1/webhook-endpoints/:id` → 204. `POST /v1/emails` returns 200 on an idempotent replay.
-- **Errors:** two body shapes — a structured `{"error": {"code", "message"}}` envelope on the email/webhook APIs, and the standard `{"statusCode", "message", "error"}` shape elsewhere, sometimes extended with an `error_code` field. See [error responses](getting-started.md#error-responses).
-- **Pagination:** `{ "data", "total", "limit", "offset" }` — default limit 50 (cap 500) on most lists; deals and payments use default 25 (cap 100) with silent clamping.
+- **Success codes:** `GET`/`PATCH` → 200; `POST` → 201 (including action routes); `POST /v1/campaigns/:id/execute` → 200; `DELETE /v1/webhook-endpoints/:id` → 204. `POST /v1/emails` returns 200 on an idempotent replay.
+- **Errors:** two body shapes — a structured `{"error": {"code", "message"}}` envelope on the email/webhook APIs (and the campaign execute route), and the standard `{"statusCode", "message", "error"}` shape elsewhere, sometimes extended with an `error_code` field. See [error responses](getting-started.md#error-responses).
+- **Pagination:** `{ "data", "total", "limit", "offset" }` — default limit 50 (cap 500) on most lists; deals and payments use default 25 (cap 100) and reject malformed `limit`/`offset` with 400.
 - **Rate limits:** 100 requests/min per key (300/min for `POST /v1/emails`); HTTP 429 with `Retry-After` on excess.
-- **Idempotency:** contacts upsert by phone/email; deals and payments upsert by `external_reference`; emails require an explicit `idempotency_key`; booking creation is idempotent per slot+contact.
+- **Idempotency:** contacts upsert by phone/email; deals and payments upsert by `external_reference`; emails require an explicit `idempotency_key`; booking creation is idempotent per slot+contact. Idempotent create responses carry a top-level boolean `duplicate` (`false` on a fresh create, `true` on an upsert/replay).
+- **Deletion:** the API never deletes customer data — contacts, deals, payments, campaigns, tags, and contact groups have no DELETE routes. Only API-owned resources can be deleted: notes (`DELETE /v1/notes/:id`) and webhook endpoints (`DELETE /v1/webhook-endpoints/:id`).

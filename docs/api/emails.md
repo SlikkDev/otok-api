@@ -32,6 +32,8 @@ Errors on this endpoint use the structured envelope `{"error": {"code", "message
 - **201** — this request performed the send (fresh idempotency key).
 - **200** — idempotent replay of an already-processed key (`duplicate: true`).
 
+This is the only idempotent create route whose **status code** also distinguishes the two outcomes — the other idempotent creates (contacts, deals, payments, bookings) return 201 in both cases and carry the same top-level `duplicate` boolean.
+
 ```json
 {
   "id": "f0e1d2c3-b4a5-9687-7869-5a4b3c2d1e0f",

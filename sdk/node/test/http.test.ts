@@ -138,6 +138,46 @@ describe("HttpClient retries", () => {
   });
 });
 
+describe("HttpClient error_code mapping", () => {
+  it("surfaces a top-level error_code as code (403 plan-feature gating)", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(403, {
+        message:
+          "Your current plan does not include access to this feature: deals. Please upgrade your plan.",
+        error_code: "FEATURE_NOT_INCLUDED_IN_PLAN",
+      }),
+    );
+    const client = makeClient(fetchMock as any);
+    const err = await client.request("GET", "/v1/deals").catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
+    // 403 is not retryable.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces CONTACT_MERGE_REQUIRED and keeps merge_request_id on the body", async () => {
+    const wireBody = {
+      statusCode: 409,
+      error: "Conflict", // string, NOT the domain envelope
+      error_code: "CONTACT_MERGE_REQUIRED",
+      merge_request_id: "8b6f2f6e-4a86-4e58-9f9d-6a1f4b7f2c10",
+      message:
+        "This change would give the contact a phone or email that already belongs to another contact. A merge request was opened — resolve it (merge or dismiss) to apply the change.",
+    };
+    const fetchMock = vi.fn(async () => jsonResponse(409, wireBody));
+    const client = makeClient(fetchMock as any);
+    const err = await client
+      .request("PATCH", "/v1/contacts/c1", { body: { phone: "+12025551234" } })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("CONTACT_MERGE_REQUIRED");
+    expect(err.message).toBe(wireBody.message);
+    expect((err.body as any).merge_request_id).toBe(wireBody.merge_request_id);
+  });
+});
+
 describe("HttpClient timeout", () => {
   it("aborts a hanging request and throws OtokTimeoutError", async () => {
     const hangingFetch = vi.fn(
