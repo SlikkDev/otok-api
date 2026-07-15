@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import builtins
 import json
-from typing import Any, Optional, cast
+from collections.abc import Iterator
+from typing import Any, Callable, Optional, cast
 
 from ._http import HttpClient, QueryValue
 from .types import (
@@ -72,6 +73,37 @@ def _params_query(params: Optional[Any]) -> dict[str, QueryValue]:
     return dict(params or {})
 
 
+#: Documented ``limit`` cap for standard list endpoints (default 50).
+_STANDARD_PAGE_CAP = 500
+#: Documented ``limit`` cap for GET /v1/deals and /v1/payments (default 25).
+_DEALS_PAYMENTS_PAGE_CAP = 100
+
+
+def _paginate(
+    fetch_page: Callable[[int, int], Paginated],
+    cap: int,
+    limit: Optional[int],
+    offset: Optional[int],
+) -> Iterator[dict[str, Any]]:
+    """Auto-paginate a ``{data, total, limit, offset}`` list endpoint,
+    yielding rows one by one until ``total`` is exhausted.
+
+    Pages are requested at the endpoint's documented ``limit`` cap unless
+    the caller passed a smaller ``limit`` (a larger one is clamped to the
+    cap — matching the server, which never returns more than the cap per
+    page). A caller ``offset`` sets the starting position.
+    """
+    page_size = cap if limit is None else min(limit, cap)
+    cursor = offset or 0
+    while True:
+        page = fetch_page(page_size, cursor)
+        data = page["data"]
+        yield from data
+        cursor += len(data)
+        if not data or cursor >= page["total"]:
+            return
+
+
 # ─────────────────────────────── Contacts ───────────────────────────────
 
 
@@ -83,6 +115,21 @@ class ContactsApi:
         return cast(
             Paginated,
             self._http.request("GET", "/v1/contacts", query=_list_query(params)),
+        )
+
+    def iter(self, params: Optional[ListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching contact, auto-paginating ``GET
+        /v1/contacts`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: ListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
         )
 
     def get(self, contact_id: str) -> Contact:
@@ -170,6 +217,20 @@ class TagsApi:
             self._http.request("GET", "/v1/tags", query=_list_query(params)),
         )
 
+    def iter(self, params: Optional[ListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching tag, auto-paginating ``GET /v1/tags``
+        (``limit`` cap 500). Accepts the same params as ``list``.
+        """
+        p: ListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
     def get(self, tag_id: str) -> Tag:
         return cast(Tag, self._http.request("GET", f"/v1/tags/{tag_id}"))
 
@@ -195,6 +256,21 @@ class ContactGroupsApi:
         return cast(
             Paginated,
             self._http.request("GET", "/v1/contact-groups", query=_list_query(params)),
+        )
+
+    def iter(self, params: Optional[ListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching group, auto-paginating ``GET
+        /v1/contact-groups`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: ListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
         )
 
     def get(self, group_id: str) -> ContactGroup:
@@ -242,6 +318,21 @@ class DealsApi:
         return cast(
             Paginated,
             self._http.request("GET", "/v1/deals", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[DealListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching deal, auto-paginating ``GET /v1/deals``
+        (``limit`` cap 100 — deals paginate differently from the standard
+        lists). Accepts the same params as ``list``.
+        """
+        p: DealListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(DealListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
         )
 
     def get(self, deal_id: str) -> Deal:
@@ -327,6 +418,21 @@ class CampaignsApi:
             self._http.request("GET", "/v1/campaigns", query=_list_query(params)),
         )
 
+    def iter(self, params: Optional[ListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching campaign, auto-paginating ``GET
+        /v1/campaigns`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: ListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
     def get(self, campaign_id: str) -> Campaign:
         return cast(Campaign, self._http.request("GET", f"/v1/campaigns/{campaign_id}"))
 
@@ -367,6 +473,21 @@ class TemplatesApi:
             self._http.request("GET", "/v1/templates", query=_list_query(params)),
         )
 
+    def iter(self, params: Optional[ListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching template, auto-paginating ``GET
+        /v1/templates`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: ListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
     def get(self, template_id: str) -> MessageTemplate:
         return cast(MessageTemplate, self._http.request("GET", f"/v1/templates/{template_id}"))
 
@@ -397,6 +518,21 @@ class PaymentsApi:
         return cast(
             Paginated,
             self._http.request("GET", "/v1/payments", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[PaymentListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching payment, auto-paginating ``GET
+        /v1/payments`` (``limit`` cap 100 — payments paginate differently
+        from the standard lists). Accepts the same params as ``list``.
+        """
+        p: PaymentListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(PaymentListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
         )
 
     def get(self, payment_id: str) -> Payment:
@@ -461,6 +597,21 @@ class MeetingTypesApi:
             self._http.request("GET", "/v1/meeting-types", query=_list_query(params)),
         )
 
+    def iter(self, params: Optional[ListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching meeting type, auto-paginating ``GET
+        /v1/meeting-types`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: ListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
     def get(self, meeting_type_id: str) -> MeetingType:
         return cast(
             MeetingType,
@@ -492,6 +643,21 @@ class BookingsApi:
         return cast(
             Paginated,
             self._http.request("GET", "/v1/bookings", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[BookingListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching booking, auto-paginating ``GET
+        /v1/bookings`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: BookingListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(BookingListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
         )
 
     def get(self, booking_id: str) -> Booking:

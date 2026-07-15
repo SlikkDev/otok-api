@@ -6,7 +6,8 @@ Gives bespoke websites and e-commerce stores out-of-the-box integration with oTo
 
 - **Node 18+**, zero runtime dependencies (native `fetch`)
 - Full TypeScript types derived from the real API contract
-- Automatic retries with exponential backoff + jitter on `429`/`5xx` (honors `Retry-After`)
+- Automatic retries with exponential backoff + jitter on `429`/`5xx` (honors `Retry-After`), plus transient network errors for requests that are safe to replay
+- Auto-paginating async iterators (`for await (const c of otok.contacts.iter())`)
 - Constant-time webhook signature verification
 
 ## Install
@@ -47,6 +48,35 @@ const contact = await otok.contacts.upsert({
 ```
 
 Both outcomes return `201` — check the top-level `duplicate` flag to tell them apart. (`otok.contacts.update` by id behaves differently: setting a `phone`/`email` that belongs to another contact throws `409 CONTACT_MERGE_REQUIRED` — see [Errors](#errors-timeouts-retries).)
+
+### Iterate a whole collection (auto-pagination)
+
+Every paginated list endpoint has a matching `iter()` that returns an async iterator: it accepts the same filter/sort/search params as `list()` and fetches pages lazily until the collection is exhausted.
+
+```ts
+for await (const contact of otok.contacts.iter({ filter: { lifecycle_stage: "customer" } })) {
+  console.log(contact.email);
+}
+```
+
+Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals and payments, which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
+
+```ts
+for await (const deal of otok.deals.iter({ status: "open", limit: 50 })) {
+  // pages of 50 through GET /v1/deals
+}
+```
+
+### Contact notes
+
+Plain-text annotations on a contact (API note payloads are text only — rich text and mentions are in-app features). `listNotes` returns a bare array (the endpoint is unpaginated), pinned notes first, then newest-first.
+
+```ts
+const note = await otok.contacts.createNote(contact.id, "Asked for a demo next week", { pinned: true });
+await otok.contacts.updateNote(note.id, { body: "Demo booked for Tuesday", pinned: false });
+const notes = await otok.contacts.listNotes(contact.id);
+await otok.contacts.deleteNote(note.id); // → { success: true }
+```
 
 ### Create a deal from an order (idempotent)
 
@@ -198,7 +228,7 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 | Namespace | Endpoints |
 |---|---|
-| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email) |
+| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
 | `otok.tags` | `GET/POST /v1/tags`, `GET/PATCH /v1/tags/:id` |
 | `otok.contactGroups` | `GET/POST /v1/contact-groups`, `GET/PATCH /v1/contact-groups/:id` |
 | `otok.pipelines` | `GET /v1/pipelines` (with ordered stages) |
@@ -214,6 +244,8 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier camelCase objects and maps them for you.
 
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, campaigns, templates, payments, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+
 ## Errors, timeouts, retries
 
 - Non-2xx responses throw **`OtokApiError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{ error: { code, message } }` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
@@ -223,7 +255,12 @@ Request/response field names match the wire contract (snake_case) exactly, so th
 - **400 on invalid `filter` values** — list-endpoint `filter` values are type-checked against the target field (dates, UUIDs, enums, numbers, booleans); a mistyped value throws a 400 naming the field and expected kind.
 - **`otok.campaigns.execute` uses real HTTP semantics** — it resolves (HTTP 200, `{ success: true, jobId }`) only when the campaign was queued, and throws otherwise: 404 `campaign_not_found`, 409 `campaign_not_scheduled`. Campaigns are created as `"draft"` unless you set `status: "scheduled"`, so set it (on create or via `update`) before executing.
 - Requests time out after `timeoutMs` (default 30 s) and throw **`OtokTimeoutError`**.
-- `429` and `5xx` responses are retried up to `maxRetries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header. Network errors are **not** retried automatically in v0.1 — use idempotency keys (`external_reference`, `idempotency_key`) and retry at the call site.
+- `429` and `5xx` responses are retried up to `maxRetries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header. This applies to **all** requests: the server answered, so the retry semantics are unchanged from v0.1.
+- **Transient network errors are retried too — but only when replaying is safe.** Connection reset/refusal (`ECONNRESET`/`ECONNREFUSED`), DNS failures (`ENOTFOUND`/`EAI_AGAIN`), socket timeouts (`ETIMEDOUT`, and the SDK's own `OtokTimeoutError`), and similar transport-level failures share the same bounded backoff schedule (`maxRetries`, exponential + full jitter) **if and only if** the request is:
+  - a **safe method** (`GET`/`HEAD`), or
+  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`otok.emails.send`) or `external_reference` (`otok.deals.create`, `otok.payments.create`).
+
+  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, …) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is thrown for you to handle. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `otok.commerce.trackOrder`) or retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
 
 ```ts
@@ -245,6 +282,7 @@ try {
 Runnable scripts live in [`examples/`](./examples):
 
 - [`track-order.mjs`](./examples/track-order.mjs) — contact upsert + idempotent deal + receipt for a store order
+- [`export-contacts.mjs`](./examples/export-contacts.mjs) — stream every contact to CSV with the auto-paginating iterator
 - [`express-webhook-receiver.mjs`](./examples/express-webhook-receiver.mjs) — verified webhook receiver (Express)
 
 ## Development
@@ -256,6 +294,12 @@ npm test
 npm run build
 ```
 
-## Versioning & scope (v0.1)
+## Versioning & scope (v0.2)
 
-Covered: the e-commerce path end to end (contacts, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, and bookings. Not covered yet: contact notes endpoints, list-endpoint `$where` advanced filter helpers, and automatic pagination iterators — planned for a later release.
+Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+
+New in v0.2.0:
+
+- `otok.contacts.listNotes` / `createNote` / `updateNote` / `deleteNote` — contact-notes endpoints (parity with the Python SDK)
+- `iter()` async iterators on all paginated list endpoints, honoring each resource's documented page-size cap (500 standard; 100 for deals/payments)
+- Transient network errors (connection reset/refused, DNS failure, socket timeout) now retry with the existing bounded backoff — GET/HEAD and idempotency-keyed writes only; other writes still surface the error immediately

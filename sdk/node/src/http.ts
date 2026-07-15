@@ -12,8 +12,10 @@ export interface HttpClientOptions {
   /** Per-attempt request timeout in milliseconds. Default 30 000. */
   timeoutMs?: number;
   /**
-   * Retry attempts after the first request (429 and 5xx responses only).
-   * Default 2 (i.e. up to 3 requests total). Set 0 to disable retries.
+   * Retry attempts after the first request. Default 2 (i.e. up to 3 requests
+   * total). Set 0 to disable retries. Applies to 429/5xx responses (all
+   * requests) and to transient network errors (safe or idempotency-keyed
+   * requests only — see `isNetworkRetrySafe`).
    */
   maxRetries?: number;
   /** Injectable fetch implementation (used by tests). Defaults to global fetch. */
@@ -26,7 +28,7 @@ const DEFAULT_MAX_RETRIES = 2;
 /** Base backoff delay; grows exponentially per retry with full jitter. */
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30_000;
-const SDK_VERSION = "0.1.1";
+const SDK_VERSION = "0.2.0";
 
 export type QueryValue = string | number | boolean | undefined;
 
@@ -67,12 +69,85 @@ function isRetryableStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+/**
+ * Transport-level error codes treated as transient: connection
+ * reset/refused/aborted, DNS failure, unreachable network, socket timeout.
+ * Node's fetch (undici) usually wraps the socket error, so the code is
+ * looked up on the thrown error, its `cause` chain, and any
+ * `AggregateError` members.
+ */
+const TRANSIENT_NETWORK_ERROR_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ECONNABORTED",
+  "ENOTFOUND",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "EPIPE",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/**
+ * True when `err` is a transient transport-level failure (the request never
+ * produced an HTTP response): a socket/DNS error carrying one of the
+ * `TRANSIENT_NETWORK_ERROR_CODES`, anywhere in the `cause`/`errors` chain,
+ * or an `OtokTimeoutError`.
+ */
+export function isTransientNetworkError(err: unknown, depth = 0): boolean {
+  if (depth > 5 || !err || typeof err !== "object") return false;
+  if (err instanceof OtokTimeoutError) return true;
+  const e = err as { code?: unknown; cause?: unknown; errors?: unknown };
+  if (typeof e.code === "string" && TRANSIENT_NETWORK_ERROR_CODES.has(e.code)) {
+    return true;
+  }
+  if (
+    Array.isArray(e.errors) &&
+    e.errors.some((inner) => isTransientNetworkError(inner, depth + 1))
+  ) {
+    return true;
+  }
+  return isTransientNetworkError(e.cause, depth + 1);
+}
+
+/**
+ * Whether a request may be auto-retried after a transient NETWORK error.
+ *
+ * A network error is ambiguous — the request may or may not have reached
+ * the server — so replaying it is only safe when a replay cannot
+ * double-apply an effect: safe methods (GET/HEAD), or a write body that
+ * carries its own idempotency key — `idempotency_key` (POST /v1/emails) or
+ * `external_reference` (POST /v1/deals, POST /v1/payments). Everything
+ * else surfaces the network error to the caller. (429/5xx HTTP responses
+ * are a different case — the server answered — and keep their existing
+ * retry behavior for all requests.)
+ */
+export function isNetworkRetrySafe(method: string, body: unknown): boolean {
+  if (method === "GET" || method === "HEAD") return true;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const b = body as Record<string, unknown>;
+    if (typeof b.idempotency_key === "string" && b.idempotency_key !== "") {
+      return true;
+    }
+    if (
+      typeof b.external_reference === "string" &&
+      b.external_reference !== ""
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
  * Minimal HTTP layer over native fetch: auth header injection, JSON
  * (de)serialization, per-attempt timeout via AbortController, and
- * exponential-backoff retries on 429/5xx respecting `Retry-After`.
+ * exponential-backoff retries — on 429/5xx respecting `Retry-After`, and on
+ * transient network errors for safe/idempotency-keyed requests only.
  */
 export class HttpClient {
   private readonly apiKey: string;
@@ -107,14 +182,32 @@ export class HttpClient {
       bodyText = JSON.stringify(options.body);
     }
 
+    const networkRetrySafe = isNetworkRetrySafe(method, options.body);
+
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
-      // Network failures and timeouts are not retried in v0.1 — not every
-      // endpoint is idempotent, and a request may have reached the server.
-      const response = await this.fetchWithTimeout(url, {
-        method,
-        headers,
-        body: bodyText,
-      });
+      let response: Response;
+      try {
+        response = await this.fetchWithTimeout(url, {
+          method,
+          headers,
+          body: bodyText,
+        });
+      } catch (err) {
+        // Transient transport-level failures (connection reset/refused, DNS
+        // failure, socket timeout) share the 429/5xx backoff — but only when
+        // replaying is safe (GET/HEAD or an idempotency-keyed write). The
+        // request may have reached the server, so non-idempotent writes are
+        // never network-retried; the error surfaces to the caller instead.
+        if (
+          networkRetrySafe &&
+          isTransientNetworkError(err) &&
+          attempt < this.maxRetries
+        ) {
+          await sleep(computeBackoffMs(attempt));
+          continue;
+        }
+        throw err;
+      }
 
       if (response.ok) {
         return (await parseBody(response)) as T;

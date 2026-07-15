@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OtokApiError, OtokTimeoutError } from "../src/errors";
 import { HttpClient, computeBackoffMs, DEFAULT_BASE_URL } from "../src/http";
 
@@ -188,10 +188,179 @@ describe("HttpClient timeout", () => {
           );
         }),
     );
+    // POST without an idempotency key: timeouts are NOT retried, so the
+    // error surfaces after the first attempt.
     const client = makeClient(hangingFetch as any, { timeoutMs: 30 });
-    await expect(client.request("GET", "/v1/tags")).rejects.toBeInstanceOf(
-      OtokTimeoutError,
+    await expect(
+      client.request("POST", "/v1/tags", { body: { name: "VIP" } }),
+    ).rejects.toBeInstanceOf(OtokTimeoutError);
+    expect(hangingFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("HttpClient network-error retries", () => {
+  // Full-jitter backoff sleeps random(0, cap) — pin random to 0 so retried
+  // requests re-fire immediately.
+  beforeEach(() => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function connectionError(code: string): Error {
+    // Node's fetch (undici) throws TypeError("fetch failed") with the
+    // socket error on `cause`.
+    return new TypeError("fetch failed", {
+      cause: Object.assign(new Error(code), { code }),
+    });
+  }
+
+  it("retries a GET after a connection reset and succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("ECONNRESET"))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const client = makeClient(fetchMock as any);
+    await expect(client.request("GET", "/v1/tags")).resolves.toEqual({
+      ok: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a GET on DNS failure (EAI_AGAIN) and connection refusal", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("EAI_AGAIN"))
+      .mockRejectedValueOnce(connectionError("ECONNREFUSED"))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const client = makeClient(fetchMock as any);
+    await expect(client.request("GET", "/v1/tags")).resolves.toEqual({
+      ok: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("finds the code inside an AggregateError cause (multi-address connect)", async () => {
+    const aggregate = new AggregateError(
+      [Object.assign(new Error("ECONNREFUSED"), { code: "ECONNREFUSED" })],
+      "connect failed",
     );
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed", { cause: aggregate }))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const client = makeClient(fetchMock as any);
+    await expect(client.request("GET", "/v1/tags")).resolves.toEqual({
+      ok: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a timed-out GET (safe method)", async () => {
+    const hangingOnce = vi
+      .fn()
+      .mockImplementationOnce(
+        (_url: any, init: any) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal.addEventListener("abort", () =>
+              reject(new DOMException("aborted", "AbortError")),
+            );
+          }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const client = makeClient(hangingOnce as any, { timeoutMs: 30 });
+    await expect(client.request("GET", "/v1/tags")).resolves.toEqual({
+      ok: true,
+    });
+    expect(hangingOnce).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a POST without an idempotency key", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
+    const client = makeClient(fetchMock as any);
+    await expect(
+      client.request("POST", "/v1/contacts", { body: { email: "a@b.co" } }),
+    ).rejects.toThrow("fetch failed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT retry PATCH/DELETE requests", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
+    const client = makeClient(fetchMock as any);
+    await expect(
+      client.request("PATCH", "/v1/contacts/c1", { body: { name: "Jane" } }),
+    ).rejects.toThrow("fetch failed");
+    await expect(
+      client.request("DELETE", "/v1/webhook-endpoints/w1"),
+    ).rejects.toThrow("fetch failed");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a POST that carries idempotency_key (POST /v1/emails)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("ECONNRESET"))
+      .mockResolvedValueOnce(jsonResponse(201, { id: "send-1" }));
+    const client = makeClient(fetchMock as any);
+    const result = await client.request<{ id: string }>("POST", "/v1/emails", {
+      body: { to: "a@b.co", subject: "hi", text: "hi", idempotency_key: "k-1" },
+    });
+    expect(result.id).toBe("send-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries a POST that carries external_reference (deals/payments upserts)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("ENOTFOUND"))
+      .mockResolvedValueOnce(jsonResponse(201, { id: "deal-1" }));
+    const client = makeClient(fetchMock as any);
+    const result = await client.request<{ id: string }>("POST", "/v1/deals", {
+      body: { title: "Order", external_reference: "order:A-1001" },
+    });
+    expect(result.id).toBe("deal-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("an empty idempotency key does not make a POST retryable", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
+    const client = makeClient(fetchMock as any);
+    await expect(
+      client.request("POST", "/v1/emails", {
+        body: { to: "a@b.co", subject: "hi", idempotency_key: "" },
+      }),
+    ).rejects.toThrow("fetch failed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT retry non-transient errors even on GET", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValue(new TypeError("Invalid header value"));
+    const client = makeClient(fetchMock as any);
+    await expect(client.request("GET", "/v1/tags")).rejects.toThrow(
+      "Invalid header value",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces the last network error after exhausting retries", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ETIMEDOUT"));
+    const client = makeClient(fetchMock as any); // maxRetries: 2
+    await expect(client.request("GET", "/v1/tags")).rejects.toThrow(
+      "fetch failed",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("respects maxRetries: 0 for network errors", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
+    const client = makeClient(fetchMock as any, { maxRetries: 0 });
+    await expect(client.request("GET", "/v1/tags")).rejects.toThrow(
+      "fetch failed",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
