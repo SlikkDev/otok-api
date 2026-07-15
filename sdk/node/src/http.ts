@@ -9,7 +9,10 @@ export interface HttpClientOptions {
    * this. Endpoint paths (`/v1/...`) are appended to it.
    */
   baseUrl?: string;
-  /** Per-attempt request timeout in milliseconds. Default 30 000. */
+  /**
+   * Per-attempt request timeout in milliseconds; covers connecting and,
+   * for success responses, downloading the body. Default 30 000.
+   */
   timeoutMs?: number;
   /**
    * Retry attempts after the first request. Default 2 (i.e. up to 3 requests
@@ -186,18 +189,21 @@ export class HttpClient {
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       let response: Response;
+      let okBody: unknown;
       try {
-        response = await this.fetchWithTimeout(url, {
+        ({ response, okBody } = await this.performAttempt(url, {
           method,
           headers,
           body: bodyText,
-        });
+        }));
       } catch (err) {
         // Transient transport-level failures (connection reset/refused, DNS
-        // failure, socket timeout) share the 429/5xx backoff — but only when
-        // replaying is safe (GET/HEAD or an idempotency-keyed write). The
-        // request may have reached the server, so non-idempotent writes are
-        // never network-retried; the error surfaces to the caller instead.
+        // failure, socket timeout) — whether they hit while connecting or
+        // while downloading a success response's body — share the 429/5xx
+        // backoff, but only when replaying is safe (GET/HEAD or an
+        // idempotency-keyed write). The request may have reached the
+        // server, so non-idempotent writes are never network-retried; the
+        // error surfaces to the caller instead.
         if (
           networkRetrySafe &&
           isTransientNetworkError(err) &&
@@ -210,7 +216,7 @@ export class HttpClient {
       }
 
       if (response.ok) {
-        return (await parseBody(response)) as T;
+        return okBody as T;
       }
 
       if (isRetryableStatus(response.status) && attempt < this.maxRetries) {
@@ -238,14 +244,29 @@ export class HttpClient {
     return url.toString();
   }
 
-  private async fetchWithTimeout(
+  /**
+   * One request attempt under a single per-attempt timeout. fetch resolves
+   * once response HEADERS arrive, so for success responses the body is
+   * downloaded here too: a transient network failure or timeout while
+   * streaming the body is indistinguishable from a connect-phase failure
+   * and shares its retry/timeout semantics (the Python SDK likewise reads
+   * the body inside its retried, timeout-bounded transport call).
+   * Error-response bodies are NOT read here — the 429/5xx retry path needs
+   * only headers, and `toApiError` reads the body on the terminal path.
+   */
+  private async performAttempt(
     url: string,
     init: RequestInit,
-  ): Promise<Response> {
+  ): Promise<{ response: Response; okBody?: unknown }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      return await this.fetchImpl(url, { ...init, signal: controller.signal });
+      const response = await this.fetchImpl(url, {
+        ...init,
+        signal: controller.signal,
+      });
+      if (!response.ok) return { response };
+      return { response, okBody: await parseBody(response) };
     } catch (err) {
       if (controller.signal.aborted) throw new OtokTimeoutError(this.timeoutMs);
       throw err;

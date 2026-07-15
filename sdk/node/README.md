@@ -254,7 +254,7 @@ Every namespace with a paginated `list()` (contacts, tags, contact groups, deals
 - **409 on duplicate names** — creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) throws `409 Conflict`.
 - **400 on invalid `filter` values** — list-endpoint `filter` values are type-checked against the target field (dates, UUIDs, enums, numbers, booleans); a mistyped value throws a 400 naming the field and expected kind.
 - **`otok.campaigns.execute` uses real HTTP semantics** — it resolves (HTTP 200, `{ success: true, jobId }`) only when the campaign was queued, and throws otherwise: 404 `campaign_not_found`, 409 `campaign_not_scheduled`. Campaigns are created as `"draft"` unless you set `status: "scheduled"`, so set it (on create or via `update`) before executing.
-- Requests time out after `timeoutMs` (default 30 s) and throw **`OtokTimeoutError`**.
+- Each attempt — from connecting through downloading the response body — times out after `timeoutMs` (default 30 s) and throws **`OtokTimeoutError`**; timeouts count as transient network errors, so safe/idempotency-keyed requests are retried before the error surfaces (worst case ≈ (`maxRetries` + 1) × `timeoutMs` plus backoff).
 - `429` and `5xx` responses are retried up to `maxRetries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header. This applies to **all** requests: the server answered, so the retry semantics are unchanged from v0.1.
 - **Transient network errors are retried too — but only when replaying is safe.** Connection reset/refusal (`ECONNRESET`/`ECONNREFUSED`), DNS failures (`ENOTFOUND`/`EAI_AGAIN`), socket timeouts (`ETIMEDOUT`, and the SDK's own `OtokTimeoutError`), and similar transport-level failures share the same bounded backoff schedule (`maxRetries`, exponential + full jitter) **if and only if** the request is:
   - a **safe method** (`GET`/`HEAD`), or
@@ -296,7 +296,7 @@ npm run build
 
 ## Versioning & scope (v0.2)
 
-Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
 
 New in v0.2.0:
 

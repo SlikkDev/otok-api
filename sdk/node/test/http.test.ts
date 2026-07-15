@@ -364,6 +364,109 @@ describe("HttpClient network-error retries", () => {
   });
 });
 
+describe("HttpClient body-phase network failures", () => {
+  beforeEach(() => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Node's fetch (undici) resolves once response HEADERS arrive; if the
+  // socket dies while the body is still streaming, reading the body rejects
+  // with TypeError("terminated") carrying the socket error on `cause`.
+  function bodyFailureResponse(code = "ECONNRESET"): Response {
+    const err = Object.assign(new TypeError("terminated"), {
+      cause: Object.assign(new Error(`read ${code}`), { code }),
+    });
+    return new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"partial":'));
+          controller.error(err);
+        },
+      }),
+      { status: 200 },
+    );
+  }
+
+  it("retries a GET whose response-body download fails transiently and succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(bodyFailureResponse())
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const client = makeClient(fetchMock as any);
+    await expect(client.request("GET", "/v1/contacts")).resolves.toEqual({
+      ok: true,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry a non-keyed POST on a body-phase failure; the transport error surfaces", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(bodyFailureResponse("UND_ERR_SOCKET"));
+    const client = makeClient(fetchMock as any);
+    const err = await client
+      .request("POST", "/v1/contacts", { body: { email: "a@b.co" } })
+      .catch((e) => e);
+    // Same posture as a connect-phase failure on a non-idempotent write
+    // (and as the Python SDK): the transport error surfaces unretried.
+    expect(err).toBeInstanceOf(TypeError);
+    expect(err.message).toBe("terminated");
+    expect((err.cause as any).code).toBe("UND_ERR_SOCKET");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries an idempotency-keyed POST on a body-phase failure", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(bodyFailureResponse())
+      .mockResolvedValueOnce(jsonResponse(201, { id: "send-1" }));
+    const client = makeClient(fetchMock as any);
+    const result = await client.request<{ id: string }>("POST", "/v1/emails", {
+      body: { to: "a@b.co", subject: "hi", text: "hi", idempotency_key: "k-1" },
+    });
+    expect(result.id).toBe("send-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("surfaces the body-phase error after exhausting retries on a GET", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(async () => bodyFailureResponse());
+    const client = makeClient(fetchMock as any); // maxRetries: 2
+    await expect(client.request("GET", "/v1/contacts")).rejects.toThrow(
+      "terminated",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("a body download that exceeds timeoutMs throws OtokTimeoutError", async () => {
+    const hangingBodyFetch = vi.fn(
+      async (_url: any, init: any) =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              // Body head arrives but never completes; the stream errors
+              // only when the per-attempt timer aborts the request.
+              controller.enqueue(new TextEncoder().encode('{"partial":'));
+              init.signal.addEventListener("abort", () =>
+                controller.error(new DOMException("aborted", "AbortError")),
+              );
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    // POST without an idempotency key: not retried, so the timeout surfaces
+    // as the SDK's own error class after the first attempt.
+    const client = makeClient(hangingBodyFetch as any, { timeoutMs: 30 });
+    await expect(
+      client.request("POST", "/v1/tags", { body: { name: "VIP" } }),
+    ).rejects.toBeInstanceOf(OtokTimeoutError);
+    expect(hangingBodyFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("computeBackoffMs", () => {
   it("uses Retry-After delta-seconds when present", () => {
     expect(computeBackoffMs(0, "3")).toBe(3000);

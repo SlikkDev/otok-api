@@ -310,7 +310,7 @@ mypy
 
 ## Versioning & scope (v0.2)
 
-Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
+Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
 
 New in v0.2.0:
 
