@@ -5,7 +5,7 @@ Requires at least: 6.6
 Tested up to: 7.0
 Requires PHP: 8.1
 WC requires at least: 9.6
-Stable tag: 0.1.0
+Stable tag: 1.0.0
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -21,7 +21,7 @@ oToK for WooCommerce connects a WooCommerce store to [oToK](https://otok.io), a 
 
 The plugin only communicates with the oToK service that the store owner explicitly connects via a one-time connect code. There is no telemetry, no tracking, and no other external calls.
 
-This 0.1.0 release includes the integration skeleton (pairing-code connect, secure credential storage, admin settings and health panel), the marketing-consent checkbox — shoppers see it in both checkout experiences (the order information step of the Checkout block; after the email field on the classic checkout) with their choice recorded on the order — the reliable delivery pipeline (a local event queue with signed HTTPS delivery, automatic retries with backoff, and a health panel showing queue depth and recent delivery problems; a temporary oToK outage never loses events), and the full event capture: consent, cart created/updated snapshots (debounced, flushed immediately when the shopper reaches checkout), and order created/updated events covering status changes, cancellations and refunds — all on both checkout stacks, HPOS-compatible.
+The plugin includes pairing-code connect with secure credential storage, admin settings and a health panel, the marketing-consent checkbox — shoppers see it in both checkout experiences (the order information step of the Checkout block; after the email field on the classic checkout) with their choice recorded on the order — a reliable delivery pipeline (a local event queue with signed HTTPS delivery, automatic retries with backoff, and a health panel showing queue depth and recent delivery problems; a temporary oToK outage never loses events), and full event capture: consent, cart created/updated snapshots (debounced, flushed immediately when the shopper reaches checkout), and order created/updated events covering status changes, cancellations and refunds — all on both checkout stacks, HPOS-compatible.
 
 = Languages =
 
@@ -82,6 +82,12 @@ Deleting the plugin drops its local event queue (any still-undelivered events ar
 Email we@otok.io and paste the diagnostics block from WooCommerce → oToK → Health.
 
 == Changelog ==
+
+= 1.0.0 =
+* First public release.
+* Marketing-consent checkbox for both checkout experiences (Checkout block and classic checkout), always unchecked by default, with the shopper's choice recorded on the order.
+* Reliable signed event delivery with automatic retries: durable local queue, HMAC-signed HTTPS delivery, backoff, and a health panel with copy-diagnostics.
+* Hebrew (he_IL) translation and RTL-ready admin screens.
 
 = 0.1.0 =
 * Initial release skeleton: pairing-code connect with encrypted credential storage, admin settings page under the WooCommerce menu, health panel with copy-diagnostics, HPOS and cart/checkout-blocks compatibility declarations, uninstall cleanup.

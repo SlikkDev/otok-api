@@ -74,8 +74,8 @@ class Otok_WC_Delivery {
 
 	/**
 	 * FROZEN — ingest endpoint path prefix (the connection id is appended).
-	 * Normative wire contract §1, `docs/integrations/otok-wc-plugin-contract.md`
-	 * in the oToK repo; isolated here so a coordinated version bump is one line.
+	 * The normative oToK e-commerce wire contract §1; isolated here so a
+	 * coordinated version bump is one line.
 	 */
 	const ENDPOINT_PATH = '/api/ecommerce/webhooks/woocommerce/';
 

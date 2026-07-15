@@ -88,11 +88,11 @@ Hebrew style: infinitive imperatives (להתחבר, יש להזין — never ge
 
 ## Verification expectations (per PR)
 
-Every PR body states what was verified: `php -l` on all files, PHPCS clean against `phpcs.xml.dist`, and — where the environment allows — a local WP/Woo smoke test (wp-env/Docker: connect flow, checkbox on both checkouts, delivery against a mock receiver). Anything not verifiable (e.g. no live oToK ingest endpoint yet) is stated explicitly.
+Every PR body states what was verified: `php -l` on all files, PHPCS clean against `phpcs.xml.dist`, and — where the environment allows — a local WP/Woo smoke test (wp-env/Docker: connect flow, checkbox on both checkouts, delivery against a mock receiver). Anything not verifiable in the environment is stated explicitly.
 
 ## Contract notes for contributors
 
-- **The wire contract is FROZEN and normative:** `docs/integrations/otok-wc-plugin-contract.md` in the oToK repository. The plugin and the server must both conform to it; changes require a coordinated version bump on both sides.
+- **The wire contract between this plugin and the oToK service is FROZEN and normative.** The plugin and the server must both conform to it; changes require a coordinated version bump on both sides.
 - The pairing exchange is `POST /api/ecommerce/pair/woocommerce` (contract §9), body `{"token": "<one-time token>"}` — every failure is a uniform 404 (get a fresh token); per-IP throttled with a native 429 + `Retry-After` (retry the SAME token). The path lives behind the `OTOK_WC_PAIRING_PATH` constant + `otok_wc_pairing_path` filter in `class-otok-wc-connect.php` as a coordinated-version-bump seam only.
 - **All wire payloads are built in `class-otok-wc-payloads.php` and nowhere else.** The envelope, topic vocabulary and `data` shapes conform to the frozen contract — keeping every serializer in that one file makes any coordinated contract change a one-file diff. Completed orders echo the cart token they concluded (`data.cart_token`, omitted when unknown) so the server can tombstone the purchased cart in the abandoned-cart pipeline.
 - **Event producers enqueue via `Otok_WC_Plugin::instance()->delivery()->enqueue_event( $topic, $data )`** (topic = an `Otok_WC_Payloads::TOPIC_*` constant, data = the matching serializer's output). Enqueue mints `event_id` + `occurred_at` and FREEZES the payload — coalescing/debounce must happen strictly pre-enqueue; a newer snapshot after enqueue is a new event with a new `event_id`.

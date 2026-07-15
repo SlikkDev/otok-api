@@ -3,6 +3,10 @@
 	"description": "Development tooling (PHPCS / WordPress Coding Standards) for the oToK for WooCommerce plugin. Not shipped — the shippable plugin lives in otok-for-woocommerce/.",
 	"type": "project",
 	"license": "GPL-2.0-or-later",
+	"homepage": "https://otok.io",
+	"support": {
+		"email": "we@otok.io"
+	},
 	"require": {
 		"php": ">=8.1"
 	},
