@@ -1,0 +1,87 @@
+name: WordPress plugin CI
+
+on:
+  pull_request:
+    paths:
+      - "integrations/wordpress/**"
+      - ".github/workflows/wordpress-plugin-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "integrations/wordpress/**"
+      - ".github/workflows/wordpress-plugin-ci.yml"
+
+permissions:
+  contents: read
+
+# Newer pushes supersede in-progress runs for the same ref (ci.yml convention).
+concurrency:
+  group: wp-plugin-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: PHP syntax lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.1"
+          coverage: none
+      - name: php -l on every plugin file
+        run: find integrations/wordpress -name "*.php" -print0 | xargs -0 -n1 php -l
+
+  phpcs:
+    name: PHPCS (WordPress standard)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/wordpress
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.1"
+          coverage: none
+          tools: composer
+      - name: Cache Composer vendor
+        uses: actions/cache@v4
+        with:
+          path: integrations/wordpress/vendor
+          key: composer-${{ runner.os }}-${{ hashFiles('integrations/wordpress/composer.lock') }}
+      - name: Install dev tooling
+        run: composer install --no-interaction --no-progress
+      - name: Run PHPCS
+        run: vendor/bin/phpcs
+
+  smoke:
+    name: WP/Woo runtime smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: integrations/wordpress
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Cache npm downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-wp-env-${{ runner.os }}
+      # wp-env boots WP latest + WooCommerce (latest stable zip) in Docker and
+      # ACTIVATES both plugins (per .wp-env.json) — an activation fatal fails
+      # this step. bin/ is mapped into the container as wp-content/otok-ci.
+      - name: Boot WordPress + WooCommerce (wp-env)
+        run: npx --yes @wordpress/env@latest start
+      - name: Plugin is active with no fatal
+        run: |
+          npx --yes @wordpress/env@latest run cli wp plugin list
+          npx --yes @wordpress/env@latest run cli wp plugin is-active otok-for-woocommerce
+      - name: Runtime assertions (outbox table, blocks consent field, HPOS + blocks compatibility)
+        run: npx --yes @wordpress/env@latest run cli wp eval-file wp-content/otok-ci/ci-smoke.php
+      - name: Deactivates cleanly
+        run: npx --yes @wordpress/env@latest run cli wp plugin deactivate otok-for-woocommerce

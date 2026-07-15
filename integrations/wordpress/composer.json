@@ -1,0 +1,22 @@
+{
+	"name": "otok/otok-for-woocommerce-dev",
+	"description": "Development tooling (PHPCS / WordPress Coding Standards) for the oToK for WooCommerce plugin. Not shipped — the shippable plugin lives in otok-for-woocommerce/.",
+	"type": "project",
+	"license": "GPL-2.0-or-later",
+	"require": {
+		"php": ">=8.1"
+	},
+	"require-dev": {
+		"wp-coding-standards/wpcs": "^3.1",
+		"dealerdirect/phpcodesniffer-composer-installer": "^1.0"
+	},
+	"config": {
+		"allow-plugins": {
+			"dealerdirect/phpcodesniffer-composer-installer": true
+		}
+	},
+	"scripts": {
+		"phpcs": "phpcs",
+		"phpcs:fix": "phpcbf"
+	}
+}

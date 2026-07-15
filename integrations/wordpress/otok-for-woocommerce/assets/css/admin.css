@@ -1,0 +1,82 @@
+/**
+ * oToK for WooCommerce — admin styles.
+ *
+ * Uses CSS logical properties (inline-start/inline-end) throughout, so the
+ * sheet is direction-correct in RTL locales without an -rtl sibling. The
+ * one deliberate exception (.otok-wc-diagnostics) forces LTR on purpose.
+ */
+
+.otok-wc-settings {
+	max-width: 760px;
+}
+
+.otok-wc-card {
+	background: #fff;
+	border: 1px solid #c3c4c7;
+	border-radius: 4px;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+	margin-block-start: 16px;
+	padding: 16px 20px;
+}
+
+.otok-wc-card h2 {
+	margin-block-start: 0;
+}
+
+.otok-wc-field-label {
+	display: block;
+	font-weight: 600;
+	margin-block-end: 4px;
+}
+
+.otok-wc-table {
+	border-collapse: collapse;
+	margin-block-end: 12px;
+}
+
+.otok-wc-table th {
+	font-weight: 600;
+	padding-block: 6px;
+	padding-inline-end: 24px;
+	text-align: start;
+	vertical-align: top;
+	white-space: nowrap;
+}
+
+.otok-wc-table td {
+	padding-block: 6px;
+}
+
+.otok-wc-status--ok {
+	color: #00a32a;
+	font-weight: 600;
+}
+
+.otok-wc-status--warn {
+	color: #d63638;
+	font-weight: 600;
+}
+
+.otok-wc-field-hint {
+	color: #646970;
+	display: block;
+	margin-block-start: 4px;
+}
+
+.otok-wc-diagnostics {
+	direction: ltr; /* Diagnostics block is machine-formatted English. */
+	font-family: Consolas, Monaco, monospace;
+	resize: vertical;
+	text-align: left;
+	width: 100%;
+}
+
+#otok_wc_pairing_code {
+	direction: ltr; /* Connect codes are Latin tokens; keep caret/entry LTR in RTL admins. */
+	text-align: start;
+}
+
+.otok-wc-support {
+	color: #646970;
+	margin-block-start: 24px;
+}

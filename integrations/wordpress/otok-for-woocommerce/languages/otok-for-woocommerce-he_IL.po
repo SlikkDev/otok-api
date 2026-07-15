@@ -1,0 +1,395 @@
+# Copyright (C) 2026 oToK
+# This file is distributed under the GPL-2.0-or-later.
+msgid ""
+msgstr ""
+"Project-Id-Version: oToK for WooCommerce 0.1.0\n"
+"Report-Msgid-Bugs-To: we@otok.io\n"
+"Last-Translator: oToK <we@otok.io>\n"
+"Language-Team: Hebrew <we@otok.io>\n"
+"Language: he_IL\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=n != 1;\n"
+"POT-Creation-Date: 2026-07-14T19:05:53+00:00\n"
+"PO-Revision-Date: 2026-07-14 19:30+0000\n"
+"X-Generator: WP-CLI 2.12.0\n"
+"X-Domain: otok-for-woocommerce\n"
+
+#. Plugin Name of the plugin
+#: otok-for-woocommerce.php
+#: includes/admin/class-otok-wc-admin.php:106
+#: includes/admin/views/settings-page.php:17
+msgid "oToK for WooCommerce"
+msgstr "oToK ל-WooCommerce"
+
+#. Plugin URI of the plugin
+#: otok-for-woocommerce.php
+msgid "https://otok.io/woocommerce"
+msgstr "https://otok.io/woocommerce"
+
+#. Description of the plugin
+#: otok-for-woocommerce.php
+msgid "Connects your WooCommerce store to oToK — marketing consent at checkout plus cart and order events for automation flows. Talks only to the oToK service you explicitly connect."
+msgstr "מחבר את חנות ה-WooCommerce שלך ל-oToK — הסכמה שיווקית בקופה, יחד עם אירועי עגלה והזמנות לתהליכי אוטומציה. מתקשר אך ורק עם שירות oToK שחובר במפורש."
+
+#. Author of the plugin
+#: otok-for-woocommerce.php
+#: includes/admin/class-otok-wc-admin.php:107
+msgid "oToK"
+msgstr "oToK"
+
+#. Author URI of the plugin
+#: otok-for-woocommerce.php
+msgid "https://otok.io"
+msgstr "https://otok.io"
+
+#: includes/admin/class-otok-wc-admin.php:144
+msgid "Settings"
+msgstr "הגדרות"
+
+#: includes/admin/class-otok-wc-admin.php:157
+msgid "You do not have permission to access this page."
+msgstr "אין לך הרשאה לגשת לעמוד זה."
+
+#: includes/admin/class-otok-wc-admin.php:193
+msgid "Revoked — oToK no longer accepts this connection"
+msgstr "נשלל — oToK כבר אינו מקבל את החיבור הזה"
+
+#: includes/admin/class-otok-wc-admin.php:195
+msgid "Suspended — site URL changed since connecting"
+msgstr "מושעה — כתובת האתר השתנתה מאז החיבור"
+
+#: includes/admin/class-otok-wc-admin.php:197
+msgid "Paused — stored credentials are unreadable on this server (retrying automatically, nothing is lost). Reconnect the store."
+msgstr "מושהה — פרטי הגישה השמורים אינם ניתנים לקריאה בשרת זה (מתבצעים ניסיונות חוזרים אוטומטית, שום דבר לא הולך לאיבוד). יש לחבר את החנות מחדש."
+
+#: includes/admin/class-otok-wc-admin.php:199
+msgid "Paused — oToK plan lapsed (retrying automatically, nothing is lost)"
+msgstr "מושהה — תוקף המסלול ב-oToK פג (מתבצעים ניסיונות חוזרים אוטומטית, שום דבר לא הולך לאיבוד)"
+
+#: includes/admin/class-otok-wc-admin.php:201
+msgid "Connected"
+msgstr "מחובר"
+
+#: includes/admin/class-otok-wc-admin.php:203
+msgid "Not connected"
+msgstr "לא מחובר"
+
+#: includes/admin/class-otok-wc-admin.php:224
+msgid "oToK for WooCommerce: connection revoked."
+msgstr "oToK ל-WooCommerce: החיבור נשלל."
+
+#: includes/admin/class-otok-wc-admin.php:225
+msgid "oToK repeatedly rejected this store's credentials, so event delivery is paused. Queued events are kept. Disconnect and reconnect with a fresh code from your oToK workspace."
+msgstr "oToK דחה שוב ושוב את פרטי הגישה של החנות, ולכן שליחת האירועים הושהתה. אירועים שממתינים בתור נשמרים. יש להתנתק ולהתחבר מחדש עם קוד חדש מסביבת העבודה שלך ב-oToK."
+
+#: includes/admin/class-otok-wc-admin.php:227
+#: includes/admin/class-otok-wc-admin.php:238
+msgid "Open oToK settings to reconnect"
+msgstr "פתיחת הגדרות oToK לחיבור מחדש"
+
+#: includes/admin/class-otok-wc-admin.php:235
+msgid "oToK for WooCommerce: connection needs attention."
+msgstr "oToK ל-WooCommerce: החיבור דורש טיפול."
+
+#: includes/admin/class-otok-wc-admin.php:236
+msgid "This site can no longer use its stored oToK credentials — this usually happens when the wp-config security salts are rotated. Event delivery is paused and queued events are kept. Disconnect and reconnect with a fresh code from your oToK workspace."
+msgstr "האתר אינו יכול עוד להשתמש בפרטי הגישה השמורים של oToK — בדרך כלל זה קורה כאשר מפתחות האבטחה (salts) בקובץ wp-config מוחלפים. שליחת האירועים הושהתה והאירועים שבתור נשמרים. יש להתנתק ולהתחבר מחדש עם קוד חדש מסביבת העבודה שלך ב-oToK."
+
+#: includes/admin/class-otok-wc-admin.php:251
+msgid "oToK for WooCommerce: site URL changed."
+msgstr "oToK ל-WooCommerce: כתובת האתר השתנתה."
+
+#: includes/admin/class-otok-wc-admin.php:252
+msgid "This site's URL no longer matches the one recorded when the store was connected — this usually means a staging copy or a migrated site. Event delivery is suspended so a clone can never send data into the original connection. Queued events are kept."
+msgstr "כתובת האתר כבר אינה תואמת את הכתובת שנרשמה בעת חיבור החנות — בדרך כלל מדובר בעותק staging או באתר שהועבר. שליחת האירועים מושעית כדי שעותק של האתר לעולם לא ישלח נתונים אל החיבור המקורי. אירועים שבתור נשמרים."
+
+#: includes/admin/class-otok-wc-admin.php:254
+msgid "This is a copy — reconnect it separately"
+msgstr "זהו עותק — יש לחבר אותו בנפרד"
+
+#: includes/admin/class-otok-wc-admin.php:256
+msgid "The URL change is expected — resume delivery"
+msgstr "שינוי הכתובת צפוי — לחדש את השליחה"
+
+#: includes/admin/class-otok-wc-admin.php:268
+#: includes/admin/class-otok-wc-admin.php:286
+#: includes/admin/class-otok-wc-admin.php:319
+#: includes/admin/class-otok-wc-admin.php:339
+#: includes/admin/class-otok-wc-admin.php:359
+msgid "You do not have permission to do that."
+msgstr "אין לך הרשאה לבצע פעולה זו."
+
+#: includes/admin/class-otok-wc-admin.php:275
+msgid "Site URL confirmed — event delivery resumes."
+msgstr "כתובת האתר אושרה — שליחת האירועים מתחדשת."
+
+#: includes/admin/class-otok-wc-admin.php:302
+msgid "Store connected to oToK."
+msgstr "החנות חוברה ל-oToK."
+
+#: includes/admin/class-otok-wc-admin.php:327
+msgid "Consent settings saved."
+msgstr "הגדרות ההסכמה נשמרו."
+
+#: includes/admin/class-otok-wc-admin.php:348
+msgid "Cart tracking settings saved."
+msgstr "הגדרות מעקב העגלה נשמרו."
+
+#: includes/admin/class-otok-wc-admin.php:373
+msgid "Disconnected from oToK on this site. To fully revoke the connection, also remove it in your oToK workspace."
+msgstr "האתר נותק מ-oToK. לביטול מלא של החיבור, יש להסיר אותו גם בסביבת העבודה שלך ב-oToK."
+
+#: includes/admin/views/settings-page.php:28
+msgid "Connect to oToK"
+msgstr "התחברות ל-oToK"
+
+#: includes/admin/views/settings-page.php:29
+msgid "Generate a one-time connect code on the WooCommerce connect screen in your oToK workspace, then paste it here. The code is exchanged once over HTTPS and never stored."
+msgstr "יש להפיק קוד חיבור חד-פעמי במסך החיבור של WooCommerce בסביבת העבודה שלך ב-oToK, ולהדביק אותו כאן. הקוד מוחלף פעם אחת בלבד דרך HTTPS ואינו נשמר."
+
+#: includes/admin/views/settings-page.php:34
+msgid "One-time connect code"
+msgstr "קוד חיבור חד-פעמי"
+
+#: includes/admin/views/settings-page.php:43
+msgid "Connect"
+msgstr "להתחבר"
+
+#: includes/admin/views/settings-page.php:50
+msgid "Connected to oToK"
+msgstr "מחובר ל-oToK"
+
+#: includes/admin/views/settings-page.php:54
+msgid "Connection ID"
+msgstr "מזהה חיבור"
+
+#: includes/admin/views/settings-page.php:58
+msgid "Connected on"
+msgstr "תאריך החיבור"
+
+#: includes/admin/views/settings-page.php:68
+msgid "Site URL check"
+msgstr "בדיקת כתובת האתר"
+
+#: includes/admin/views/settings-page.php:71
+msgid "Matches the connect-time snapshot"
+msgstr "תואמת את הכתובת שנשמרה בעת החיבור"
+
+#: includes/admin/views/settings-page.php:73
+msgid "Site URL changed since connecting — if this site was moved or cloned, reconnect it to oToK."
+msgstr "כתובת האתר השתנתה מאז החיבור — אם האתר הועבר או שוכפל, יש לחבר אותו מחדש ל-oToK."
+
+#: includes/admin/views/settings-page.php:82
+msgid "Disconnect this store from oToK? Events will stop flowing until you reconnect."
+msgstr "לנתק את החנות מ-oToK? אירועים יפסיקו להישלח עד לחיבור מחדש."
+
+#: includes/admin/views/settings-page.php:85
+msgid "Disconnect"
+msgstr "להתנתק"
+
+#: includes/admin/views/settings-page.php:92
+msgid "Marketing consent at checkout"
+msgstr "הסכמה שיווקית בקופה"
+
+#: includes/admin/views/settings-page.php:93
+msgid "Shoppers see this checkbox at checkout — in the order information step of the Checkout block, and after the email field on the classic checkout. Their choice is recorded on the order."
+msgstr "לקוחות רואים את תיבת הסימון הזו בקופה — בשלב פרטי ההזמנה של בלוק הקופה (Checkout block), ואחרי שדה האימייל בקופה הקלאסית. הבחירה שלהם נרשמת על ההזמנה."
+
+#: includes/admin/views/settings-page.php:98
+msgid "Checkbox label"
+msgstr "תווית תיבת הסימון"
+
+#: includes/admin/views/settings-page.php:106
+msgid "Plain text only. Leave empty to use the default label."
+msgstr "טקסט פשוט בלבד. יש להשאיר ריק כדי להשתמש בתווית ברירת המחדל."
+
+#: includes/admin/views/settings-page.php:109
+msgid "The checkbox is always shown and always starts unchecked. Express opt-in laws (such as the Israeli spam law and the GDPR) do not allow pre-ticked marketing consent, so there is deliberately no setting to change this."
+msgstr "תיבת הסימון תמיד מוצגת ותמיד מתחילה לא מסומנת. חוקי הסכמה מפורשת (כמו חוק הספאם הישראלי וה-GDPR) אינם מתירים סימון מראש של הסכמה שיווקית, ולכן במכוון אין הגדרה לשינוי התנהגות זו."
+
+#: includes/admin/views/settings-page.php:111
+msgid "Save consent settings"
+msgstr "שמירת הגדרות ההסכמה"
+
+#: includes/admin/views/settings-page.php:116
+msgid "Cart tracking"
+msgstr "מעקב עגלה"
+
+#: includes/admin/views/settings-page.php:117
+msgid "Cart activity is sent to oToK as raw snapshots so abandoned-cart automations can run there. Whether and when a cart counts as abandoned is decided in your oToK workspace, not by this plugin."
+msgstr "פעילות העגלה נשלחת ל-oToK כתמונות מצב גולמיות, כך שאוטומציות של עגלה נטושה יכולות לפעול שם. ההחלטה אם ומתי עגלה נחשבת נטושה מתקבלת בסביבת העבודה שלך ב-oToK, לא בתוסף הזה."
+
+#: includes/admin/views/settings-page.php:128
+msgid "Capture the email address guests type at checkout"
+msgstr "לקלוט את כתובת האימייל שאורחים מקלידים בקופה"
+
+#: includes/admin/views/settings-page.php:130
+msgid "Lets oToK match an abandoned cart to a contact before an order exists. The address is kept only in the shopper's WooCommerce session and attached to cart events — it is never logged or stored elsewhere."
+msgstr "מאפשר ל-oToK להתאים עגלה נטושה לאיש קשר עוד לפני שקיימת הזמנה. הכתובת נשמרת רק בסשן ה-WooCommerce של הלקוח ומצורפת לאירועי עגלה — היא לעולם אינה נרשמת ביומנים או נשמרת במקום אחר."
+
+#: includes/admin/views/settings-page.php:139
+msgid "Strict mode: attach the captured email only after the shopper ticks the marketing-consent checkbox"
+msgstr "מצב מחמיר: לצרף את האימייל שנקלט רק לאחר שהלקוח מסמן את תיבת ההסכמה השיווקית"
+
+#: includes/admin/views/settings-page.php:141
+msgid "Conservative option for stores that do not want to send a guest's email with cart events before an explicit opt-in. Cart events themselves are always sent; only the captured guest email is held back. Applies to the classic checkout; on the Checkout block the email is held back until the order is placed."
+msgstr "אפשרות שמרנית לחנויות שאינן רוצות לשלוח את כתובת האימייל של אורח עם אירועי עגלה לפני הסכמה מפורשת. אירועי העגלה עצמם נשלחים תמיד; רק האימייל שנקלט מעוכב. חל על הקופה הקלאסית; בבלוק הקופה האימייל מעוכב עד להשלמת ההזמנה."
+
+#: includes/admin/views/settings-page.php:143
+msgid "Save cart tracking settings"
+msgstr "שמירת הגדרות מעקב העגלה"
+
+#: includes/admin/views/settings-page.php:148
+msgid "Health"
+msgstr "תקינות"
+
+#: includes/admin/views/settings-page.php:152
+msgid "Delivery state"
+msgstr "מצב השליחה"
+
+#: includes/admin/views/settings-page.php:157
+msgid "Queued events are kept. Disconnect above, generate a fresh connect code in your oToK workspace, and reconnect to resume delivery."
+msgstr "אירועים שבתור נשמרים. יש להתנתק למעלה, להפיק קוד חיבור חדש בסביבת העבודה שלך ב-oToK, ולהתחבר מחדש כדי לחדש את השליחה."
+
+#: includes/admin/views/settings-page.php:162
+msgid "Queue depth"
+msgstr "עומק התור"
+
+#. translators: 1: number of queued (pending) events, 2: number of permanently failed events.
+#: includes/admin/views/settings-page.php:167
+#, php-format
+msgid "%1$s pending / %2$s failed"
+msgstr "%1$s ממתינים / %2$s נכשלו"
+
+#: includes/admin/views/settings-page.php:175
+msgid "Last successful delivery"
+msgstr "שליחה מוצלחת אחרונה"
+
+#: includes/admin/views/settings-page.php:183
+msgid "No deliveries yet"
+msgstr "עדיין לא בוצעו שליחות"
+
+#: includes/admin/views/settings-page.php:192
+msgid "Recent delivery failures"
+msgstr "כשלי שליחה אחרונים"
+
+#: includes/admin/views/settings-page.php:196
+msgid "Time (UTC)"
+msgstr "זמן (UTC)"
+
+#: includes/admin/views/settings-page.php:197
+msgid "Event"
+msgstr "אירוע"
+
+#: includes/admin/views/settings-page.php:198
+msgid "Status"
+msgstr "סטטוס"
+
+#: includes/admin/views/settings-page.php:199
+msgid "Error"
+msgstr "שגיאה"
+
+#: includes/admin/views/settings-page.php:215
+msgid "Diagnostics"
+msgstr "אבחון"
+
+#: includes/admin/views/settings-page.php:216
+msgid "Copy this block into a support email. It contains version and status information only — no secrets and no customer data."
+msgstr "יש להעתיק את הבלוק הזה לאימייל תמיכה. הוא מכיל מידע על גרסאות וסטטוס בלבד — ללא סודות וללא נתוני לקוחות."
+
+#: includes/admin/views/settings-page.php:222
+msgid "Copied!"
+msgstr "הועתק!"
+
+#: includes/admin/views/settings-page.php:223
+msgid "Copy failed — select the text and copy it manually."
+msgstr "ההעתקה נכשלה — יש לסמן את הטקסט ולהעתיק אותו ידנית."
+
+#: includes/admin/views/settings-page.php:224
+msgid "Copy diagnostics"
+msgstr "העתקת נתוני אבחון"
+
+#. translators: %s: support email address link.
+#: includes/admin/views/settings-page.php:233
+#, php-format
+msgid "Need help? Email %s."
+msgstr "זקוקים לעזרה? ניתן לכתוב אל %s."
+
+#: includes/class-otok-wc-connect.php:92
+msgid "The oToK service URL must use HTTPS."
+msgstr "כתובת שירות oToK חייבת להשתמש ב-HTTPS."
+
+#: includes/class-otok-wc-connect.php:142
+msgid "Another connection attempt is already in progress. Please wait a moment and try again."
+msgstr "ניסיון חיבור אחר כבר מתבצע. יש להמתין רגע ולנסות שוב."
+
+#: includes/class-otok-wc-connect.php:130
+msgid "This store is already connected to oToK. Disconnect first to connect with a new code."
+msgstr "החנות הזו כבר מחוברת ל-oToK. יש להתנתק תחילה כדי להתחבר עם קוד חדש."
+
+#: includes/class-otok-wc-connect.php:139
+msgid "That connect code does not look valid. Paste the one-time code exactly as shown in oToK."
+msgstr "קוד החיבור אינו נראה תקין. יש להדביק את הקוד החד-פעמי בדיוק כפי שהוא מוצג ב-oToK."
+
+#. translators: %s: sanitized transport error detail (e.g. timeout, DNS, or TLS message).
+#: includes/class-otok-wc-connect.php:182
+#, php-format
+msgid "Could not reach the oToK service. Check that this server can make outbound HTTPS requests and try again. Details: %s"
+msgstr "לא ניתן להגיע לשירות oToK. יש לוודא שהשרת יכול לבצע בקשות HTTPS יוצאות ולנסות שוב. פרטים: %s"
+
+#: includes/class-otok-wc-connect.php:185
+msgid "Could not reach the oToK service. Check that this server can make outbound HTTPS requests and try again."
+msgstr "לא ניתן להגיע לשירות oToK. יש לוודא שהשרת יכול לבצע בקשות HTTPS יוצאות ולנסות שוב."
+
+#: includes/class-otok-wc-connect.php:197
+msgid "Too many connection attempts. Wait a minute and try again with the same code."
+msgstr "יותר מדי ניסיונות חיבור. יש להמתין דקה ולנסות שוב עם אותו הקוד."
+
+#: includes/class-otok-wc-connect.php:204
+msgid "oToK rejected the connect code. Codes are one-time and expire quickly — generate a fresh code in oToK and try again."
+msgstr "oToK דחה את קוד החיבור. הקודים חד-פעמיים ותוקפם פג במהירות — יש להפיק קוד חדש ב-oToK ולנסות שוב."
+
+#. translators: %s: sanitized error detail (HTTP status and response excerpt).
+#: includes/class-otok-wc-connect.php:216
+#, php-format
+msgid "The oToK service returned an unexpected error. Please try again in a few minutes. Details: %s"
+msgstr "שירות oToK החזיר שגיאה לא צפויה. יש לנסות שוב בעוד כמה דקות. פרטים: %s"
+
+#: includes/class-otok-wc-connect.php:234
+msgid "The oToK service returned an unexpected response. Please try again; if it keeps failing, contact we@otok.io."
+msgstr "שירות oToK החזיר תגובה לא צפויה. יש לנסות שוב; אם הבעיה נמשכת, ניתן לפנות אל we@otok.io."
+
+#: includes/class-otok-wc-consent.php:139
+msgid "I'd like to receive news and offers by email"
+msgstr "אשמח לקבל חדשות ומבצעים באימייל"
+
+#: includes/class-otok-wc-credentials.php:186
+msgid "This server's PHP is missing the sodium extension, so the connection secret cannot be stored securely. Ask your host to enable ext/sodium (bundled with PHP since 7.2) and try again."
+msgstr "ל-PHP בשרת הזה חסרה ההרחבה sodium, ולכן לא ניתן לאחסן את סוד החיבור בצורה מאובטחת. יש לבקש מחברת האחסון להפעיל את ext/sodium (כלולה ב-PHP מאז גרסה 7.2) ולנסות שוב."
+
+#: otok-for-woocommerce.php:57
+msgid "oToK for WooCommerce does not support network activation. Please activate it individually on each site that runs WooCommerce."
+msgstr "oToK ל-WooCommerce אינו תומך בהפעלה ברמת הרשת (network activation). יש להפעיל אותו בנפרד בכל אתר שבו פועל WooCommerce."
+
+#: otok-for-woocommerce.php:58
+msgid "Plugin activation error"
+msgstr "שגיאה בהפעלת התוסף"
+
+#. translators: 1: required WooCommerce version, 2: detected WooCommerce version.
+#: otok-for-woocommerce.php:158
+#, php-format
+msgid "oToK for WooCommerce requires WooCommerce %1$s or newer (version %2$s detected). The plugin will not do anything until WooCommerce is updated."
+msgstr "oToK ל-WooCommerce דורש WooCommerce בגרסה %1$s ומעלה (זוהתה גרסה %2$s). התוסף לא יבצע דבר עד לעדכון WooCommerce."
+
+#: otok-for-woocommerce.php:160
+msgctxt "detected WooCommerce version fallback"
+msgid "unknown"
+msgstr "לא ידועה"
+
+#. translators: %s: required WooCommerce version.
+#: otok-for-woocommerce.php:165
+#, php-format
+msgid "oToK for WooCommerce requires WooCommerce (%s or newer) to be installed and active. The plugin will not do anything until then."
+msgstr "oToK ל-WooCommerce דורש ש-WooCommerce (גרסה %s ומעלה) יהיה מותקן ופעיל. התוסף לא יבצע דבר עד אז."

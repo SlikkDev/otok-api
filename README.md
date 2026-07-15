@@ -33,6 +33,14 @@ curl "https://app.otok.io/api/v1/contacts?limit=5" \
 - Interactive Swagger docs: `https://app.otok.io/api/v1/docs`
 - Requires a plan with API access (Growth or higher)
 
+## WordPress / WooCommerce plugin
+
+**oToK for WooCommerce** — a self-contained WordPress plugin that connects a WooCommerce store to oToK: marketing consent at checkout, plus cart and order events delivered over signed webhooks with durable queuing and retries.
+
+- Lives in [`integrations/wordpress/`](integrations/wordpress/)
+- Developer docs: [`integrations/wordpress/README.md`](integrations/wordpress/README.md)
+- CI: lint, PHPCS, and a wp-env runtime smoke test run on any change under `integrations/wordpress/`
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE), with one exception: the `integrations/wordpress/` subtree is GPL-2.0-or-later (it is a WordPress plugin and bundles Action Scheduler) — see [its LICENSE](integrations/wordpress/otok-for-woocommerce/LICENSE).
