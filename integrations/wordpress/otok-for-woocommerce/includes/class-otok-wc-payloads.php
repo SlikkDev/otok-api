@@ -10,16 +10,16 @@ defined( 'ABSPATH' ) || exit;
 /**
  * Builds every wire payload the plugin sends to oToK.
  *
- * PROVISIONAL SHAPES — read before editing or depending on field names
+ * FROZEN SHAPES — read before editing or depending on field names
  * -----------------------------------------------------------------------
- * The event TOPIC vocabulary below is FROZEN as part of the oToK
- * e-commerce contract (2026-07-14). The ENVELOPE field names and every
- * `data` payload shape are PROVISIONAL and will be adjusted when the
- * oToK e-commerce contract freezes the envelope. That is exactly why
- * ALL serializers live in this single class: an envelope/shape change must
- * be a one-file diff. Do not construct wire payloads anywhere else.
+ * The envelope, topic vocabulary and every `data` payload shape below
+ * conform to the NORMATIVE wire contract frozen with the oToK e-commerce
+ * framework: `docs/integrations/otok-wc-plugin-contract.md` in the oToK
+ * repository. Changes require a coordinated version bump on both sides.
+ * ALL serializers live in this single class so a contract change is a
+ * one-file diff. Do not construct wire payloads anywhere else.
  *
- * Envelope contract (PROVISIONAL):
+ * Envelope contract (frozen):
  *   { "event_id":    uuid4 — minted at ENQUEUE, stable across retries
  *                    (it is the server's dedupe key; a new snapshot after
  *                    enqueue is a NEW event with a NEW event_id),
@@ -182,7 +182,7 @@ class Otok_WC_Payloads {
 	}
 
 	/**
-	 * Data payload for `otok/consent_updated` (PROVISIONAL shape).
+	 * Data payload for `otok/consent_updated` (wire contract §4).
 	 *
 	 * Emitted at order-processed time from the captured consent order meta.
 	 * `consent_source` attaches ONLY when the consent is `granted` — the wire
@@ -190,8 +190,11 @@ class Otok_WC_Payloads {
 	 * basis express_opt_in.
 	 *
 	 * `phone` is E.164-canonicalized against `country` (billing country,
-	 * alpha-2 — a canonicalization INPUT, never emitted) and omitted when it
-	 * cannot be canonicalized — see canonicalize_phone().
+	 * alpha-2) and omitted when it cannot be canonicalized — see
+	 * canonicalize_phone(). The country ALSO rides the optional Woo-style
+	 * `billing` enrichment object as `billing.country` (contract §4/§7):
+	 * belt-and-suspenders that lets the server canonicalize a national-format
+	 * phone; the plugin's E.164-or-omit rule is unchanged.
 	 *
 	 * @param array $args {email, consent (granted|not_granted), consent_source,
 	 *                    consented_at, phone?, country?, first_name?, last_name?}.
@@ -202,12 +205,18 @@ class Otok_WC_Payloads {
 			'email' => (string) $args['email'],
 		);
 
+		$country = strtoupper( trim( isset( $args['country'] ) ? (string) $args['country'] : '' ) );
+
 		$phone = self::canonicalize_phone(
 			isset( $args['phone'] ) ? $args['phone'] : '',
-			isset( $args['country'] ) ? $args['country'] : ''
+			$country
 		);
 		if ( '' !== $phone ) {
 			$data['phone'] = $phone;
+		}
+
+		if ( 1 === preg_match( '/^[A-Z]{2}$/', $country ) ) {
+			$data['billing'] = array( 'country' => $country );
 		}
 
 		foreach ( array( 'first_name', 'last_name' ) as $optional ) {
@@ -228,16 +237,19 @@ class Otok_WC_Payloads {
 	}
 
 	/**
-	 * Data payload for `otok/cart_created` / `otok/cart_updated` (PROVISIONAL
-	 * shape). Raw cart snapshots only — abandonment is decided server-side.
+	 * Data payload for `otok/cart_created` / `otok/cart_updated` (wire
+	 * contract §5). Raw cart snapshots only — abandonment is decided
+	 * server-side.
 	 *
-	 * `recovery_url` is the store's checkout URL (v1 limitation: WooCommerce
-	 * carts are session-bound, so there is no per-cart restore link to send).
-	 *
-	 * Carries the same `totals` sub-object as the order payload: on
+	 * The normative cart shape carries top-level `total` + `currency`. The
+	 * `totals` breakdown sub-object rides along as a tolerated extra
+	 * (contract §2: unknown extra fields are ignored, never an error): on
 	 * tax-inclusive-price stores the items' tax-exclusive unit prices never
 	 * sum to the tax-inclusive grand total, so the tax/discount/shipping
 	 * breakdown is what lets the server reconcile (and render) the cart.
+	 *
+	 * `recovery_url` is the store's checkout URL (v1 limitation: WooCommerce
+	 * carts are session-bound, so there is no per-cart restore link to send).
 	 *
 	 * @param array $args {cart_token, contact (email?/phone?/country? — see
 	 *                    contact()), items (raw item
@@ -247,43 +259,53 @@ class Otok_WC_Payloads {
 	 * @return array
 	 */
 	public static function cart( $args ) {
+		$totals = self::totals(
+			isset( $args['totals'] ) ? (array) $args['totals'] : array(),
+			isset( $args['currency'] ) ? $args['currency'] : ''
+		);
+
 		return array(
 			'cart_token'   => (string) $args['cart_token'],
 			'contact'      => self::contact( isset( $args['contact'] ) ? (array) $args['contact'] : array() ),
 			'items'        => self::items( isset( $args['items'] ) ? (array) $args['items'] : array() ),
-			'totals'       => self::totals( isset( $args['totals'] ) ? (array) $args['totals'] : array(), $args['currency'] ),
+			'total'        => $totals['total'],
+			'currency'     => $totals['currency'],
+			'totals'       => $totals,
 			'recovery_url' => (string) $args['recovery_url'],
 			'updated_at'   => (string) $args['updated_at'],
 		);
 	}
 
 	/**
-	 * Data payload for `otok/order_created` / `otok/order_updated`
-	 * (PROVISIONAL shape).
+	 * Data payload for `otok/order_created` / `otok/order_updated` (wire
+	 * contract §6).
 	 *
 	 * Frozen money rules: `totals.subtotal` = sum of pre-discount
 	 * tax-exclusive line subtotals; `totals.total` = the grand total
 	 * including tax + shipping − discounts; every value a decimal string.
-	 * Consumers validating the subtotal equation should use a per-line
-	 * tolerance, not exact equality — a derived unit_price
-	 * (line subtotal / qty, e.g. 10.00 / 3) is not finitely representable at
-	 * any fixed precision; the exact per-line amount rides `line_subtotal`.
+	 * NOTE (carried to the framework): the subtotal equation must be
+	 * validated with a per-line tolerance, not exact equality — a derived
+	 * unit_price (line subtotal / qty, e.g. 10.00 / 3) is not finitely
+	 * representable at any fixed precision; the exact per-line amount rides
+	 * `line_subtotal`.
 	 *
 	 * `sequence` is a per-order monotonic counter (order meta, incremented on
-	 * every emission) so the server can apply last-writer-wins even when
-	 * retries deliver events out of order. `cart_token` (when present) names
-	 * the cart this order concluded, letting the server retire it
-	 * deterministically — including carts stranded by failed payment retries.
+	 * every emission — a tolerated extra beyond the contract shape) so the
+	 * server can apply last-writer-wins even when retries deliver events out
+	 * of order. `cart_token` (when present) names the cart this order
+	 * concluded (contract §6 — the completion join key), letting the server
+	 * tombstone the purchased cart in the abandoned-cart pipeline — including
+	 * carts stranded by failed payment retries; omitted entirely when unknown
+	 * (admin-created orders, untracked carts).
 	 *
-	 * Wire-contract additions (oToK e-commerce contract addendum, 2026-07-14):
 	 * `updated_at` is the order's last-modified instant (ISO-8601 UTC) — the
-	 * server's out-of-order/stale-webhook guard keys on it. `refunds` lists
-	 * every recorded refund as {refund_id, amount, created_at}; `refund_id`
-	 * is the stable WooCommerce refund id (stringified) the server's
-	 * refund-idempotency claims key on, `amount` a POSITIVE decimal string.
-	 * The `contact` sub-object carries NO consent fields — consent authority
-	 * on the plugin path is exclusively `otok/consent_updated` (frozen
-	 * confirmation), so an order payload never pre-empts a
+	 * server's out-of-order/stale-webhook guard keys on it and it must be
+	 * monotonic per order. `refunds` lists every recorded refund to date as
+	 * {refund_id, amount, created_at}; `refund_id` is the stable WooCommerce
+	 * refund id (stringified) the server's refund-idempotency claims key on,
+	 * `amount` a POSITIVE decimal string. The `contact` sub-object carries NO
+	 * consent fields — consent authority on the plugin path is exclusively
+	 * `otok/consent_updated`, so an order payload never pre-empts a
 	 * shown-but-unchecked checkbox.
 	 *
 	 * @param array $args {external_order_id, order_number, sequence, contact,
@@ -690,25 +712,33 @@ class Otok_WC_Payloads {
 	}
 
 	/**
-	 * Line-item list: maps raw producer tuples onto the wire item shape.
-	 * `unit_price` is tax-exclusive by the frozen money rule; `line_subtotal`
-	 * is the EXACT pre-discount tax-exclusive line amount (unit_price is a
-	 * derived, rounded convenience — "3 for 10.00" cannot round-trip through
+	 * Line-item list: maps raw producer tuples onto the shared wire item
+	 * shape (contract §5/§6): `external_id` (the stable line-item id — Woo
+	 * order-item id / cart-item key), `external_product_id`, `sku`, `title`,
+	 * `qty`, `unit_price`. `unit_price` is tax-exclusive by the frozen money
+	 * rule; `line_subtotal` is a tolerated extra carrying the EXACT
+	 * pre-discount tax-exclusive line amount (unit_price is a derived,
+	 * rounded convenience — "3 for 10.00" cannot round-trip through
 	 * unit_price × qty at fixed precision). `qty` is emitted as a JSON number
 	 * and may be fractional (decimal-quantity plugins: 0.5 kg is 0.5, never
-	 * truncated to 0).
+	 * truncated to 0 — a deliberate, documented deviation from the contract's
+	 * integer wording; core stores always emit integers).
 	 *
-	 * @param array $items Raw tuples {product_id, sku, title, qty, unit_price,
-	 *                     line_subtotal?}.
+	 * @param array $items Raw tuples {external_id?, product_id, sku, title,
+	 *                     qty, unit_price, line_subtotal?}.
 	 * @return array[]
 	 */
 	private static function items( $items ) {
 		$out = array();
 
 		foreach ( (array) $items as $item ) {
-			$row = array(
-				'external_product_id' => (string) $item['product_id'],
-			);
+			$row = array();
+
+			if ( ! empty( $item['external_id'] ) ) {
+				$row['external_id'] = (string) $item['external_id'];
+			}
+
+			$row['external_product_id'] = (string) ( isset( $item['product_id'] ) ? $item['product_id'] : '' );
 
 			if ( ! empty( $item['sku'] ) ) {
 				$row['sku'] = (string) $item['sku'];

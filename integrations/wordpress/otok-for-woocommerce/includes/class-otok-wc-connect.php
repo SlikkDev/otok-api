@@ -9,15 +9,14 @@ defined( 'ABSPATH' ) || exit;
 
 if ( ! defined( 'OTOK_WC_PAIRING_PATH' ) ) {
 	/**
-	 * PROVISIONAL — pairing-code exchange endpoint path.
-	 *
-	 * The pairing flow SHAPE is stable (one-time code in, `{connection_id,
-	 * signing_secret}` out) but the endpoint path is owned by the oToK
-	 * server and is NOT final. It is isolated behind this one constant plus
-	 * the `otok_wc_pairing_path` filter so finalizing the path is a one-line
-	 * update.
+	 * FROZEN — pairing-token exchange endpoint path (normative wire contract
+	 * §9, `docs/integrations/otok-wc-plugin-contract.md` in the oToK repo):
+	 * one-time token in, `{connection_id, signing_secret}` out (plaintext
+	 * exactly once); every failure is a uniform 404. The constant + the
+	 * `otok_wc_pairing_path` filter remain as a coordinated-version-bump
+	 * seam only.
 	 */
-	define( 'OTOK_WC_PAIRING_PATH', '/api/ecommerce/connect/woocommerce/exchange' );
+	define( 'OTOK_WC_PAIRING_PATH', '/api/ecommerce/pair/woocommerce' );
 }
 
 /**
@@ -104,8 +103,9 @@ class Otok_WC_Connect {
 	 */
 	private function pairing_url( $base_url ) {
 		/**
-		 * Filters the pairing-exchange endpoint path (PROVISIONAL — see the
-		 * OTOK_WC_PAIRING_PATH docblock).
+		 * Filters the pairing-exchange endpoint path (FROZEN — see the
+		 * OTOK_WC_PAIRING_PATH docblock; override only for a coordinated
+		 * contract version bump).
 		 *
 		 * @param string $path Endpoint path relative to the oToK base URL.
 		 */
@@ -201,7 +201,7 @@ class Otok_WC_Connect {
 					'Content-Type' => 'application/json',
 					'Accept'       => 'application/json',
 				),
-				'body'                => wp_json_encode( array( 'code' => $code ) ),
+				'body'                => wp_json_encode( array( 'token' => $code ) ),
 				// RFC 7231 product token + parenthesized comment; the site URL
 				// is an operator courtesy so oToK can identify the caller.
 				'user-agent'          => 'oToK-for-WooCommerce/' . OTOK_WC_VERSION . ' (' . esc_url_raw( site_url() ) . ')',
