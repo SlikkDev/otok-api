@@ -24,6 +24,7 @@ from .commerce import (
 )
 from .errors import OtokAPIError, OtokTimeoutError, OtokWebhookVerificationError
 from .types import (
+    DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES,
     EMAIL_WEBHOOK_EVENT_TYPES,
     Booking,
     BookingCreateParams,
@@ -97,6 +98,7 @@ from .webhooks import (
 
 __all__ = [
     "DEFAULT_BASE_URL",
+    "DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES",
     "DEFAULT_TOLERANCE_SECONDS",
     "EMAIL_WEBHOOK_EVENT_TYPES",
     "Booking",

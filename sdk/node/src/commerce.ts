@@ -1,8 +1,8 @@
 import type { ContactsApi, DealsApi, EmailsApi } from "./resources";
 import type {
-  Contact,
   ContactUpsertParams,
-  Deal,
+  ContactUpsertResult,
+  DealCreateResult,
   EmailSendResult,
 } from "./types";
 
@@ -78,8 +78,10 @@ export interface CommerceOrder {
 }
 
 export interface TrackOrderResult {
-  contact: Contact;
-  deal: Deal;
+  /** `contact.duplicate` is true when an existing contact was matched. */
+  contact: ContactUpsertResult;
+  /** `deal.duplicate` is true when the order was already tracked (replay). */
+  deal: DealCreateResult;
   /** Present only when `order.receipt` was provided. */
   receipt?: EmailSendResult;
 }
@@ -136,9 +138,10 @@ export class CommerceApi {
   /**
    * Upsert a store customer as an oToK contact (matched by phone, falling
    * back to email). Tags/groups are added, never removed — safe to call on
-   * every login/checkout.
+   * every login/checkout. The result's `duplicate` flag is true when an
+   * existing contact was matched and updated.
    */
-  identifyCustomer(customer: CommerceCustomer): Promise<Contact> {
+  identifyCustomer(customer: CommerceCustomer): Promise<ContactUpsertResult> {
     return this.contacts.upsert(customerToContactParams(customer));
   }
 

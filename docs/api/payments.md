@@ -4,6 +4,8 @@ Record customer payments against contacts: one-time charges, recurring plans, an
 
 All endpoints require [authentication](getting-started.md#authentication). Payments cannot be deleted via the API.
 
+> **Plan feature required:** every payments route (including `/refund`) requires the **Payments** feature on the workspace's plan, in addition to API access. Without it, all calls return `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/payments` | List payments |
@@ -33,8 +35,8 @@ This route uses dedicated query parameters and its own pagination defaults — s
 | `type` | enum | `one_time`, `recurring`, `installments` — other values are silently ignored |
 | `status` | enum | Arrangement status: `active`, `completed`, `cancelled` — other values silently ignored |
 | `search` | string | Case-insensitive match over payment title + contact name/phone/email |
-| `limit` | number | Default **25**, clamped 1–100 (non-numeric → 25) |
-| `offset` | number | Default 0, min 0 |
+| `limit` | integer | Default **25**, cap 100. Absent or empty defaults; malformed → 400 `"Invalid limit: must be a non-negative integer"` |
+| `offset` | integer | Default 0, min 0. Malformed → 400 `"Invalid offset: must be a non-negative integer"` |
 
 Ordered by `purchase_date` descending. Rows include joined `contact_name` / `contact_phone` / `contact_email`.
 
@@ -64,7 +66,7 @@ Creates a payment — or, when `external_reference` matches an existing payment,
 | `email` | string | ″ | Valid email |
 | `name` | string | no | ≤200 — used only for a newly created contact |
 | `type` | enum | **yes** | `one_time`, `recurring`, `installments` |
-| `amount` | number | **yes** | ≥0. one_time: the charge amount; recurring: amount **per cycle**; installments: the **total** deal amount |
+| `amount` | number | **yes** | 0 – 9,999,999,999. one_time: the charge amount; recurring: amount **per cycle**; installments: the **total** deal amount |
 | `product_id` | UUID | no | Attach a product by id |
 | `product_sku` | string | no | ≤120 |
 | `product_external_id` | string | no | ≤255 |
@@ -79,7 +81,7 @@ Creates a payment — or, when `external_reference` matches an existing payment,
 | `record_first_payment` | boolean | no | Recurring only: record the first cycle immediately (default `true`) |
 | `recurring_end_at` | string | no | Recurring only; ISO 8601 — a date-only value means **end** of that day in the workspace timezone; must be after the purchase date |
 | `recurring_max_occurrences` | integer | no | Recurring only; ≥1 — total charge cycles ever |
-| `installment_count` | integer | conditionally | ≥2 — **required when `type` is `installments`** |
+| `installment_count` | integer | conditionally | 2 – 360 — **required when `type` is `installments`** (over the ceiling → 400 `"installmentCount must be at most 360"`) |
 | `external_reference` | string | no | ≤255 — **idempotency key**, unique per workspace |
 
 ### Contact and product resolution
@@ -103,7 +105,7 @@ When a POST carries an `external_reference` matching an existing payment in the 
 - **Only when it is `recurring`:** `auto_generate`, `recurring_end_at`, `recurring_max_occurrences`.
 - **Never restructured on a match:** `type`, `interval`, `installment_count`, `purchase_date` — and, unlike deals, **the contact is NOT re-pointed** on a match.
 
-The response is **201 in both cases** with no created-vs-updated marker.
+The response is **201 in both cases**, with a top-level boolean **`duplicate`** field: `false` when this request created the payment, `true` when the `external_reference` matched an existing payment (mutable fields updated).
 
 ### Example
 
@@ -138,6 +140,7 @@ Response `201`:
   "purchase_date": "2026-07-14T10:00:00.000Z",
   "external_reference": "shop-order-88123",
   "source": "api",
+  "duplicate": false,
   "entries": [
     {
       "id": "e1d2c3b4-…",
@@ -162,11 +165,12 @@ Response `201`:
 
 | Status | Code / message | Meaning |
 |---|---|---|
-| 400 | `"Invalid payment type"` / `"amount must be a non-negative number"` | Bad type/amount |
-| 400 | `"installmentCount must be at least 2 for an installment deal"` | Missing/low `installment_count` for installments |
+| 400 | `"Invalid payment type"` / `"amount must be a non-negative number"` / amount over 9,999,999,999 | Bad type/amount |
+| 400 | `"installmentCount must be at least 2 for an installment deal"` / `"installmentCount must be at most 360"` | Missing or out-of-range `installment_count` for installments |
 | 400 | `"purchaseDate is not a valid date"` / `"recurringEndAt is not a valid date"` / `"recurringEndAt must be after the purchase date"` / `"recurringMaxOccurrences must be a whole number of at least 1"` | Schedule validation |
 | 400 | `INVALID_PRODUCT` / `PRODUCT_INACTIVE` | Product reference problems |
 | 400 | `"Provide contact_id, or a phone/email…"` | No contact reference |
+| 403 | `FEATURE_NOT_INCLUDED_IN_PLAN` | Plan lacks the Payments feature (body has no `statusCode` field) |
 | 404 | `"Contact not found"` | `contact_id` not in this workspace |
 | 409 | `CONTACT_MERGE_REQUIRED` | Phone and email resolve to two different contacts |
 
@@ -184,7 +188,7 @@ All fields optional.
 | `title` | string | ≤200 — ignored while a product is attached |
 | `note` | string | ≤1000 |
 | `method` | enum | `cash`, `card`, `bank_transfer`, `other` |
-| `amount` | number | ≥0 — **one-time only** (silently ignored otherwise) |
+| `amount` | number | 0 – 9,999,999,999 — **one-time only** (silently ignored otherwise) |
 | `status` | enum | `pending`, `completed`, `failed`, `refunded` — **one-time only** |
 | `auto_generate` | boolean | Recurring only |
 | `recurring_end_at` | string or `null` | Recurring only; `null` clears; must be after the purchase date |
@@ -247,7 +251,7 @@ Records a refund entry against a completed charge. All body fields optional:
 | Field | Type | Constraints |
 |---|---|---|
 | `entry_id` | UUID | The charge entry to refund. **May be omitted only when the payment has exactly one charge** |
-| `amount` | number | Partial refund amount (must be > 0). Omitted → the full remaining refundable balance |
+| `amount` | number | Partial refund amount (must be > 0, ≤ 9,999,999,999). Omitted → the full remaining refundable balance |
 | `note` | string | ≤1000 — stored on the refund entry |
 
 ```bash

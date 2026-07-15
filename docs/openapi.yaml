@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.0.0"
+  version: "1.1.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts, tags and
@@ -20,12 +20,19 @@ info:
     A revoked key is indistinguishable from an unknown key — both return `401 "Invalid API key"`.
     The REST API requires a plan with API access (**Growth or higher**); other plans receive `403`.
 
+    Endpoint groups that mirror a plan-gated product area additionally require that feature on
+    the workspace's plan — deals/pipelines (`deals`), payments (`payments`), campaigns
+    (`campaigns`), bookings/meeting-types (`booking`). Every route in a gated group answers
+    `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` (a body **without** a `statusCode`
+    field) when the plan lacks the feature. Contacts, notes, tags, contact groups, templates,
+    emails, and webhook endpoints require only plan-wide API access.
+
     ## Error shapes
 
     The API uses **two error body shapes**:
 
-    1. **Domain errors** (email and webhook-endpoint APIs) use a structured envelope:
-       `{"error": {"code", "message"}}` — key on `error.code`.
+    1. **Domain errors** (email and webhook-endpoint APIs, and `POST /v1/campaigns/{id}/execute`
+       failures) use a structured envelope: `{"error": {"code", "message"}}` — key on `error.code`.
     2. **Framework errors** (validation, auth, rate limiting, most resource errors) use
        `{"statusCode", "message", "error"}`, where `message` is a string or an array of
        per-field validation messages. Some 4xx responses extend this shape with a
@@ -34,6 +41,12 @@ info:
     Request bodies are strictly validated: unknown body properties are rejected with 400.
     Path `:id` parameters must be UUIDs; a non-UUID id returns 400 (except
     `DELETE /v1/webhook-endpoints/{id}`, which returns 404).
+
+    ## Deletion
+
+    The API never deletes customer data — contacts, deals, payments, campaigns, tags, and
+    contact groups have no DELETE routes. The only DELETE endpoints are for resources the API
+    owns: `DELETE /v1/notes/{id}` and `DELETE /v1/webhook-endpoints/{id}`.
 
     ## Rate limits
 
@@ -50,8 +63,10 @@ info:
 
     Most list endpoints return `{ "data", "total", "limit", "offset" }` with `limit`
     default 50 (hard cap 500). `GET /v1/deals` and `GET /v1/payments` use dedicated query
-    parameters with `limit` default 25 (clamped 1–100) and silently ignore/clamp invalid
-    values instead of rejecting them.
+    parameters with `limit` default 25 (cap 100); absent or empty `limit`/`offset` values
+    default, while malformed values return `400` (`"Invalid limit: must be a non-negative
+    integer"`). Unrecognized enum filter values on these two routes are still silently
+    ignored.
 
     ## Idempotency
 
@@ -59,6 +74,10 @@ info:
     - Deals and payments upsert by `external_reference`.
     - Emails require an explicit `idempotency_key`.
     - Booking creation is idempotent per slot + meeting type + contact (server-derived, no key).
+
+    Idempotent create responses carry a top-level boolean `duplicate` field — `false` on a
+    fresh create, `true` when the call matched an existing record. Status codes are 201 for
+    both outcomes everywhere except `POST /v1/emails`, which answers 201 fresh / 200 replay.
   contact:
     name: oToK
     url: https://app.otok.io
@@ -155,8 +174,9 @@ paths:
         scalar fields overwrite, `custom_fields` shallow-merge, and `tags`/`groups` are
         **added** to the existing set (never removed by this route).
 
-        The response is **201 in both cases** (create and update) with no
-        created-vs-updated marker; compare `created_at`/`updated_at` to distinguish.
+        The response is **201 in both cases** (create and update) and carries a top-level
+        boolean `duplicate` field — `false` when this request created the contact, `true`
+        when it matched and updated an existing one.
 
         If the phone resolves to one existing contact and the email to a *different* one, the
         API does not write: it opens a merge request and returns
@@ -170,11 +190,13 @@ paths:
               $ref: "#/components/schemas/ContactWrite"
       responses:
         "201":
-          description: The full contact object — returned for both create and update.
+          description: |
+            The full contact object — returned for both create (`duplicate: false`) and
+            update (`duplicate: true`).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Contact"
+                $ref: "#/components/schemas/ContactUpsertResult"
         "400":
           description: |
             Validation failure, unknown fields, a blacklisted phone
@@ -230,8 +252,12 @@ paths:
         - `block_state` changes route through the consent/blocking subsystem; global blocks
           cannot be lifted via the API.
 
-        To change a contact's phone or email, prefer `POST /v1/contacts` — this route does
-        not perform identity-conflict resolution.
+        Setting `phone`/`email` to an identifier that belongs to a *different* contact does
+        not apply the write: like the POST upsert's conflict path, a merge request is opened
+        and the response is **409 `CONTACT_MERGE_REQUIRED`**. Non-identity fields sent in the
+        same PATCH are held on the merge request and applied when it is resolved. The
+        conflict check is **history-aware**: an identifier no contact currently holds but
+        that another contact previously held also parks a merge request and returns the 409.
       requestBody:
         required: true
         content:
@@ -259,6 +285,22 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: |
+            `error_code: "CONTACT_MERGE_REQUIRED"` — the new phone/email belongs (or, via
+            the history-aware check, previously belonged) to another contact. The write is
+            not applied; a merge request is opened and the held fields apply when it is
+            resolved (merge or dismiss). The response includes `merge_request_id`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+              example:
+                statusCode: 409
+                error: Conflict
+                error_code: CONTACT_MERGE_REQUIRED
+                merge_request_id: 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
+                message: "This change would give the contact a phone or email that already belongs to another contact. A merge request was opened — resolve it (merge or dismiss) to apply the change."
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/contacts/{id}/notes:
@@ -443,8 +485,9 @@ paths:
       tags: [Tags]
       summary: Create a tag
       description: |
-        Tag names are unique per workspace (case-insensitive). Check for existence first
-        (list with `search=<name>`) and reuse the existing record when it's already there.
+        Tag names are unique per workspace (case-insensitive). A name that already exists
+        returns **409 Conflict** — look up the existing record (list with `search=<name>`)
+        and reuse it.
       requestBody:
         required: true
         content:
@@ -464,6 +507,16 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: '`"A tag with this name already exists"` — names are unique per workspace (case-insensitive).'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+              example:
+                statusCode: 409
+                message: A tag with this name already exists
+                error: Conflict
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/tags/{id}:
@@ -516,6 +569,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: '`"A tag with this name already exists"` — renaming to another tag''s name.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
@@ -558,7 +617,9 @@ paths:
       operationId: createContactGroup
       tags: [Contact groups]
       summary: Create a group
-      description: Group names are unique per workspace (case-insensitive).
+      description: |
+        Group names are unique per workspace (case-insensitive). A name that already exists
+        returns **409 Conflict**.
       requestBody:
         required: true
         content:
@@ -578,6 +639,16 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "409":
+          description: '`"A contact group with this name already exists"` — names are unique per workspace (case-insensitive).'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+              example:
+                statusCode: 409
+                message: A contact group with this name already exists
+                error: Conflict
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/contact-groups/{id}:
@@ -630,6 +701,12 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          description: '`"A contact group with this name already exists"` — renaming to another group''s name.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
@@ -667,7 +744,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "429":
           $ref: "#/components/responses/TooManyRequests"
     post:
@@ -697,7 +774,10 @@ paths:
         "400":
           description: |
             Field validation, unknown fields, `"Invalid audience_filters definition"`
-            (body includes an `errors` array), or a workspace monthly campaign cap.
+            (body includes an `errors` array; condition-tree values are type-checked like
+            list filters), an unparseable date value
+            (`Invalid date value for "scheduled_at": "<value>"`), or a workspace monthly
+            campaign cap.
           content:
             application/json:
               schema:
@@ -705,7 +785,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Audience not found"` — `audience_id` not in this workspace.'
           content:
@@ -733,7 +813,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -766,7 +846,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -782,38 +862,54 @@ paths:
         The campaign must have `status: "scheduled"` — a draft must first be PATCHed to
         `scheduled`. No request body.
 
-        > **This endpoint always returns 201, even on failure.** Not-found and wrong-status
-        > conditions are reported in the body with `success: false` — inspect the body, not
-        > just the status code.
+        Success answers **200**; failures use real error statuses with the structured
+        `{"error": {"code", "message"}}` envelope (404 `campaign_not_found`,
+        409 `campaign_not_scheduled`).
+
+        A campaign created via `POST /v1/campaigns` without an explicit `status` defaults
+        to `draft`, so a naive create → execute sequence returns the 409 — set
+        `status: "scheduled"` on create, or PATCH it, before executing.
 
         Execution is queued with a per-campaign job id, so repeated execute calls while a
         run is queued do not enqueue duplicates. Delivery progress is reflected in the
         campaign's counters, which you can poll via `GET /v1/campaigns/{id}`.
       responses:
-        "201":
-          description: Always 201 — check `success` in the body.
+        "200":
+          description: The campaign was queued for execution.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CampaignExecuteResult"
-              examples:
-                queued:
-                  value:
-                    success: true
-                    message: Campaign queued for execution
-                    jobId: execute-1f2e3d4c-...
-                notFound:
-                  value:
-                    success: false
-                    message: Campaign not found
-                wrongStatus:
-                  value:
-                    success: false
-                    message: "Campaign status is 'draft' — only 'scheduled' campaigns can be executed"
+              example:
+                success: true
+                message: Campaign queued for execution
+                jobId: execute-1f2e3d4c-...
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`campaign_not_found` — the campaign id is not in this workspace.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: campaign_not_found
+                  message: Campaign not found
+        "409":
+          description: |
+            `campaign_not_scheduled` — the campaign is not in `scheduled` status (draft
+            campaigns 409 on execute).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: campaign_not_scheduled
+                  message: "Campaign status is 'draft' — only 'scheduled' campaigns can be executed"
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
@@ -892,8 +988,12 @@ paths:
         conversation.
 
         The nested shapes of `body_variables` / `header_config` / `button_configs` are
-        validated when the message is built — malformed inner content surfaces as a 400 with
-        a descriptive message (or a 502 if it is only rejected by the WhatsApp provider).
+        **strictly validated on the request**: a malformed entry (e.g.
+        `body_variables: [null]`, or a button without `parameters`) returns 400 in the
+        standard validation shape, where `message` is an array of per-field strings (e.g.
+        `["body_variables.0.text must be a string"]`). Unknown properties inside these
+        nested objects are rejected too (`property <name> should not exist`). Content that
+        only the WhatsApp provider rejects still surfaces as a 502.
       requestBody:
         required: true
         content:
@@ -909,8 +1009,11 @@ paths:
                 $ref: "#/components/schemas/TemplateSendResult"
         "400":
           description: |
-            Missing required template variables/config
-            (`"Cannot send WhatsApp template — missing required field(s): …"`) or a bad
+            Malformed nested `body_variables`/`header_config`/`button_configs` entries or
+            unknown nested properties (`message` is an array of per-field strings, e.g.
+            `["body_variables.0.text must be a string"]`), missing required template
+            variables/config
+            (`"Cannot send WhatsApp template — missing required field(s): …"`), or a bad
             `header_config.media_type`.
           content:
             application/json:
@@ -978,7 +1081,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/deals:
@@ -988,20 +1091,26 @@ paths:
       summary: List deals
       description: |
         Uses dedicated query parameters (not the generic `filter`) and its own pagination
-        defaults: `limit` default 25 clamped to 1–100, `offset` min 0. Out-of-range or
-        non-numeric values are **silently clamped/defaulted**; unrecognized enum filter
-        values are silently ignored rather than returning 400. Results are ordered
-        newest-first. Rows include the joined `contact_name`/`contact_phone`/`contact_email`.
+        defaults: `limit` default 25 (cap 100), `offset` min 0. Absent or empty
+        `limit`/`offset` values default; malformed values return 400
+        (`"Invalid limit: must be a non-negative integer"`). The UUID query parameters are
+        validated — a malformed value returns 400 (`"Invalid pipeline_id: must be a
+        UUID"`), while an empty value (`?pipeline_id=`) is treated as absent. Unrecognized
+        enum filter values are still silently ignored rather than returning 400. Results
+        are ordered newest-first. Rows include the joined
+        `contact_name`/`contact_phone`/`contact_email`.
       parameters:
         - name: pipeline_id
           in: query
-          description: Exact match. Send a valid UUID — take the id from `GET /v1/pipelines`.
+          description: |
+            Exact match — take the id from `GET /v1/pipelines`. Malformed → 400
+            `"Invalid pipeline_id: must be a UUID"`; empty is treated as absent.
           schema:
             type: string
             format: uuid
         - name: stage_id
           in: query
-          description: Exact match (valid UUID only).
+          description: 'Exact match. Malformed → 400 `"Invalid stage_id: must be a UUID"`.'
           schema:
             type: string
             format: uuid
@@ -1013,13 +1122,13 @@ paths:
             enum: [open, won, lost]
         - name: contact_id
           in: query
-          description: Exact match (valid UUID only).
+          description: 'Exact match. Malformed → 400 `"Invalid contact_id: must be a UUID"`.'
           schema:
             type: string
             format: uuid
         - name: owner_user_id
           in: query
-          description: Exact match (valid UUID only).
+          description: 'Exact match. Malformed → 400 `"Invalid owner_user_id: must be a UUID"`.'
           schema:
             type: string
             format: uuid
@@ -1049,10 +1158,19 @@ paths:
                         type: array
                         items:
                           $ref: "#/components/schemas/Deal"
+        "400":
+          description: |
+            A malformed UUID query parameter (`"Invalid pipeline_id: must be a UUID"`, …)
+            or a malformed `limit`/`offset`
+            (`"Invalid limit: must be a non-negative integer"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "429":
           $ref: "#/components/responses/TooManyRequests"
     post:
@@ -1078,7 +1196,9 @@ paths:
         attached, the deal's `title` derives from the product name and any client-sent
         title is ignored; a missing `amount` defaults to the product's price.
 
-        The response is **201 in both cases** with no created-vs-updated marker.
+        The response is **201 in both cases** and carries a top-level boolean `duplicate`
+        field — `false` when this request created the deal, `true` when the
+        `external_reference` matched an existing deal.
       requestBody:
         required: true
         content:
@@ -1087,11 +1207,13 @@ paths:
               $ref: "#/components/schemas/DealCreate"
       responses:
         "201":
-          description: The deal (created or updated) + joined contact identity fields.
+          description: |
+            The deal (created — `duplicate: false` — or updated — `duplicate: true`) +
+            joined contact identity fields.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Deal"
+                $ref: "#/components/schemas/DealUpsertResult"
         "400":
           description: |
             Coded errors (as `error_code`): `MISSING_TITLE`, `STAGE_PIPELINE_MISMATCH`,
@@ -1106,12 +1228,16 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: |
-            Plan access, or `error_code: PLAN_LIMIT_EXCEEDED` — deal cap reached (only when
-            a cap is set on the workspace).
+            Plan-wide API access, `error_code: FEATURE_NOT_INCLUDED_IN_PLAN` — the plan
+            lacks the Deals feature (body without a `statusCode` field) — or
+            `error_code: PLAN_LIMIT_EXCEEDED` — deal cap reached (only when a cap is set
+            on the workspace).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/FrameworkError"
+                anyOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/FeatureGateError"
         "404":
           description: '`"Contact not found"` / `"Pipeline not found"` / `"Stage not found"`.'
           content:
@@ -1141,7 +1267,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -1175,7 +1301,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Deal not found"` / `"Contact not found"`.'
           content:
@@ -1225,7 +1351,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Deal not found"` / `"Stage not found"`.'
           content:
@@ -1276,7 +1402,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -1289,10 +1415,12 @@ paths:
       tags: [Payments]
       summary: List payments
       description: |
-        Uses dedicated query parameters and its own pagination defaults (`limit` default 25
-        clamped 1–100; invalid values silently clamped; unrecognized enum values silently
-        ignored). Ordered by `purchase_date` descending. Rows include joined
-        `contact_name`/`contact_phone`/`contact_email`. **List rows do not include entries.**
+        Uses dedicated query parameters and its own pagination defaults (`limit` default 25,
+        cap 100). Absent or empty `limit`/`offset` values default; malformed values return
+        400 (`"Invalid limit: must be a non-negative integer"`). Unrecognized enum values
+        are still silently ignored. Ordered by `purchase_date` descending. Rows include
+        joined `contact_name`/`contact_phone`/`contact_email`. **List rows do not include
+        entries.**
       parameters:
         - name: type
           in: query
@@ -1327,10 +1455,18 @@ paths:
                         type: array
                         items:
                           $ref: "#/components/schemas/Payment"
+        "400":
+          description: |
+            A malformed `limit`/`offset`
+            (`"Invalid limit: must be a non-negative integer"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "429":
           $ref: "#/components/responses/TooManyRequests"
     post:
@@ -1357,8 +1493,9 @@ paths:
 
         Contact resolution is identical to deals (409 `CONTACT_MERGE_REQUIRED` on identity
         conflict). Unlike deals, `amount` is always required — the product price does not
-        substitute for it. The response is **201 in both cases** with no
-        created-vs-updated marker.
+        substitute for it. The response is **201 in both cases** and carries a top-level
+        boolean `duplicate` field — `false` when this request created the payment, `true`
+        when the `external_reference` matched an existing payment.
       requestBody:
         required: true
         content:
@@ -1367,11 +1504,13 @@ paths:
               $ref: "#/components/schemas/PaymentCreate"
       responses:
         "201":
-          description: The payment (created or updated) with its entries.
+          description: |
+            The payment (created — `duplicate: false` — or updated — `duplicate: true`)
+            with its entries.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/PaymentWithEntries"
+                $ref: "#/components/schemas/PaymentUpsertResult"
         "400":
           description: |
             Bad type/amount, installment/schedule validation, `INVALID_PRODUCT` /
@@ -1383,7 +1522,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Contact not found"` — `contact_id` not in this workspace.'
           content:
@@ -1413,7 +1552,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -1452,7 +1591,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -1485,7 +1624,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -1539,7 +1678,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: |
             `"Payment entry not found"` (unknown, foreign, or not an entry of this payment)
@@ -1581,6 +1720,7 @@ paths:
                 amount:
                   type: number
                   exclusiveMinimum: 0
+                  maximum: 9999999999
                   description: Partial refund amount. Omitted → the full remaining refundable balance.
                 note:
                   type: string
@@ -1611,7 +1751,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Payment not found"` / `"Payment entry not found"`.'
           content:
@@ -1815,10 +1955,12 @@ paths:
                     $ref: "#/components/schemas/EmailEventType"
                   description: |
                     Event types to receive. Must be non-empty when present. **Omitted →
-                    the four delivery events only** (`email.delivered`, `email.bounced`,
-                    `email.complained`, `email.failed`) — the engagement events
+                    the three delivery events** (`email.delivered`, `email.bounced`,
+                    `email.complained`) — the engagement events
                     `email.opened`/`email.clicked` are received only when explicitly
-                    listed.
+                    listed. `email.failed` is **deprecated**: still accepted when listed
+                    explicitly (the registration succeeds and echoes it in `events`), but
+                    it is never delivered.
       responses:
         "201":
           description: The created endpoint, including the one-time `secret`.
@@ -1911,7 +2053,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/meeting-types/{id}:
@@ -1933,7 +2075,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -1983,7 +2125,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -2044,7 +2186,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "429":
           $ref: "#/components/responses/TooManyRequests"
     post:
@@ -2058,9 +2200,10 @@ paths:
 
         **Idempotency is server-derived** — you do not send a key. A double submit of the
         same slot + meeting type + contact (+ pinned host, when used) returns the existing
-        confirmed booking as a success instead of failing or double-booking. There is no
-        marker distinguishing a replay from a fresh create. For round-robin types, a pinned
-        create can never silently replay onto a different host than the one pinned.
+        confirmed booking as a success instead of failing or double-booking — still 201,
+        with `duplicate: true` (a fresh create answers `duplicate: false`). For round-robin
+        types, a pinned create can never silently replay onto a different host than the
+        one pinned.
       requestBody:
         required: true
         content:
@@ -2069,11 +2212,13 @@ paths:
               $ref: "#/components/schemas/BookingCreate"
       responses:
         "201":
-          description: The booking object with its `hosts` roster.
+          description: |
+            The booking object with its `hosts` roster, plus the top-level `duplicate`
+            marker (`false` on a fresh create, `true` on a replay).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Booking"
+                $ref: "#/components/schemas/BookingCreateResult"
         "400":
           description: |
             `"Either contact_id or an invitee object is required"`, `"Meeting type is not
@@ -2088,7 +2233,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"No availability schedule configured for this meeting type"` — meeting type misconfigured.'
           content:
@@ -2126,7 +2271,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -2168,7 +2313,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
         "429":
@@ -2217,7 +2362,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Booking not found"` / `"No availability schedule configured for this meeting type"`.'
           content:
@@ -2288,7 +2433,7 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
-          $ref: "#/components/responses/Forbidden"
+          $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Booking not found"` / `"The meeting type for this booking no longer exists"`.'
           content:
@@ -2385,11 +2530,15 @@ webhooks:
     post:
       operationId: emailFailedEvent
       tags: [Webhook endpoints]
-      summary: email.failed — reserved for future use (not currently emitted)
+      summary: email.failed — deprecated (never delivered)
+      deprecated: true
       description: |
-        **Reserved for future use — not currently emitted.** Subscriptions are accepted so
-        existing registrations keep working when it ships; today a provider-rejected API
-        send surfaces synchronously as the sender's `502 provider_error` instead.
+        **Deprecated — never delivered; nothing produces this event.** It is no longer
+        part of the default subscription set. Listing it explicitly at registration still
+        succeeds (no error, no warning; it is echoed in `events`) so existing integrations
+        keep working, but no delivery will ever arrive. A failing `POST /v1/emails` send
+        fails synchronously on the request itself (e.g. `502 provider_error`,
+        `409 send_in_progress`) — handle send failures from the send response.
       parameters:
         - $ref: "#/components/parameters/WebhookEventHeader"
         - $ref: "#/components/parameters/WebhookEventIdHeader"
@@ -2487,6 +2636,15 @@ components:
         support `$jsonb_contains`, `$event_attendance`, and virtual consent fields. Note:
         the full set of `$where` operators is not exhaustively enumerated in the public
         docs — see the Getting Started guide for the documented examples.
+
+        Filter **values** are type-checked against the target field before the query
+        runs — a mistyped value returns 400 `Invalid filter value for "<field>": …` (per
+        field kind: not a date / not a UUID / must be one of <allowed values> / not a
+        number / not a boolean). Date-only strings (`"2026-01-01"`), numeric strings
+        (`"125"`), and `"true"`/`"false"` strings are accepted and coerced. Substring
+        operators (`contains`, `not_contains`, `starts_with`, `ends_with`) in `$where`
+        trees are rejected on non-text fields (400 `Invalid filter on "<field>": substring
+        operators (contains, starts_with, ends_with) only apply to text fields`).
       schema:
         type: string
         default: "{}"
@@ -2524,7 +2682,9 @@ components:
     ClampedLimitParam:
       name: limit
       in: query
-      description: Default 25, clamped to 1–100; non-numeric values silently become 25.
+      description: |
+        Default 25, cap 100. Absent or empty values default; a malformed value returns
+        400 `"Invalid limit: must be a non-negative integer"`.
       schema:
         type: integer
         minimum: 1
@@ -2533,7 +2693,9 @@ components:
     ClampedOffsetParam:
       name: offset
       in: query
-      description: Default 0, min 0; invalid values silently defaulted.
+      description: |
+        Default 0, min 0. Absent or empty values default; a malformed value returns 400
+        `"Invalid offset: must be a non-negative integer"`.
       schema:
         type: integer
         minimum: 0
@@ -2575,7 +2737,8 @@ components:
     BadRequest:
       description: |
         Invalid request — validation failure, unknown body fields, invalid
-        `filter`/`limit`/`offset`, or a non-UUID path id.
+        `filter`/`limit`/`offset`, a mistyped filter value
+        (`Invalid filter value for "<field>": …`), or a non-UUID path id.
       content:
         application/json:
           schema:
@@ -2599,6 +2762,31 @@ components:
             statusCode: 403
             message: The REST API requires a plan with API access (Growth or higher)
             error: Forbidden
+    FeatureNotIncluded:
+      description: |
+        The workspace's plan lacks the feature this resource group requires — deals,
+        payments, campaigns, or booking — and answers with the
+        `FEATURE_NOT_INCLUDED_IN_PLAN` body (note: no `statusCode` field; the message
+        embeds the lowercase feature id, so key on `error_code`). A plan without API
+        access at all (Growth or higher required) answers with the standard shape instead.
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: "#/components/schemas/FeatureGateError"
+              - $ref: "#/components/schemas/FrameworkError"
+          examples:
+            featureNotIncluded:
+              summary: Plan lacks the required feature
+              value:
+                message: "Your current plan does not include access to this feature: deals. Please upgrade your plan."
+                error_code: FEATURE_NOT_INCLUDED_IN_PLAN
+            planWithoutApiAccess:
+              summary: Plan lacks API access
+              value:
+                statusCode: 403
+                message: The REST API requires a plan with API access (Growth or higher)
+                error: Forbidden
     NotFound:
       description: Record not found in this workspace.
       content:
@@ -2678,6 +2866,25 @@ components:
               type: string
               format: uuid
               description: Present on `CONTACT_MERGE_REQUIRED` responses.
+    FeatureGateError:
+      type: object
+      title: Feature-gate error
+      description: |
+        Returned with `403` when the workspace's plan lacks the feature a gated resource
+        group requires (deals/pipelines → `deals`, payments → `payments`, campaigns →
+        `campaigns`, bookings/meeting-types → `booking`). Unlike the standard framework
+        shape there is **no `statusCode` field**. The message embeds the lowercase
+        plan-feature id, not the product display name — key on `error_code`, not on the
+        message text.
+      required: [message, error_code]
+      properties:
+        message:
+          type: string
+          examples:
+            - "Your current plan does not include access to this feature: deals. Please upgrade your plan."
+        error_code:
+          type: string
+          const: FEATURE_NOT_INCLUDED_IN_PLAN
     DomainError:
       type: object
       title: Domain error envelope
@@ -2891,6 +3098,22 @@ components:
           type: string
           format: date-time
       additionalProperties: true
+    ContactUpsertResult:
+      title: Contact upsert result
+      description: |
+        `POST /v1/contacts` response — the full contact object plus the top-level
+        `duplicate` marker. Both outcomes return 201.
+      allOf:
+        - $ref: "#/components/schemas/Contact"
+        - type: object
+          required: [duplicate]
+          properties:
+            duplicate:
+              type: boolean
+              description: |
+                `false` when this request created the contact; `true` when it matched an
+                existing contact by phone/email and updated it (tags/groups added, not
+                replaced).
     ContactWrite:
       type: object
       title: Contact write payload
@@ -2955,6 +3178,8 @@ components:
           type: number
         employee_count:
           type: integer
+          minimum: 0
+          maximum: 2147483647
         currency_preference:
           type: string
           maxLength: 8
@@ -3306,6 +3531,10 @@ components:
         scheduled_at:
           type: string
           format: date-time
+          description: |
+            ISO 8601. A date-only value ("2026-07-01") is accepted and interpreted as a
+            date; an unparseable value returns 400
+            `Invalid date value for "scheduled_at": "<value>"`.
         timezone:
           type: string
           maxLength: 64
@@ -3320,16 +3549,19 @@ components:
     CampaignExecuteResult:
       type: object
       title: Campaign execute result
-      description: Always delivered with HTTP 201 — check `success`.
-      required: [success, message]
+      description: |
+        Delivered with HTTP 200 when the campaign was queued. Failures do not use this
+        shape — they answer 404/409 with the `{"error": {"code", "message"}}` envelope.
+      required: [success, message, jobId]
       properties:
         success:
           type: boolean
+          const: true
         message:
           type: string
         jobId:
           type: string
-          description: Per-campaign execution job id — present on success only.
+          description: Per-campaign execution job id (`execute-<campaignId>`).
 
     # ── Templates ──
     Template:
@@ -3394,24 +3626,30 @@ components:
           type: array
           description: |
             Values for the template's body placeholders. `param_name` matches named
-            placeholders; otherwise values apply by position. The nested shape is validated
-            when the message is built.
+            placeholders; otherwise values apply by position. Entries are strictly
+            validated on the request — `type` and `text` are required, and unknown
+            properties are rejected.
           items:
             type: object
+            additionalProperties: false
+            required: [type, text]
             properties:
               type:
                 type: string
-                const: text
+                examples: [text]
               text:
                 type: string
               param_name:
                 type: string
         header_config:
           type: object
+          additionalProperties: false
+          required: [type]
           description: |
             `{ "type": "text", "variables": ["..."] }` for text headers, or
             `{ "type": "media", "media_type": "image"|"video"|"document",
-            "media_link": "https://..." }` for media headers.
+            "media_link": "https://..." }` for media headers. Strictly validated on the
+            request — unknown properties are rejected.
           properties:
             type:
               type: string
@@ -3429,14 +3667,19 @@ components:
           type: array
           description: |
             Values for dynamic buttons (e.g. dynamic-URL suffixes). The set of valid
-            `type` values is not enumerated in the public docs.
+            `type` values is not enumerated in the public docs. Entries are strictly
+            validated on the request — **`parameters` is required**; send `[]` for a
+            button with no dynamic values.
           items:
             type: object
+            additionalProperties: false
+            required: [type, index, parameters]
             properties:
               type:
                 type: string
               index:
                 type: integer
+                minimum: 0
               parameters:
                 type: array
                 items:
@@ -3603,6 +3846,22 @@ components:
           type: [string, "null"]
           description: Joined contact identity — absent on `/stage` and `/status` responses.
       additionalProperties: true
+    DealUpsertResult:
+      title: Deal upsert result
+      description: |
+        `POST /v1/deals` response — the deal (with joined contact identity fields) plus
+        the top-level `duplicate` marker. Both outcomes return 201.
+      allOf:
+        - $ref: "#/components/schemas/Deal"
+        - type: object
+          required: [duplicate]
+          properties:
+            duplicate:
+              type: boolean
+              description: |
+                `false` when this request created the deal; `true` when the
+                `external_reference` matched an existing deal (fields updated / stage
+                moved, status untouched).
     DealCreate:
       type: object
       title: Deal create/upsert payload
@@ -3878,6 +4137,21 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/PaymentEntry"
+    PaymentUpsertResult:
+      title: Payment upsert result
+      description: |
+        `POST /v1/payments` response — the payment with its entries plus the top-level
+        `duplicate` marker. Both outcomes return 201.
+      allOf:
+        - $ref: "#/components/schemas/PaymentWithEntries"
+        - type: object
+          required: [duplicate]
+          properties:
+            duplicate:
+              type: boolean
+              description: |
+                `false` when this request created the payment; `true` when the
+                `external_reference` matched an existing payment (mutable fields updated).
     PaymentCreate:
       type: object
       title: Payment create/upsert payload
@@ -3905,6 +4179,7 @@ components:
         amount:
           type: number
           minimum: 0
+          maximum: 9999999999
           description: |
             one_time: the charge amount; recurring: amount **per cycle**; installments:
             the **total** deal amount. Always required — the product price does not
@@ -3964,7 +4239,10 @@ components:
         installment_count:
           type: integer
           minimum: 2
-          description: "**Required when `type` is `installments`.**"
+          maximum: 360
+          description: |
+            **Required when `type` is `installments`.** Over the ceiling → 400
+            `"installmentCount must be at most 360"`.
         external_reference:
           type: string
           maxLength: 255
@@ -3994,6 +4272,7 @@ components:
         amount:
           type: number
           minimum: 0
+          maximum: 9999999999
           description: "**One-time only** (silently ignored otherwise)."
         status:
           type: string
@@ -4117,9 +4396,11 @@ components:
         - email.opened
         - email.clicked
       description: |
-        `email.delivered`/`email.bounced`/`email.complained`/`email.failed` are the default
-        subscription; `email.opened`/`email.clicked` are opt-in. `email.failed` is reserved
-        for future use and not currently emitted.
+        `email.delivered`/`email.bounced`/`email.complained` are the default subscription;
+        `email.opened`/`email.clicked` are opt-in. `email.failed` is **deprecated** — still
+        accepted at registration (echoed in `events`) but never delivered; nothing produces
+        this event, and a failing `POST /v1/emails` send fails synchronously on the request
+        itself.
     WebhookEndpoint:
       type: object
       title: Webhook endpoint
@@ -4231,10 +4512,11 @@ components:
             type:
               const: email.complained
     EmailFailedEvent:
-      title: email.failed event (reserved)
+      title: email.failed event (deprecated)
+      deprecated: true
       description: |
-        Reserved for future use — not currently emitted. The payload shape when it ships is
-        not documented beyond the shared event base.
+        Deprecated — never delivered; nothing produces this event. Subscriptions listing it
+        explicitly are still accepted for back-compat, but no delivery will ever arrive.
       allOf:
         - $ref: "#/components/schemas/EmailEventBase"
         - type: object
@@ -4434,6 +4716,21 @@ components:
           type: string
           format: date-time
       additionalProperties: true
+    BookingCreateResult:
+      title: Booking create result
+      description: |
+        `POST /v1/bookings` response — the booking object plus the top-level `duplicate`
+        marker. Both outcomes return 201.
+      allOf:
+        - $ref: "#/components/schemas/Booking"
+        - type: object
+          required: [duplicate]
+          properties:
+            duplicate:
+              type: boolean
+              description: |
+                `false` when this request created the booking; `true` when a double
+                submit of the same slot/invitee returned the original booking.
     BookingCreate:
       type: object
       title: Booking create payload

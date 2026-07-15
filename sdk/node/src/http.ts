@@ -26,7 +26,7 @@ const DEFAULT_MAX_RETRIES = 2;
 /** Base backoff delay; grows exponentially per retry with full jitter. */
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30_000;
-const SDK_VERSION = "0.1.0";
+const SDK_VERSION = "0.1.1";
 
 export type QueryValue = string | number | boolean | undefined;
 
@@ -183,11 +183,17 @@ async function toApiError(response: Response): Promise<OtokApiError> {
     if (b.error && typeof b.error === "object") {
       code = typeof b.error.code === "string" ? b.error.code : undefined;
       if (typeof b.error.message === "string") message = b.error.message;
-    } else if (typeof b.message === "string") {
-      // Framework shape: { statusCode, message, error }
-      message = b.message;
-    } else if (Array.isArray(b.message)) {
-      message = b.message.join("; ");
+    } else {
+      // Standard shape: { statusCode?, message, error? } — some carry a
+      // machine-readable top-level error_code (FEATURE_NOT_INCLUDED_IN_PLAN,
+      // CONTACT_MERGE_REQUIRED) plus extra fields (e.g. merge_request_id),
+      // all kept on `body`.
+      if (typeof b.message === "string") {
+        message = b.message;
+      } else if (Array.isArray(b.message)) {
+        message = b.message.join("; ");
+      }
+      if (typeof b.error_code === "string") code = b.error_code;
     }
   }
   return new OtokApiError(response.status, message, code, body);

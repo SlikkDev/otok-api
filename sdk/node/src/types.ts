@@ -23,7 +23,10 @@ export interface Paginated<T> {
 /**
  * Shared list query params (contacts, tags, contact-groups, campaigns,
  * templates, meeting-types). `filter` is a JSON object of exact-match field
- * filters, e.g. `{ lifecycle_stage: "lead" }`.
+ * filters, e.g. `{ lifecycle_stage: "lead" }`. Filter values are type-checked
+ * against the target field (dates, UUIDs, enums, numbers, booleans) — a
+ * mistyped value is rejected with a 400 that names the field and expected
+ * kind.
  */
 export interface ListParams {
   filter?: Record<string, unknown>;
@@ -133,6 +136,16 @@ export interface Contact {
   created_at: string;
   updated_at: string | null;
   [key: string]: unknown;
+}
+
+/**
+ * Response of POST /v1/contacts. Both outcomes return HTTP 201; `duplicate`
+ * tells them apart: `false` = a new contact was created, `true` = the upsert
+ * matched an existing contact by phone/email and updated it (tags/groups
+ * added, not replaced).
+ */
+export interface ContactUpsertResult extends Contact {
+  duplicate: boolean;
 }
 
 // ─────────────────────────── Tags / groups ───────────────────────────
@@ -291,6 +304,16 @@ export interface Deal {
   [key: string]: unknown;
 }
 
+/**
+ * Response of POST /v1/deals. Both outcomes return HTTP 201; `duplicate:
+ * true` = `external_reference` matched an existing deal, whose mutable
+ * fields were updated (and which moved when `stage_id` differs) — status is
+ * never changed on a match.
+ */
+export interface DealCreateResult extends Deal {
+  duplicate: boolean;
+}
+
 // ─────────────────────────── Transactional email ───────────────────────────
 
 export interface EmailTracking {
@@ -348,6 +371,14 @@ export interface EmailSendResult {
 
 // ─────────────────────────── Webhook endpoints ───────────────────────────
 
+/**
+ * Every event type accepted by POST /v1/webhook-endpoints.
+ *
+ * `email.failed` is DEPRECATED: it is still accepted when listed explicitly
+ * (existing registrations keep working) but it is NEVER delivered — nothing
+ * produces this event. A failing POST /v1/emails fails synchronously on the
+ * request itself, so handle send failures from that response instead.
+ */
 export const EMAIL_WEBHOOK_EVENT_TYPES = [
   "email.delivered",
   "email.bounced",
@@ -359,10 +390,23 @@ export const EMAIL_WEBHOOK_EVENT_TYPES = [
 export type EmailWebhookEventType = (typeof EMAIL_WEBHOOK_EVENT_TYPES)[number];
 
 /**
+ * The default subscription when `events` is omitted at registration: the
+ * three delivery events. The engagement types (`email.opened`,
+ * `email.clicked`) are opt-in by explicit listing.
+ */
+export const DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES = [
+  "email.delivered",
+  "email.bounced",
+  "email.complained",
+] as const satisfies readonly EmailWebhookEventType[];
+
+/**
  * POST /v1/webhook-endpoints (max 3 per workspace).
- * `events` defaults to the four delivery events; the engagement types
+ * `events` defaults to the three delivery events (`email.delivered`,
+ * `email.bounced`, `email.complained`); the engagement types
  * (`email.opened`, `email.clicked`) must be listed explicitly. An empty
- * array is rejected.
+ * array is rejected. `email.failed` is deprecated — accepted when listed,
+ * never delivered.
  */
 export interface WebhookEndpointCreateParams {
   url: string;
@@ -414,6 +458,12 @@ export interface EmailComplainedEvent {
   created_at: string;
   data: WebhookEventDataBase & { reason?: string };
 }
+/**
+ * @deprecated Never delivered — nothing produces this event. A failing
+ * POST /v1/emails fails synchronously on the request itself; handle send
+ * failures from that response. Kept only so existing handlers keep
+ * compiling.
+ */
 export interface EmailFailedEvent {
   id: string;
   type: "email.failed";
@@ -484,6 +534,21 @@ export interface Campaign {
   audience_id: string | null;
   scheduled_at: string | null;
   created_at: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Response of POST /v1/campaigns/:id/execute — HTTP 200 when the campaign
+ * was queued. Failures are real HTTP errors thrown as OtokApiError:
+ * 404 `campaign_not_found` (unknown id) and 409 `campaign_not_scheduled`
+ * (only "scheduled" campaigns can be executed).
+ */
+export interface CampaignExecuteResult {
+  /** Always true — failures throw instead of returning `success: false`. */
+  success: true;
+  message: string;
+  /** Background job id, "execute-<campaignId>". */
+  jobId: string;
   [key: string]: unknown;
 }
 
@@ -610,6 +675,15 @@ export interface Payment {
   [key: string]: unknown;
 }
 
+/**
+ * Response of POST /v1/payments. Both outcomes return HTTP 201; `duplicate:
+ * true` = `external_reference` matched an existing payment, whose mutable
+ * fields were updated — the type/schedule is never restructured on a match.
+ */
+export interface PaymentCreateResult extends Payment {
+  duplicate: boolean;
+}
+
 // ─────────────────────────── Bookings ───────────────────────────
 
 export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show";
@@ -674,6 +748,15 @@ export interface Booking {
   start_at: string;
   created_at: string;
   [key: string]: unknown;
+}
+
+/**
+ * Response of POST /v1/bookings. Both outcomes return HTTP 201; `duplicate:
+ * true` = a double-submit of the same slot/invitee returned the original
+ * booking instead of creating a second one.
+ */
+export interface BookingCreateResult extends Booking {
+  duplicate: boolean;
 }
 
 export interface MeetingType {

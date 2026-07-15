@@ -42,11 +42,15 @@ const contact = await otok.contacts.upsert({
   tags: ["VIP", "Newsletter"],
   custom_fields: { plan: "gold" },
 });
+// contact.duplicate: false = a new contact was created,
+//                    true  = an existing contact was matched and updated
 ```
+
+Both outcomes return `201` — check the top-level `duplicate` flag to tell them apart. (`otok.contacts.update` by id behaves differently: setting a `phone`/`email` that belongs to another contact throws `409 CONTACT_MERGE_REQUIRED` — see [Errors](#errors-timeouts-retries).)
 
 ### Create a deal from an order (idempotent)
 
-`external_reference` maps one order to one deal — a repeat `POST` with the same reference updates that deal instead of creating a duplicate, so retries are always safe.
+`external_reference` maps one order to one deal — a repeat `POST` with the same reference updates that deal instead of creating a duplicate, so retries are always safe. Both outcomes return `201`; on a match the response carries `duplicate: true` (fields updated, stage moved when different — the deal's status is never changed).
 
 ```ts
 const pipelines = await otok.pipelines.list(); // map stage ids once
@@ -58,6 +62,7 @@ const deal = await otok.deals.create({
   currency: "USD",
   external_reference: "order:A-1001", // ← idempotency key
 });
+// deal.duplicate: true when this reference already had a deal (replay)
 
 // Later: mark it won when the order is fulfilled
 await otok.deals.setStatus(deal.id, { status: "won" });
@@ -100,11 +105,14 @@ Register an endpoint (max 3 per workspace). The `whsec_…` signing secret is re
 ```ts
 const endpoint = await otok.webhookEndpoints.create({
   url: "https://shop.example.com/api/otok-events",
-  // Defaults to the four delivery events; engagement events are opt-in:
-  events: ["email.delivered", "email.bounced", "email.complained", "email.failed", "email.opened", "email.clicked"],
+  // Defaults to the three delivery events (email.delivered, email.bounced,
+  // email.complained); engagement events are opt-in:
+  events: ["email.delivered", "email.bounced", "email.complained", "email.opened", "email.clicked"],
 });
 console.log(endpoint.secret); // whsec_… — shown only now
 ```
+
+> `email.failed` is deprecated: registrations listing it are still accepted, but the event is never delivered — a failing `POST /v1/emails` fails synchronously on the request itself, so handle send failures from that response.
 
 Events are POSTed with an `X-Otok-Signature: t=<unix>,v1=<hex>` header (HMAC-SHA256 of `"{t}.{body}"` with your secret). Failed deliveries retry for ≈16 hours. **Always verify against the raw request body** — parsing and re-stringifying changes the bytes.
 
@@ -208,7 +216,12 @@ Request/response field names match the wire contract (snake_case) exactly, so th
 
 ## Errors, timeouts, retries
 
-- Non-2xx responses throw **`OtokApiError`** with `status`, `code` (machine-readable, when the endpoint uses the `{ error: { code, message } }` envelope, e.g. `endpoint_not_found`, `SLOT_TAKEN`), and the parsed `body`.
+- Non-2xx responses throw **`OtokApiError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{ error: { code, message } }` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
+- **403 `FEATURE_NOT_INCLUDED_IN_PLAN`** — deals/pipelines, payments, campaigns, and bookings/meeting-types each require the matching feature on the workspace's plan. When the plan lacks it, **every** route in that group (reads and writes alike) throws this.
+- **409 `CONTACT_MERGE_REQUIRED`** — `otok.contacts.update` that would set a `phone`/`email` belonging to another contact (now or historically) is **not applied**; a merge request is parked for review in oToK instead. Its id is on the body — `(err.body as { merge_request_id?: string }).merge_request_id` — and non-identity fields from the same call are applied when the request is resolved.
+- **409 on duplicate names** — creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) throws `409 Conflict`.
+- **400 on invalid `filter` values** — list-endpoint `filter` values are type-checked against the target field (dates, UUIDs, enums, numbers, booleans); a mistyped value throws a 400 naming the field and expected kind.
+- **`otok.campaigns.execute` uses real HTTP semantics** — it resolves (HTTP 200, `{ success: true, jobId }`) only when the campaign was queued, and throws otherwise: 404 `campaign_not_found`, 409 `campaign_not_scheduled`. Campaigns are created as `"draft"` unless you set `status: "scheduled"`, so set it (on create or via `update`) before executing.
 - Requests time out after `timeoutMs` (default 30 s) and throw **`OtokTimeoutError`**.
 - `429` and `5xx` responses are retried up to `maxRetries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header. Network errors are **not** retried automatically in v0.1 — use idempotency keys (`external_reference`, `idempotency_key`) and retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
@@ -221,6 +234,8 @@ try {
 } catch (err) {
   if (err instanceof OtokApiError && err.code === "SLOT_TAKEN") {
     // offer another slot
+  } else if (err instanceof OtokApiError && err.code === "FEATURE_NOT_INCLUDED_IN_PLAN") {
+    // the workspace's plan doesn't include the Booking feature
   } else throw err;
 }
 ```

@@ -25,8 +25,10 @@ def commerce_transport() -> MockTransport:
     """Responses for the contact → deal → email call sequence."""
     return MockTransport(
         [
-            json_response(201, {"id": "contact-1", "email": "jane@example.com"}),
-            json_response(201, {"id": "deal-1", "status": "open"}),
+            json_response(
+                201, {"id": "contact-1", "email": "jane@example.com", "duplicate": False}
+            ),
+            json_response(201, {"id": "deal-1", "status": "open", "duplicate": False}),
             json_response(
                 201,
                 {

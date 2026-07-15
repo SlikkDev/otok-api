@@ -6,7 +6,14 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlsplit
 
-from otok import OtokClient
+import pytest
+
+from otok import (
+    DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES,
+    EMAIL_WEBHOOK_EVENT_TYPES,
+    OtokAPIError,
+    OtokClient,
+)
 from otok._http import TransportRequest, TransportResponse
 from tests.helpers import MockTransport, json_response
 
@@ -70,6 +77,15 @@ class TestContacts:
             "PATCH",
             "/api/v1/contacts/c-1",
         )
+
+    def test_upsert_surfaces_the_top_level_duplicate_marker(self) -> None:
+        # 201 in both outcomes; duplicate=True means an existing contact was
+        # matched and updated instead of created.
+        client, _ = make_client(
+            json_response(201, {"id": "c-1", "phone": "+12025551234", "duplicate": True})
+        )
+        contact = client.contacts.upsert({"phone": "+12025551234"})
+        assert contact["duplicate"] is True
 
     def test_notes_endpoints(self) -> None:
         client, transport = make_client()
@@ -186,6 +202,15 @@ class TestPipelinesAndDeals:
         )
         assert transport.request_body() == {"status": "won"}
 
+    def test_create_surfaces_the_top_level_duplicate_marker(self) -> None:
+        # 201 in both outcomes; duplicate=True means external_reference
+        # matched an existing deal that was updated instead.
+        client, _ = make_client(
+            json_response(201, {"id": "d-1", "external_reference": "x-1", "duplicate": True})
+        )
+        deal = client.deals.create({"contact_id": "c-1", "external_reference": "x-1"})
+        assert deal["duplicate"] is True
+
 
 class TestEmailsAndWebhookEndpoints:
     def test_email_send(self) -> None:
@@ -230,6 +255,23 @@ class TestEmailsAndWebhookEndpoints:
             "/api/v1/webhook-endpoints/we-1",
         )
 
+    def test_create_without_events_omits_the_key_so_the_server_default_applies(self) -> None:
+        client, transport = make_client(json_response(201, {"id": "we-1", "secret": "whsec_x"}))
+        client.webhook_endpoints.create({"url": "https://hooks.example.com/otok"})
+        assert transport.request_body() == {"url": "https://hooks.example.com/otok"}
+
+    def test_event_type_constants_pin_the_wire_contract(self) -> None:
+        # Omitted `events` subscribes to the three delivery events.
+        assert DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES == (
+            "email.delivered",
+            "email.bounced",
+            "email.complained",
+        )
+        # email.failed is deprecated: accepted at registration, never fires —
+        # so it stays registrable but is not part of the default set.
+        assert "email.failed" not in DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        assert "email.failed" in EMAIL_WEBHOOK_EVENT_TYPES
+
 
 class TestCampaignsAndTemplates:
     def test_campaigns(self) -> None:
@@ -255,6 +297,53 @@ class TestCampaignsAndTemplates:
             "/api/v1/campaigns/cmp-1/execute",
         )
         assert request.body is None  # no request body on execute
+
+    def test_execute_returns_the_200_success_body(self) -> None:
+        client, _ = make_client(
+            json_response(
+                200,
+                {
+                    "success": True,
+                    "message": "Campaign queued for execution",
+                    "jobId": "execute-cmp-1",
+                },
+            )
+        )
+        result = client.campaigns.execute("cmp-1")
+        assert result["success"] is True
+        assert result["jobId"] == "execute-cmp-1"
+
+    def test_execute_failures_raise_api_errors_with_machine_readable_codes(self) -> None:
+        # A non-scheduled campaign is a 409, not a 2xx with success=false.
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "campaign_not_scheduled",
+                        "message": (
+                            "Campaign status is 'draft' — only 'scheduled' "
+                            "campaigns can be executed"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.campaigns.execute("cmp-1")
+        assert excinfo.value.status == 409
+        assert excinfo.value.code == "campaign_not_scheduled"
+
+        client, _ = make_client(
+            json_response(
+                404,
+                {"error": {"code": "campaign_not_found", "message": "Campaign not found"}},
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.campaigns.execute("cmp-missing")
+        assert excinfo.value.status == 404
+        assert excinfo.value.code == "campaign_not_found"
 
     def test_templates(self) -> None:
         client, transport = make_client()
@@ -319,6 +408,17 @@ class TestPayments:
         client.payments.refund("p-1", {"amount": 100, "note": "Partial"})
         assert transport.request_body() == {"amount": 100, "note": "Partial"}
 
+    def test_create_surfaces_the_top_level_duplicate_marker(self) -> None:
+        # 201 in both outcomes; duplicate=True means external_reference
+        # matched an existing payment that was updated instead.
+        client, _ = make_client(
+            json_response(201, {"id": "p-1", "external_reference": "inv-1", "duplicate": True})
+        )
+        payment = client.payments.create(
+            {"type": "one_time", "amount": 350, "external_reference": "inv-1"}
+        )
+        assert payment["duplicate"] is True
+
 
 class TestBookings:
     def test_meeting_types_and_slots(self) -> None:
@@ -381,3 +481,17 @@ class TestBookings:
         assert transport.request_body() == {}
         client.bookings.reassign("bk-1", {"user_id": "u-2", "force": True})
         assert transport.request_body() == {"user_id": "u-2", "force": True}
+
+    def test_create_surfaces_the_top_level_duplicate_marker(self) -> None:
+        # 201 in both outcomes; duplicate=True means a double-submit of the
+        # same slot/invitee returned the original booking.
+        client, _ = make_client(json_response(201, {"id": "bk-1", "duplicate": True}))
+        booking = client.bookings.create(
+            {
+                "meeting_type_id": "mt-1",
+                "start_at": "2026-07-20T06:00:00Z",
+                "timezone": "Europe/Berlin",
+                "invitee": {"name": "Dana Levi", "email": "dana@example.com"},
+            }
+        )
+        assert booking["duplicate"] is True

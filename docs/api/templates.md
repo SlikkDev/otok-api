@@ -26,7 +26,7 @@ Response `200` — `{ data, total, limit, offset }` with full template rows.
 
 | Status | Meaning |
 |---|---|
-| 400 | Invalid `filter` / `limit` / `offset` |
+| 400 | Invalid `filter` / `limit` / `offset` / a mistyped filter value (`Invalid filter value for "<field>": …` — see [filter-value validation](getting-started.md#filter-value-validation)) |
 
 ## GET /api/v1/templates/:id
 
@@ -41,11 +41,11 @@ Sends the template to a phone number. The template must belong to your workspace
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `to` | string | yes | Recipient phone, international format (e.g. `+972501234567`) |
-| `body_variables` | array | no | Values for the template's body placeholders. Shape: `[{ "type": "text", "text": "...", "param_name": "..." }]` — `param_name` matches named placeholders; otherwise values apply by position |
-| `header_config` | object | no | `{ "type": "text", "variables": ["..."] }` for text headers, or `{ "type": "media", "media_type": "image"|"video"|"document", "media_link": "https://..." }` for media headers |
-| `button_configs` | array | no | `[{ "type": "...", "index": 0, "parameters": ["..."] }]` — values for dynamic buttons (e.g. dynamic-URL suffixes) |
+| `body_variables` | array | no | Values for the template's body placeholders. Item shape: `{ "type": string, "text": string, "param_name"?: string }` — `type` and `text` are required. `param_name` matches named placeholders; otherwise values apply by position |
+| `header_config` | object | no | `{ "type": "text", "variables"?: ["..."] }` for text headers, or `{ "type": "media", "media_type": "image"|"video"|"document", "media_link": "https://..." }` for media headers |
+| `button_configs` | array | no | Values for dynamic buttons (e.g. dynamic-URL suffixes). Item shape: `{ "type": string, "index": integer ≥ 0, "parameters": string[] }` — **`parameters` is required**; send `[]` for a button with no dynamic values |
 
-The nested shapes of `body_variables` / `header_config` / `button_configs` are validated when the message is built — malformed inner content surfaces as a 400 with a descriptive message (or a 502 if it is only rejected by the WhatsApp provider).
+The nested shapes of `body_variables` / `header_config` / `button_configs` are **strictly validated on the request**: a malformed entry (e.g. `body_variables: [null]`, or a button without `parameters`) returns `400 Bad Request` in the standard validation shape, where `message` is an array of per-field strings — e.g. `["body_variables.0.text must be a string"]`. Unknown properties inside these nested objects are rejected too (`property <name> should not exist`), consistent with top-level body validation. Content that only the WhatsApp provider rejects still surfaces as a 502.
 
 ### Example
 
@@ -81,6 +81,7 @@ Response `201`:
 
 | Status | Message | Meaning |
 |---|---|---|
+| 400 | `["body_variables.0.text must be a string"]` (array of per-field messages) | Malformed nested `body_variables` / `header_config` / `button_configs` entries, or unknown nested properties |
 | 400 | `"Cannot send WhatsApp template — missing required field(s): …"` | The template requires variables/config you didn't supply |
 | 400 | `Invalid header media_type "<x>". Must be one of: image, video, document` | Bad `header_config.media_type` |
 | 403 | `"This contact is blocked"` | The resolved contact is blocked in this workspace |

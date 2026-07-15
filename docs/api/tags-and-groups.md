@@ -2,7 +2,7 @@
 
 Tags and contact groups organize contacts. Both resources support list, get, create, and update — **there are no DELETE endpoints** on the API.
 
-All endpoints require [authentication](getting-started.md#authentication). Standard [list conventions](getting-started.md#list-conventions) apply to the list routes (`filter`, `sort`, `limit` default 50 / cap 500, `offset`, `search`); `search` matches the `name` field.
+All endpoints require [authentication](getting-started.md#authentication). Standard [list conventions](getting-started.md#list-conventions) apply to the list routes (`filter`, `sort`, `limit` default 50 / cap 500, `offset`, `search`); `search` matches the `name` field. Mistyped `filter` values return 400 — see [filter-value validation](getting-started.md#filter-value-validation).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -15,7 +15,7 @@ All endpoints require [authentication](getting-started.md#authentication). Stand
 | POST | `/api/v1/contact-groups` | Create a group |
 | PATCH | `/api/v1/contact-groups/:id` | Update a group |
 
-> **Duplicate names:** tag and group names are unique per workspace (case-insensitive). Check for existence first (list with `search=<name>` and compare case-insensitively) before creating or renaming, and reuse the existing record when it's already there.
+> **Duplicate names:** tag and group names are unique per workspace (case-insensitive). Creating or renaming to a name that already exists returns **409 Conflict** — `"A tag with this name already exists"` / `"A contact group with this name already exists"`. On 409, look up the existing record (list with `search=<name>` and compare case-insensitively) and reuse it.
 
 > **Relationship to contacts:** contact write endpoints take tag/group **names** and auto-create missing ones, while contact read endpoints return tag/group **ids**. Use these endpoints to map between the two. See the [round-trip warning](contacts.md#the-contact-object).
 
@@ -74,6 +74,7 @@ Response `201` — the created tag with `usage_count: 0`.
 | Status | Meaning |
 |---|---|
 | 400 | Missing/empty `name`, unknown fields |
+| 409 | `"A tag with this name already exists"` — names are unique per workspace (case-insensitive) |
 
 ### PATCH /api/v1/tags/:id
 
@@ -85,6 +86,7 @@ Response `200` — the updated tag.
 |---|---|
 | 400 | Validation / non-UUID id |
 | 404 | `"tags with ID <id> not found"` |
+| 409 | `"A tag with this name already exists"` — renaming to another tag's name |
 
 ---
 
@@ -136,6 +138,7 @@ Response `201` — the created group with `contact_count: 0`.
 | Status | Meaning |
 |---|---|
 | 400 | Missing/empty `name`, unknown fields |
+| 409 | `"A contact group with this name already exists"` — names are unique per workspace (case-insensitive) |
 
 ### PATCH /api/v1/contact-groups/:id
 
@@ -147,6 +150,7 @@ Response `200` — the updated group.
 |---|---|
 | 400 | Validation / non-UUID id |
 | 404 | `"contactGroups with ID <id> not found"` |
+| 409 | `"A contact group with this name already exists"` — renaming to another group's name |
 
 ---
 

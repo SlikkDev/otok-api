@@ -3,7 +3,10 @@
  *
  * Setup:
  *   1. npm install express          (example-only dependency)
- *   2. Register the endpoint once and save the whsec_… secret:
+ *   2. Register the endpoint once and save the whsec_… secret. Omitting
+ *      `events` subscribes to the three delivery events (email.delivered,
+ *      email.bounced, email.complained); add email.opened / email.clicked
+ *      explicitly to also receive the engagement events handled below:
  *        const ep = await otok.webhookEndpoints.create({ url: "https://your-server.example.com/otok-events" });
  *        console.log(ep.secret);    // shown only once
  *   3. OTOK_WEBHOOK_SECRET=whsec_… node examples/express-webhook-receiver.mjs
@@ -44,9 +47,9 @@ app.post(
       case "email.complained":
         console.log(`complaint → ${event.data.to}`);
         break;
-      case "email.failed":
-        console.log(`failed → ${event.data.to}`);
-        break;
+      // No "email.failed" case: that event type is deprecated and never
+      // delivered — a failing POST /v1/emails fails synchronously on the
+      // request itself.
       case "email.opened":
         console.log(`opened → ${event.data.to} (machine_open: ${event.data.machine_open})`);
         break;

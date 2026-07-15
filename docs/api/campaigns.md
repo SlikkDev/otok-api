@@ -2,7 +2,9 @@
 
 Create, schedule, and execute WhatsApp campaigns. A campaign targets an audience with a WhatsApp template (or custom message) and reports delivery counters as it runs.
 
-All endpoints require [authentication](getting-started.md#authentication). Standard [list conventions](getting-started.md#list-conventions) apply to the list route.
+All endpoints require [authentication](getting-started.md#authentication). Standard [list conventions](getting-started.md#list-conventions) apply to the list route. Campaigns cannot be deleted via the API.
+
+> **Plan feature required:** every campaigns route (including `/execute`) requires the **Campaigns** feature on the workspace's plan, in addition to API access. Without it, all calls return `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -31,7 +33,8 @@ Response `200` — `{ data, total, limit, offset }`.
 
 | Status | Meaning |
 |---|---|
-| 400 | Invalid `filter` JSON / invalid `limit`/`offset` |
+| 400 | Invalid `filter` JSON / invalid `limit`/`offset` / a mistyped filter value (`Invalid filter value for "<field>": …` — see [filter-value validation](getting-started.md#filter-value-validation)) |
+| 403 | `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — plan lacks the Campaigns feature |
 
 ## GET /api/v1/campaigns/:id
 
@@ -52,7 +55,7 @@ Response `200` — the full campaign object. `404` — `"campaigns with ID <id> 
 | `audience_id` | UUID | no | A saved audience; takes precedence over `audience_filters` |
 | `audience_filters` | object | no | A `$where` condition tree (same grammar as the contacts `filter` `$where`); validated at write time |
 | `custom_message` | string | no | |
-| `scheduled_at` | string | no | ISO 8601 |
+| `scheduled_at` | string | no | ISO 8601. A date-only value (`"2026-07-01"`) is accepted and interpreted as a date; an unparseable value → 400 `Invalid date value for "scheduled_at": "<value>"` |
 | `timezone` | string | no | ≤64 chars; omitted → `UTC` |
 | `instance_id` | UUID | no | WhatsApp instance (phone number connection) to send from |
 | `variables` | object | no | Template variable mappings |
@@ -89,8 +92,10 @@ Response `201` — the full created campaign object.
 
 | Status | Meaning |
 |---|---|
-| 400 | Field validation, unknown fields, `"Invalid audience_filters definition"` |
+| 400 | Field validation, unknown fields, `"Invalid audience_filters definition"` — condition-tree **values** are type-checked like list filters (see [filter-value validation](getting-started.md#filter-value-validation)) |
+| 400 | `Invalid date value for "scheduled_at": "<value>"` — unparseable `scheduled_at` |
 | 400 | `"Limit reached. Your plan allows a maximum of <n> campaigns. Please upgrade your plan."` — only when a monthly campaign cap is set on the workspace |
+| 403 | `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — plan lacks the Campaigns feature |
 | 404 | `"Audience not found"` — `audience_id` not in this workspace |
 
 ## PATCH /api/v1/campaigns/:id
@@ -111,21 +116,20 @@ Queues a campaign for immediate execution. **The campaign must have `status: "sc
 
 No request body.
 
-> **This endpoint always returns 201, even on failure.** Not-found and wrong-status conditions are reported in the body with `success: false` — you must inspect the body, not just the status code.
-
-Possible response bodies (all HTTP `201`):
+Response `200` — the campaign was queued:
 
 ```json
 { "success": true, "message": "Campaign queued for execution", "jobId": "execute-1f2e3d4c-..." }
 ```
 
-```json
-{ "success": false, "message": "Campaign not found" }
-```
+Failures return real error statuses with the structured `{"error": {"code", "message"}}` envelope:
 
-```json
-{ "success": false, "message": "Campaign status is 'draft' — only 'scheduled' campaigns can be executed" }
-```
+| Status | `error.code` | Meaning |
+|---|---|---|
+| 404 | `campaign_not_found` | `"Campaign not found"` — the campaign id is not in this workspace |
+| 409 | `campaign_not_scheduled` | `"Campaign status is '<status>' — only 'scheduled' campaigns can be executed"` |
+
+> **Draft campaigns 409 on execute.** A campaign created via `POST /v1/campaigns` without an explicit `status` defaults to `draft`, so a naive create → execute sequence returns the 409 above. Set `status: "scheduled"` on create, or PATCH it, before executing.
 
 Execution is queued with a per-campaign job id, so repeated execute calls while a run is queued do not enqueue duplicates.
 

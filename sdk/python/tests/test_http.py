@@ -294,9 +294,29 @@ class TestErrorParsing:
         client = make_client(transport, max_retries=0)
         with pytest.raises(OtokAPIError) as excinfo:
             client.request("POST", "/v1/contacts", body={})
+        assert excinfo.value.code == "CONTACT_MERGE_REQUIRED"
         assert excinfo.value.body == body
         assert isinstance(excinfo.value.body, dict)
         assert excinfo.value.body["error_code"] == "CONTACT_MERGE_REQUIRED"
+
+    def test_top_level_error_code_is_surfaced_as_code_on_the_403_feature_gate(self) -> None:
+        body = {
+            "message": (
+                "Your current plan does not include access to this feature: deals. "
+                "Please upgrade your plan."
+            ),
+            "error_code": "FEATURE_NOT_INCLUDED_IN_PLAN",
+        }
+        transport = MockTransport([json_response(403, body)])
+        client = make_client(transport, max_retries=0)
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.request("GET", "/v1/deals")
+        err = excinfo.value
+        assert err.status == 403
+        assert err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
+        assert str(err) == body["message"]
+        # 403 is not retryable.
+        assert len(transport.requests) == 1
 
     def test_non_json_error_body_keeps_the_http_status_message(self) -> None:
         transport = MockTransport(

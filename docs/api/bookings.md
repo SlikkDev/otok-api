@@ -4,6 +4,8 @@ Read your workspace's meeting types, query open slots, and create/cancel/resched
 
 All endpoints require [authentication](getting-started.md#authentication).
 
+> **Plan feature required:** every route on this page (bookings **and** meeting-types) requires the **Booking** feature on the workspace's plan, in addition to API access. Without it, all calls return `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups).
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/meeting-types` | List meeting types |
@@ -44,7 +46,7 @@ Meeting type object:
 
 ### GET /api/v1/meeting-types
 
-Standard [list conventions](getting-started.md#list-conventions) (`filter`, `sort` default `-created_at`, `limit` default 50 / cap 500, `offset`, `search`).
+Standard [list conventions](getting-started.md#list-conventions) (`filter`, `sort` default `-created_at`, `limit` default 50 / cap 500, `offset`, `search`). Mistyped `filter` values return 400 — see [filter-value validation](getting-started.md#filter-value-validation).
 
 ```bash
 curl -G "https://app.otok.io/api/v1/meeting-types" \
@@ -179,9 +181,9 @@ curl -X POST "https://app.otok.io/api/v1/bookings" \
   }'
 ```
 
-Response `201` — the booking object with its `hosts` roster. The usual booking side effects run (confirmation email, calendar/Zoom setup where configured).
+Response `201` — the booking object with its `hosts` roster, plus a top-level boolean **`duplicate`** field (`false` on a fresh create, `true` on a replay — see below). The usual booking side effects run (confirmation email, calendar/Zoom setup where configured).
 
-**Idempotency is server-derived** — you do not send a key. A double submit of the same slot + meeting type + contact (+ pinned host, when used) returns the **existing confirmed booking** as a success instead of failing or double-booking. There is no marker distinguishing a replay from a fresh create. For round-robin types, a pinned create can never silently replay onto a different host than the one pinned.
+**Idempotency is server-derived** — you do not send a key. A double submit of the same slot + meeting type + contact (+ pinned host, when used) returns the **existing confirmed booking** as a success instead of failing or double-booking: still `201`, with `duplicate: true`. For round-robin types, a pinned create can never silently replay onto a different host than the one pinned.
 
 | Status | Code / message | Meaning |
 |---|---|---|
