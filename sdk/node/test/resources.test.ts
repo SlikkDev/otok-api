@@ -86,6 +86,66 @@ describe("campaigns.execute", () => {
   });
 });
 
+describe("contact notes", () => {
+  it("issues the documented verb + path + body for each notes method", async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      calls.push({
+        method: init.method,
+        path: new URL(String(url)).pathname,
+        body: init.body === undefined ? undefined : JSON.parse(init.body),
+      });
+      return json(200, { id: "n-1" });
+    });
+    const otok = makeClient(fetchMock as any);
+
+    await otok.contacts.listNotes("c-1");
+    await otok.contacts.createNote("c-1", "Asked for a demo", { pinned: true });
+    await otok.contacts.updateNote("n-1", { body: "Edited" });
+    await otok.contacts.deleteNote("n-1");
+
+    expect(calls).toEqual([
+      { method: "GET", path: "/api/v1/contacts/c-1/notes", body: undefined },
+      {
+        method: "POST",
+        path: "/api/v1/contacts/c-1/notes",
+        body: { body: "Asked for a demo", pinned: true },
+      },
+      { method: "PATCH", path: "/api/v1/notes/n-1", body: { body: "Edited" } },
+      { method: "DELETE", path: "/api/v1/notes/n-1", body: undefined },
+    ]);
+  });
+
+  it("createNote omits pinned when not provided", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({ body: "Plain note" });
+      return json(201, { id: "n-2", body: "Plain note", pinned_at: null });
+    });
+    const otok = makeClient(fetchMock as any);
+    const note = await otok.contacts.createNote("c-1", "Plain note");
+    expect(note.id).toBe("n-2");
+  });
+
+  it("listNotes returns the bare array (unpaginated endpoint)", async () => {
+    const rows = [
+      { id: "n-1", body: "pinned", pinned_at: "2026-07-14T10:00:00.000Z" },
+      { id: "n-2", body: "newest", pinned_at: null },
+    ];
+    const fetchMock = vi.fn(async () => json(200, rows));
+    const otok = makeClient(fetchMock as any);
+    const notes = await otok.contacts.listNotes("c-1");
+    expect(notes).toEqual(rows);
+  });
+
+  it("deleteNote resolves the success body", async () => {
+    const fetchMock = vi.fn(async () => json(200, { success: true }));
+    const otok = makeClient(fetchMock as any);
+    await expect(otok.contacts.deleteNote("n-1")).resolves.toEqual({
+      success: true,
+    });
+  });
+});
+
 describe("duplicate marker on idempotent creates", () => {
   it("passes duplicate through on contacts.upsert", async () => {
     const fetchMock = vi.fn(async (_url: any, init: any) =>

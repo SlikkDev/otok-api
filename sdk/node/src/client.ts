@@ -29,7 +29,11 @@ export type OtokClientOptions = HttpClientOptions;
  *
  * Rate limits: requests are throttled per API key (default 100/min; POST
  * /v1/emails allows 300/min). The client retries 429 and 5xx responses with
- * exponential backoff + jitter, honoring `Retry-After`.
+ * exponential backoff + jitter, honoring `Retry-After`. Transient network
+ * errors (connection reset/refused, DNS failure, socket timeout) share the
+ * same bounded backoff, but only for requests that are safe to replay:
+ * GET/HEAD, or writes carrying an idempotency key (`idempotency_key`,
+ * `external_reference`) — other writes surface the network error.
  */
 export class OtokClient {
   readonly contacts: ContactsApi;

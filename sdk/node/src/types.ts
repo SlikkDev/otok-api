@@ -148,6 +148,43 @@ export interface ContactUpsertResult extends Contact {
   duplicate: boolean;
 }
 
+/**
+ * Contact note (GET /v1/contacts/:id/notes et al.). Plain-text annotation
+ * on a contact; API note payloads are text only (rich text and mentions are
+ * in-app features). Notes created via the API have no author user and are
+ * attributed to source "api".
+ */
+export interface Note {
+  id: string;
+  workspace_id: string;
+  contact_id: string;
+  author_user_id: string | null;
+  /** Included on list responses only. */
+  author_name?: string | null;
+  source: string;
+  body: string;
+  /** Rich-text body — in-app feature; null for API-created notes. */
+  body_json: Record<string, unknown> | null;
+  mentioned_user_ids: string[] | null;
+  pinned_at: string | null;
+  conversation_id: string | null;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+
+/**
+ * PATCH /v1/notes/:id — both fields optional; sending neither returns the
+ * note unchanged. A `body` change bumps `updated_at` (shows as "edited"
+ * in-app); a pin toggle alone does not.
+ */
+export interface NoteUpdateParams {
+  /** New body (≤5000 chars; empty after trim → 400). */
+  body?: string;
+  /** Pin/unpin the note. */
+  pinned?: boolean;
+}
+
 // ─────────────────────────── Tags / groups ───────────────────────────
 
 export interface TagCreateParams {

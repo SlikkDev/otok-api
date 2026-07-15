@@ -28,6 +28,8 @@ import type {
   ListParams,
   MeetingType,
   MessageTemplate,
+  Note,
+  NoteUpdateParams,
   Paginated,
   Payment,
   PaymentCreateParams,
@@ -58,6 +60,36 @@ function listQuery(params: ListParams = {}): Record<string, QueryValue> {
   };
 }
 
+/** Documented `limit` cap for standard list endpoints (default 50). */
+const STANDARD_PAGE_CAP = 500;
+/** Documented `limit` cap for GET /v1/deals and /v1/payments (default 25). */
+const DEALS_PAYMENTS_PAGE_CAP = 100;
+
+/**
+ * Auto-paginate a `{ data, total, limit, offset }` list endpoint, yielding
+ * rows one by one until `total` is exhausted.
+ *
+ * Pages are requested at the endpoint's documented `limit` cap unless the
+ * caller passed a smaller `limit` (a larger one is clamped to the cap —
+ * matching the server, which never returns more than the cap per page). A
+ * caller `offset` sets the starting position.
+ */
+async function* paginate<T>(
+  fetchPage: (limit: number, offset: number) => Promise<Paginated<T>>,
+  cap: number,
+  limit?: number,
+  offset?: number,
+): AsyncGenerator<T, void, undefined> {
+  const pageSize = Math.min(limit ?? cap, cap);
+  let cursor = offset ?? 0;
+  for (;;) {
+    const page = await fetchPage(pageSize, cursor);
+    for (const item of page.data) yield item;
+    cursor += page.data.length;
+    if (page.data.length === 0 || cursor >= page.total) return;
+  }
+}
+
 // ─────────────────────────────── Contacts ───────────────────────────────
 
 export class ContactsApi {
@@ -65,6 +97,19 @@ export class ContactsApi {
 
   list(params?: ListParams): Promise<Paginated<Contact>> {
     return this.http.request("GET", "/v1/contacts", { query: listQuery(params) });
+  }
+
+  /**
+   * Iterate every matching contact, auto-paginating GET /v1/contacts
+   * (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(params: ListParams = {}): AsyncGenerator<Contact, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
   }
 
   get(id: string): Promise<Contact> {
@@ -93,6 +138,42 @@ export class ContactsApi {
   update(id: string, params: ContactUpsertParams): Promise<Contact> {
     return this.http.request("PATCH", `/v1/contacts/${id}`, { body: params });
   }
+
+  // ── Notes ──
+
+  /**
+   * All the contact's notes (pinned first, then newest-first) — the
+   * endpoint is unpaginated.
+   */
+  listNotes(contactId: string): Promise<Note[]> {
+    return this.http.request("GET", `/v1/contacts/${contactId}/notes`);
+  }
+
+  /** Add a plain-text note (≤5000 chars) to a contact. */
+  createNote(
+    contactId: string,
+    body: string,
+    options: { pinned?: boolean } = {},
+  ): Promise<Note> {
+    const payload: Record<string, unknown> = { body };
+    if (options.pinned !== undefined) payload.pinned = options.pinned;
+    return this.http.request("POST", `/v1/contacts/${contactId}/notes`, {
+      body: payload,
+    });
+  }
+
+  /**
+   * Edit a note's body and/or pin/unpin it. Sending neither returns the
+   * note unchanged.
+   */
+  updateNote(noteId: string, params: NoteUpdateParams): Promise<Note> {
+    return this.http.request("PATCH", `/v1/notes/${noteId}`, { body: params });
+  }
+
+  /** Delete a note. Returns `{ success: true }`. */
+  deleteNote(noteId: string): Promise<{ success: boolean }> {
+    return this.http.request("DELETE", `/v1/notes/${noteId}`);
+  }
 }
 
 // ─────────────────────────────── Tags ───────────────────────────────
@@ -102,6 +183,19 @@ export class TagsApi {
 
   list(params?: ListParams): Promise<Paginated<Tag>> {
     return this.http.request("GET", "/v1/tags", { query: listQuery(params) });
+  }
+
+  /**
+   * Iterate every matching tag, auto-paginating GET /v1/tags (`limit` cap
+   * 500). Accepts the same params as `list`.
+   */
+  iter(params: ListParams = {}): AsyncGenerator<Tag, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
   }
 
   get(id: string): Promise<Tag> {
@@ -128,6 +222,19 @@ export class ContactGroupsApi {
     return this.http.request("GET", "/v1/contact-groups", {
       query: listQuery(params),
     });
+  }
+
+  /**
+   * Iterate every matching group, auto-paginating GET /v1/contact-groups
+   * (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(params: ListParams = {}): AsyncGenerator<ContactGroup, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
   }
 
   get(id: string): Promise<ContactGroup> {
@@ -173,6 +280,20 @@ export class DealsApi {
     return this.http.request("GET", "/v1/deals", {
       query: { ...params },
     });
+  }
+
+  /**
+   * Iterate every matching deal, auto-paginating GET /v1/deals (`limit`
+   * cap 100 — deals paginate differently from the standard lists). Accepts
+   * the same params as `list`.
+   */
+  iter(params: DealListParams = {}): AsyncGenerator<Deal, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
   }
 
   get(id: string): Promise<Deal> {
@@ -258,6 +379,19 @@ export class CampaignsApi {
     });
   }
 
+  /**
+   * Iterate every matching campaign, auto-paginating GET /v1/campaigns
+   * (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(params: ListParams = {}): AsyncGenerator<Campaign, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
   get(id: string): Promise<Campaign> {
     return this.http.request("GET", `/v1/campaigns/${id}`);
   }
@@ -293,6 +427,21 @@ export class TemplatesApi {
     });
   }
 
+  /**
+   * Iterate every matching template, auto-paginating GET /v1/templates
+   * (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(
+    params: ListParams = {},
+  ): AsyncGenerator<MessageTemplate, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
   get(id: string): Promise<MessageTemplate> {
     return this.http.request("GET", `/v1/templates/${id}`);
   }
@@ -322,6 +471,20 @@ export class PaymentsApi {
 
   list(params: PaymentListParams = {}): Promise<Paginated<Payment>> {
     return this.http.request("GET", "/v1/payments", { query: { ...params } });
+  }
+
+  /**
+   * Iterate every matching payment, auto-paginating GET /v1/payments
+   * (`limit` cap 100 — payments paginate differently from the standard
+   * lists). Accepts the same params as `list`.
+   */
+  iter(params: PaymentListParams = {}): AsyncGenerator<Payment, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
   }
 
   /** Get a payment with its entry schedule. */
@@ -381,6 +544,19 @@ export class MeetingTypesApi {
     });
   }
 
+  /**
+   * Iterate every matching meeting type, auto-paginating GET
+   * /v1/meeting-types (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(params: ListParams = {}): AsyncGenerator<MeetingType, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
   get(id: string): Promise<MeetingType> {
     return this.http.request("GET", `/v1/meeting-types/${id}`);
   }
@@ -402,6 +578,19 @@ export class BookingsApi {
 
   list(params: BookingListParams = {}): Promise<Paginated<Booking>> {
     return this.http.request("GET", "/v1/bookings", { query: { ...params } });
+  }
+
+  /**
+   * Iterate every matching booking, auto-paginating GET /v1/bookings
+   * (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(params: BookingListParams = {}): AsyncGenerator<Booking, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
   }
 
   get(id: string): Promise<Booking> {

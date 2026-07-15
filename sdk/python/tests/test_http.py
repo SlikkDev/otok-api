@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import socket
 import time
+import urllib.error
 from email.utils import formatdate
 from typing import Any
 
@@ -149,7 +151,7 @@ class TestRetries:
             client.request("GET", "/v1/tags")
         assert len(transport.requests) == 1
 
-    def test_does_not_retry_timeouts(self) -> None:
+    def test_does_not_retry_timeouts_on_non_idempotent_writes(self) -> None:
         class TimeoutTransport:
             def __init__(self) -> None:
                 self.calls = 0
@@ -165,9 +167,193 @@ class TestRetries:
             timeout=0.03,
             transport=transport,
         )
+        # POST without an idempotency key: the request may have reached the
+        # server, so the timeout surfaces after the first attempt.
         with pytest.raises(OtokTimeoutError):
+            client.request("POST", "/v1/tags", body={"name": "VIP"})
+        assert transport.calls == 1
+
+
+class _FlakyTransport:
+    """Raises the scripted exceptions in order, then answers from responses."""
+
+    def __init__(
+        self,
+        errors: list[BaseException],
+        responses: list[TransportResponse],
+    ) -> None:
+        self.errors = list(errors)
+        self.responses = list(responses)
+        self.calls = 0
+
+    def send(self, request: TransportRequest) -> TransportResponse:
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        if not self.responses:
+            raise AssertionError("_FlakyTransport: no scripted response left")
+        return self.responses.pop(0)
+
+
+class TestNetworkErrorRetries:
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Full-jitter backoff sleeps random(0, cap) — swallow the sleeps so
+        # retried requests re-fire immediately.
+        monkeypatch.setattr(time, "sleep", lambda _s: None)
+
+    def _client(self, transport: _FlakyTransport, **kwargs: Any) -> HttpClient:
+        return HttpClient(
+            "otok_live_testkey",
+            base_url="https://example.test/api",
+            transport=transport,
+            **kwargs,
+        )
+
+    def test_retries_a_get_after_a_connection_reset(self) -> None:
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(200, {"ok": True})],
+        )
+        client = self._client(transport)
+        assert client.request("GET", "/v1/tags") == {"ok": True}
+        assert transport.calls == 2
+
+    def test_retries_a_get_on_dns_failure_and_connection_refusal(self) -> None:
+        transport = _FlakyTransport(
+            [
+                socket.gaierror(8, "nodename nor servname provided"),
+                ConnectionRefusedError("connection refused"),
+            ],
+            [json_response(200, {"ok": True})],
+        )
+        client = self._client(transport)
+        assert client.request("GET", "/v1/tags") == {"ok": True}
+        assert transport.calls == 3
+
+    def test_retries_a_get_on_a_urlerror_wrapped_socket_error(self) -> None:
+        transport = _FlakyTransport(
+            [urllib.error.URLError(ConnectionResetError("reset by peer"))],
+            [json_response(200, {"ok": True})],
+        )
+        client = self._client(transport)
+        assert client.request("GET", "/v1/tags") == {"ok": True}
+        assert transport.calls == 2
+
+    def test_retries_a_timed_out_get(self) -> None:
+        transport = _FlakyTransport(
+            [OtokTimeoutError(30.0)],
+            [json_response(200, {"ok": True})],
+        )
+        client = self._client(transport)
+        assert client.request("GET", "/v1/tags") == {"ok": True}
+        assert transport.calls == 2
+
+    def test_does_not_retry_a_post_without_an_idempotency_key(self) -> None:
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"id": "c1"})],
+        )
+        client = self._client(transport)
+        with pytest.raises(ConnectionResetError):
+            client.request("POST", "/v1/contacts", body={"email": "a@b.co"})
+        assert transport.calls == 1
+
+    def test_does_not_retry_patch_or_delete(self) -> None:
+        transport = _FlakyTransport(
+            [ConnectionResetError("reset"), ConnectionResetError("reset")],
+            [],
+        )
+        client = self._client(transport)
+        with pytest.raises(ConnectionResetError):
+            client.request("PATCH", "/v1/contacts/c1", body={"name": "Jane"})
+        with pytest.raises(ConnectionResetError):
+            client.request("DELETE", "/v1/webhook-endpoints/w1")
+        assert transport.calls == 2
+
+    def test_retries_a_post_carrying_an_idempotency_key(self) -> None:
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"id": "send-1"})],
+        )
+        client = self._client(transport)
+        result = client.request(
+            "POST",
+            "/v1/emails",
+            body={"to": "a@b.co", "subject": "hi", "text": "hi", "idempotency_key": "k-1"},
+        )
+        assert result["id"] == "send-1"
+        assert transport.calls == 2
+
+    def test_retries_a_post_carrying_an_external_reference(self) -> None:
+        transport = _FlakyTransport(
+            [socket.gaierror(8, "dns down")],
+            [json_response(201, {"id": "deal-1"})],
+        )
+        client = self._client(transport)
+        result = client.request(
+            "POST",
+            "/v1/deals",
+            body={"title": "Order", "external_reference": "order:A-1001"},
+        )
+        assert result["id"] == "deal-1"
+        assert transport.calls == 2
+
+    def test_an_empty_idempotency_key_does_not_make_a_post_retryable(self) -> None:
+        transport = _FlakyTransport([ConnectionResetError("reset")], [])
+        client = self._client(transport)
+        with pytest.raises(ConnectionResetError):
+            client.request(
+                "POST",
+                "/v1/emails",
+                body={"to": "a@b.co", "subject": "hi", "idempotency_key": ""},
+            )
+        assert transport.calls == 1
+
+    def test_does_not_retry_non_transient_errors_even_on_get(self) -> None:
+        transport = _FlakyTransport([ValueError("broken transport")], [])
+        client = self._client(transport)
+        with pytest.raises(ValueError, match="broken transport"):
             client.request("GET", "/v1/tags")
         assert transport.calls == 1
+
+    def test_surfaces_the_last_network_error_after_exhausting_retries(self) -> None:
+        transport = _FlakyTransport(
+            [
+                ConnectionResetError("reset 1"),
+                ConnectionResetError("reset 2"),
+                ConnectionResetError("reset 3"),
+            ],
+            [],
+        )
+        client = self._client(transport)  # max_retries default 2
+        with pytest.raises(ConnectionResetError, match="reset 3"):
+            client.request("GET", "/v1/tags")
+        assert transport.calls == 3
+
+    def test_respects_max_retries_zero_for_network_errors(self) -> None:
+        transport = _FlakyTransport([ConnectionResetError("reset")], [])
+        client = self._client(transport, max_retries=0)
+        with pytest.raises(ConnectionResetError):
+            client.request("GET", "/v1/tags")
+        assert transport.calls == 1
+
+    def test_uses_the_shared_backoff_between_network_retries(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        delays: list[float] = []
+        monkeypatch.setattr(time, "sleep", delays.append)
+        transport = _FlakyTransport(
+            [ConnectionResetError("reset"), ConnectionResetError("reset")],
+            [json_response(200, {"ok": True})],
+        )
+        client = self._client(transport)
+        assert client.request("GET", "/v1/tags") == {"ok": True}
+        # One backoff sleep per retry, drawn from the shared full-jitter
+        # schedule: random(0, 500ms * 2**attempt).
+        assert len(delays) == 2
+        assert 0.0 <= delays[0] <= 0.5
+        assert 0.0 <= delays[1] <= 1.0
 
 
 class TestRedirects:

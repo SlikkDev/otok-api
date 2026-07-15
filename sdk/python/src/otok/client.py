@@ -39,16 +39,22 @@ class OtokClient:
 
     Rate limits: requests are throttled per API key (default 100/min; POST
     /v1/emails allows 300/min). The client retries 429 and 5xx responses
-    with exponential backoff + jitter, honoring ``Retry-After``.
+    with exponential backoff + jitter, honoring ``Retry-After``. Transient
+    network errors (connection reset/refused, DNS failure, socket timeout)
+    share the same bounded backoff, but only for requests that are safe to
+    replay: GET/HEAD, or writes carrying an idempotency key
+    (``idempotency_key``, ``external_reference``) — other writes surface
+    the network error.
 
     :param api_key: API key (``otok_live_…``), sent as
         ``Authorization: Bearer <key>``.
     :param timeout: Request timeout in seconds. Default 30. With the default
         urllib transport this bounds each socket operation (connect, each
         read), not a whole attempt's wall-clock time.
-    :param max_retries: Retry attempts after the first request (429 and 5xx
-        responses only). Default 2 (i.e. up to 3 requests total). Set 0 to
-        disable retries.
+    :param max_retries: Retry attempts after the first request. Default 2
+        (i.e. up to 3 requests total). Set 0 to disable retries. Applies to
+        429/5xx responses (all requests) and to transient network errors
+        (safe or idempotency-keyed requests only).
     :param transport: Injectable transport implementation (used by tests).
         Defaults to the built-in ``urllib``-based transport.
     :param base_url: Internal/testing override only — leave unset.

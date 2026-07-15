@@ -190,10 +190,63 @@ def _is_retryable_status(status: int) -> bool:
     return status == 429 or status >= 500
 
 
+#: Transport-level exceptions treated as transient: connection
+#: reset/refused/aborted/broken pipe (``ConnectionError``), DNS failure
+#: (``socket.gaierror``/``herror``), socket timeout. ``socket.timeout`` is an
+#: alias of ``TimeoutError`` since 3.10 but is listed for 3.9.
+_TRANSIENT_NETWORK_EXCEPTIONS = (
+    ConnectionError,
+    socket.gaierror,
+    socket.herror,
+    TimeoutError,
+    socket.timeout,
+)
+
+
+def _is_transient_network_error(err: BaseException) -> bool:
+    """True when ``err`` is a transient transport-level failure (the request
+    never produced an HTTP response): a connection/DNS/socket-timeout error —
+    raised directly or wrapped in a ``urllib.error.URLError`` — or an
+    ``OtokTimeoutError``.
+    """
+    if isinstance(err, OtokTimeoutError):
+        return True
+    if isinstance(err, urllib.error.HTTPError):
+        return False  # an HTTP response, not a transport failure
+    if isinstance(err, _TRANSIENT_NETWORK_EXCEPTIONS):
+        return True
+    if isinstance(err, urllib.error.URLError):
+        return isinstance(err.reason, _TRANSIENT_NETWORK_EXCEPTIONS)
+    return False
+
+
+def _is_network_retry_safe(method: str, body: Any) -> bool:
+    """Whether a request may be auto-retried after a transient NETWORK error.
+
+    A network error is ambiguous — the request may or may not have reached
+    the server — so replaying it is only safe when a replay cannot
+    double-apply an effect: safe methods (GET/HEAD), or a write body that
+    carries its own idempotency key — ``idempotency_key``
+    (``POST /v1/emails``) or ``external_reference`` (``POST /v1/deals``,
+    ``POST /v1/payments``). Everything else surfaces the network error to
+    the caller. (429/5xx HTTP responses are a different case — the server
+    answered — and keep their existing retry behavior for all requests.)
+    """
+    if method.upper() in ("GET", "HEAD"):
+        return True
+    if isinstance(body, Mapping):
+        for key in ("idempotency_key", "external_reference"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return True
+    return False
+
+
 class HttpClient:
     """Minimal HTTP client: auth header injection, JSON (de)serialization,
-    request timeouts, and exponential-backoff retries on 429/5xx respecting
-    ``Retry-After``.
+    request timeouts, and exponential-backoff retries — on 429/5xx
+    respecting ``Retry-After``, and on transient network errors for
+    safe/idempotency-keyed requests only.
 
     ``timeout`` is passed to the transport per attempt; with the default
     urllib transport it bounds each socket operation (connect, each read),
@@ -236,19 +289,34 @@ class HttpClient:
             headers["Content-Type"] = "application/json"
             data = json.dumps(body).encode("utf-8")
 
+        network_retry_safe = _is_network_retry_safe(method, body)
+
         for attempt in range(self._max_retries + 1):
-            # Network failures and timeouts are not retried in v0.1 — not
-            # every endpoint is idempotent, and a request may have reached
-            # the server.
-            response = self._transport.send(
-                TransportRequest(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    body=data,
-                    timeout=self._timeout,
+            try:
+                response = self._transport.send(
+                    TransportRequest(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        body=data,
+                        timeout=self._timeout,
+                    )
                 )
-            )
+            except Exception as err:
+                # Transient transport-level failures (connection reset/
+                # refused, DNS failure, socket timeout) share the 429/5xx
+                # backoff — but only when replaying is safe (GET/HEAD or an
+                # idempotency-keyed write). The request may have reached the
+                # server, so non-idempotent writes are never network-retried;
+                # the error surfaces to the caller instead.
+                if (
+                    network_retry_safe
+                    and attempt < self._max_retries
+                    and _is_transient_network_error(err)
+                ):
+                    time.sleep(compute_backoff_ms(attempt) / 1000.0)
+                    continue
+                raise
 
             if 200 <= response.status < 300:
                 return _parse_body(response)

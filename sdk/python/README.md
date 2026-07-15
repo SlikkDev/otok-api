@@ -6,7 +6,8 @@ Gives bespoke websites and e-commerce stores out-of-the-box integration with oTo
 
 - **Python 3.9+**, zero runtime dependencies (stdlib `urllib` behind an injectable transport)
 - Full type hints (`py.typed`) derived from the real API contract
-- Automatic retries with exponential backoff + jitter on `429`/`5xx` (honors `Retry-After`)
+- Automatic retries with exponential backoff + jitter on `429`/`5xx` (honors `Retry-After`), plus transient network errors for requests that are safe to replay
+- Auto-paginating generators (`for contact in client.contacts.iter(): ...`)
 - Constant-time webhook signature verification
 
 ## Install
@@ -44,6 +45,33 @@ contact = client.contacts.upsert(
 )
 # contact["duplicate"]: True when an existing contact was matched and
 # updated, False on a fresh create (the status is 201 either way).
+```
+
+### Iterate a whole collection (auto-pagination)
+
+Every paginated list endpoint has a matching `iter()` that returns a generator: it accepts the same filter/sort/search params as `list()` and fetches pages lazily until the collection is exhausted.
+
+```python
+for contact in client.contacts.iter({"filter": {"lifecycle_stage": "customer"}}):
+    print(contact["email"])
+```
+
+Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals and payments, which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
+
+```python
+for deal in client.deals.iter({"status": "open", "limit": 50}):
+    ...  # pages of 50 through GET /v1/deals
+```
+
+### Contact notes
+
+Plain-text annotations on a contact (API note payloads are text only — rich text and mentions are in-app features). `list_notes` returns a bare list (the endpoint is unpaginated), pinned notes first, then newest-first.
+
+```python
+note = client.contacts.create_note(contact["id"], "Asked for a demo next week", pinned=True)
+client.contacts.update_note(note["id"], body="Demo booked for Tuesday", pinned=False)
+notes = client.contacts.list_notes(contact["id"])
+client.contacts.delete_note(note["id"])  # -> {"success": True}
 ```
 
 ### Create a deal from an order (idempotent)
@@ -227,6 +255,8 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier flat dicts and maps them for you.
 
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, campaigns, templates, payments, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+
 ## Errors, timeouts, retries
 
 - Non-2xx responses raise **`OtokAPIError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{"error": {"code", "message"}}` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
@@ -237,7 +267,12 @@ Request/response field names match the wire contract (snake_case) exactly, so th
 - **Campaign execute uses real status codes:** `POST /v1/campaigns/:id/execute` answers `200` with `{"success": true, …}` when queued, and raises `OtokAPIError` otherwise — `404` (`code == "campaign_not_found"`) or `409` (`code == "campaign_not_scheduled"`; campaigns created without an explicit `status` default to `draft`, so set `status: "scheduled"` before executing). It no longer answers 201 with `success: false` in the body.
 - Slow requests raise **`OtokTimeoutError`** — with the default urllib transport the `timeout` option (default 30 s) bounds each socket operation (connect, each read) rather than a whole attempt's wall-clock time.
 - Redirects are never followed: a 3xx comes back as an `OtokAPIError`, so the bearer API key is never re-sent to a redirect target.
-- `429` and `5xx` responses are retried up to `max_retries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header (both delta-seconds and HTTP-date forms). Network errors are **not** retried automatically in v0.1 — use idempotency keys (`external_reference`, `idempotency_key`) and retry at the call site.
+- `429` and `5xx` responses are retried up to `max_retries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header (both delta-seconds and HTTP-date forms). This applies to **all** requests: the server answered, so the retry semantics are unchanged from v0.1.
+- **Transient network errors are retried too — but only when replaying is safe.** Connection resets/refusals (`ConnectionError`), DNS failures (`socket.gaierror`), socket timeouts (`TimeoutError`, and the SDK's own `OtokTimeoutError`) — raised directly or wrapped in a `urllib.error.URLError` — share the same bounded backoff schedule (`max_retries`, exponential + full jitter) **if and only if** the request is:
+  - a **safe method** (`GET`/`HEAD`), or
+  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`client.emails.send`) or `external_reference` (`client.deals.create`, `client.payments.create`).
+
+  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, ...) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is raised for you to handle. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `client.commerce.track_order`) or retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
 
 ```python
@@ -259,6 +294,7 @@ except OtokAPIError as err:
 Runnable scripts live in [`examples/`](./examples):
 
 - [`track_order.py`](./examples/track_order.py) — contact upsert + idempotent deal + receipt for a store order
+- [`export_contacts.py`](./examples/export_contacts.py) — stream every contact to CSV with the auto-paginating iterator
 - [`flask_webhook_receiver.py`](./examples/flask_webhook_receiver.py) — verified webhook receiver (Flask)
 - [`fastapi_webhook_receiver.py`](./examples/fastapi_webhook_receiver.py) — verified webhook receiver (FastAPI)
 - [`django_webhook_receiver.py`](./examples/django_webhook_receiver.py) — verified webhook receiver (Django, single file)
@@ -272,6 +308,11 @@ ruff check .
 mypy
 ```
 
-## Versioning & scope (v0.1)
+## Versioning & scope (v0.2)
 
-Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, and bookings. Sync client only; not covered yet: an async client, list-endpoint `$where` advanced filter helpers, and automatic pagination iterators — planned for a later release.
+Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
+
+New in v0.2.0:
+
+- `iter()` generators on all paginated list endpoints, honoring each resource's documented page-size cap (500 standard; 100 for deals/payments)
+- Transient network errors (connection reset/refused, DNS failure, socket timeout) now retry with the existing bounded backoff — GET/HEAD and idempotency-keyed writes only; other writes still surface the error immediately
