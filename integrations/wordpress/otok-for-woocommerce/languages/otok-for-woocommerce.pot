@@ -1,0 +1,393 @@
+# Copyright (C) 2026 oToK
+# This file is distributed under the GPL-2.0-or-later.
+msgid ""
+msgstr ""
+"Project-Id-Version: oToK for WooCommerce 0.1.0\n"
+"Report-Msgid-Bugs-To: https://wordpress.org/support/plugin/otok-for-woocommerce\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"POT-Creation-Date: 2026-07-14T19:05:53+00:00\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"X-Generator: WP-CLI 2.12.0\n"
+"X-Domain: otok-for-woocommerce\n"
+
+#. Plugin Name of the plugin
+#: otok-for-woocommerce.php
+#: includes/admin/class-otok-wc-admin.php:106
+#: includes/admin/views/settings-page.php:17
+msgid "oToK for WooCommerce"
+msgstr ""
+
+#. Plugin URI of the plugin
+#: otok-for-woocommerce.php
+msgid "https://otok.io/woocommerce"
+msgstr ""
+
+#. Description of the plugin
+#: otok-for-woocommerce.php
+msgid "Connects your WooCommerce store to oToK — marketing consent at checkout plus cart and order events for automation flows. Talks only to the oToK service you explicitly connect."
+msgstr ""
+
+#. Author of the plugin
+#: otok-for-woocommerce.php
+#: includes/admin/class-otok-wc-admin.php:107
+msgid "oToK"
+msgstr ""
+
+#. Author URI of the plugin
+#: otok-for-woocommerce.php
+msgid "https://otok.io"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:144
+msgid "Settings"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:157
+msgid "You do not have permission to access this page."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:193
+msgid "Revoked — oToK no longer accepts this connection"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:195
+msgid "Suspended — site URL changed since connecting"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:197
+msgid "Paused — stored credentials are unreadable on this server (retrying automatically, nothing is lost). Reconnect the store."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:199
+msgid "Paused — oToK plan lapsed (retrying automatically, nothing is lost)"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:201
+msgid "Connected"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:203
+msgid "Not connected"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:224
+msgid "oToK for WooCommerce: connection revoked."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:225
+msgid "oToK repeatedly rejected this store's credentials, so event delivery is paused. Queued events are kept. Disconnect and reconnect with a fresh code from your oToK workspace."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:227
+#: includes/admin/class-otok-wc-admin.php:238
+msgid "Open oToK settings to reconnect"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:235
+msgid "oToK for WooCommerce: connection needs attention."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:236
+msgid "This site can no longer use its stored oToK credentials — this usually happens when the wp-config security salts are rotated. Event delivery is paused and queued events are kept. Disconnect and reconnect with a fresh code from your oToK workspace."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:251
+msgid "oToK for WooCommerce: site URL changed."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:252
+msgid "This site's URL no longer matches the one recorded when the store was connected — this usually means a staging copy or a migrated site. Event delivery is suspended so a clone can never send data into the original connection. Queued events are kept."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:254
+msgid "This is a copy — reconnect it separately"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:256
+msgid "The URL change is expected — resume delivery"
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:268
+#: includes/admin/class-otok-wc-admin.php:286
+#: includes/admin/class-otok-wc-admin.php:319
+#: includes/admin/class-otok-wc-admin.php:339
+#: includes/admin/class-otok-wc-admin.php:359
+msgid "You do not have permission to do that."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:275
+msgid "Site URL confirmed — event delivery resumes."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:302
+msgid "Store connected to oToK."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:327
+msgid "Consent settings saved."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:348
+msgid "Cart tracking settings saved."
+msgstr ""
+
+#: includes/admin/class-otok-wc-admin.php:373
+msgid "Disconnected from oToK on this site. To fully revoke the connection, also remove it in your oToK workspace."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:28
+msgid "Connect to oToK"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:29
+msgid "Generate a one-time connect code on the WooCommerce connect screen in your oToK workspace, then paste it here. The code is exchanged once over HTTPS and never stored."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:34
+msgid "One-time connect code"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:43
+msgid "Connect"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:50
+msgid "Connected to oToK"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:54
+msgid "Connection ID"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:58
+msgid "Connected on"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:68
+msgid "Site URL check"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:71
+msgid "Matches the connect-time snapshot"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:73
+msgid "Site URL changed since connecting — if this site was moved or cloned, reconnect it to oToK."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:82
+msgid "Disconnect this store from oToK? Events will stop flowing until you reconnect."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:85
+msgid "Disconnect"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:92
+msgid "Marketing consent at checkout"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:93
+msgid "Shoppers see this checkbox at checkout — in the order information step of the Checkout block, and after the email field on the classic checkout. Their choice is recorded on the order."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:98
+msgid "Checkbox label"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:106
+msgid "Plain text only. Leave empty to use the default label."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:109
+msgid "The checkbox is always shown and always starts unchecked. Express opt-in laws (such as the Israeli spam law and the GDPR) do not allow pre-ticked marketing consent, so there is deliberately no setting to change this."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:111
+msgid "Save consent settings"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:116
+msgid "Cart tracking"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:117
+msgid "Cart activity is sent to oToK as raw snapshots so abandoned-cart automations can run there. Whether and when a cart counts as abandoned is decided in your oToK workspace, not by this plugin."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:128
+msgid "Capture the email address guests type at checkout"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:130
+msgid "Lets oToK match an abandoned cart to a contact before an order exists. The address is kept only in the shopper's WooCommerce session and attached to cart events — it is never logged or stored elsewhere."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:139
+msgid "Strict mode: attach the captured email only after the shopper ticks the marketing-consent checkbox"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:141
+msgid "Conservative option for stores that do not want to send a guest's email with cart events before an explicit opt-in. Cart events themselves are always sent; only the captured guest email is held back. Applies to the classic checkout; on the Checkout block the email is held back until the order is placed."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:143
+msgid "Save cart tracking settings"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:148
+msgid "Health"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:152
+msgid "Delivery state"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:157
+msgid "Queued events are kept. Disconnect above, generate a fresh connect code in your oToK workspace, and reconnect to resume delivery."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:162
+msgid "Queue depth"
+msgstr ""
+
+#. translators: 1: number of queued (pending) events, 2: number of permanently failed events.
+#: includes/admin/views/settings-page.php:167
+#, php-format
+msgid "%1$s pending / %2$s failed"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:175
+msgid "Last successful delivery"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:183
+msgid "No deliveries yet"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:192
+msgid "Recent delivery failures"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:196
+msgid "Time (UTC)"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:197
+msgid "Event"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:198
+msgid "Status"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:199
+msgid "Error"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:215
+msgid "Diagnostics"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:216
+msgid "Copy this block into a support email. It contains version and status information only — no secrets and no customer data."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:222
+msgid "Copied!"
+msgstr ""
+
+#: includes/admin/views/settings-page.php:223
+msgid "Copy failed — select the text and copy it manually."
+msgstr ""
+
+#: includes/admin/views/settings-page.php:224
+msgid "Copy diagnostics"
+msgstr ""
+
+#. translators: %s: support email address link.
+#: includes/admin/views/settings-page.php:233
+#, php-format
+msgid "Need help? Email %s."
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:92
+msgid "The oToK service URL must use HTTPS."
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:142
+msgid "Another connection attempt is already in progress. Please wait a moment and try again."
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:130
+msgid "This store is already connected to oToK. Disconnect first to connect with a new code."
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:139
+msgid "That connect code does not look valid. Paste the one-time code exactly as shown in oToK."
+msgstr ""
+
+#. translators: %s: sanitized transport error detail (e.g. timeout, DNS, or TLS message).
+#: includes/class-otok-wc-connect.php:182
+#, php-format
+msgid "Could not reach the oToK service. Check that this server can make outbound HTTPS requests and try again. Details: %s"
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:185
+msgid "Could not reach the oToK service. Check that this server can make outbound HTTPS requests and try again."
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:197
+msgid "Too many connection attempts. Wait a minute and try again with the same code."
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:204
+msgid "oToK rejected the connect code. Codes are one-time and expire quickly — generate a fresh code in oToK and try again."
+msgstr ""
+
+#. translators: %s: sanitized error detail (HTTP status and response excerpt).
+#: includes/class-otok-wc-connect.php:216
+#, php-format
+msgid "The oToK service returned an unexpected error. Please try again in a few minutes. Details: %s"
+msgstr ""
+
+#: includes/class-otok-wc-connect.php:234
+msgid "The oToK service returned an unexpected response. Please try again; if it keeps failing, contact we@otok.io."
+msgstr ""
+
+#: includes/class-otok-wc-consent.php:139
+msgid "I'd like to receive news and offers by email"
+msgstr ""
+
+#: includes/class-otok-wc-credentials.php:186
+msgid "This server's PHP is missing the sodium extension, so the connection secret cannot be stored securely. Ask your host to enable ext/sodium (bundled with PHP since 7.2) and try again."
+msgstr ""
+
+#: otok-for-woocommerce.php:57
+msgid "oToK for WooCommerce does not support network activation. Please activate it individually on each site that runs WooCommerce."
+msgstr ""
+
+#: otok-for-woocommerce.php:58
+msgid "Plugin activation error"
+msgstr ""
+
+#. translators: 1: required WooCommerce version, 2: detected WooCommerce version.
+#: otok-for-woocommerce.php:158
+#, php-format
+msgid "oToK for WooCommerce requires WooCommerce %1$s or newer (version %2$s detected). The plugin will not do anything until WooCommerce is updated."
+msgstr ""
+
+#: otok-for-woocommerce.php:160
+msgctxt "detected WooCommerce version fallback"
+msgid "unknown"
+msgstr ""
+
+#. translators: %s: required WooCommerce version.
+#: otok-for-woocommerce.php:165
+#, php-format
+msgid "oToK for WooCommerce requires WooCommerce (%s or newer) to be installed and active. The plugin will not do anything until then."
+msgstr ""

@@ -1,0 +1,62 @@
+<?xml version="1.0"?>
+<ruleset name="oToK-for-WooCommerce">
+	<description>WordPress Coding Standards ruleset for the oToK for WooCommerce plugin.</description>
+
+	<!-- Scan the shippable plugin directory only. -->
+	<file>otok-for-woocommerce</file>
+
+	<exclude-pattern>*/vendor/*</exclude-pattern>
+	<exclude-pattern>*/node_modules/*</exclude-pattern>
+
+	<!-- Bundled third-party libraries (Action Scheduler) — shipped verbatim,
+	     never modified, not held to this ruleset. -->
+	<exclude-pattern>otok-for-woocommerce/lib/*</exclude-pattern>
+
+	<!-- Generated translation files (`wp i18n make-php` output) — machine
+	     format, regenerated from the .po, not held to this ruleset. -->
+	<exclude-pattern>otok-for-woocommerce/languages/*\.l10n\.php</exclude-pattern>
+
+	<arg name="extensions" value="php"/>
+	<arg value="ps"/>
+	<arg name="cache" value=".phpcs-cache"/>
+	<arg name="parallel" value="8"/>
+
+	<config name="minimum_wp_version" value="6.6"/>
+
+	<!-- Full WordPress standard (Core + Docs + Extra). Exclusions are per-line
+	     phpcs:ignore comments in the code, each with an inline justification —
+	     no rules are excluded wholesale here. -->
+	<rule ref="WordPress"/>
+
+	<!-- Approved plugin prefixes for all globals (functions, classes,
+	     constants, options, transients, hook names). -->
+	<rule ref="WordPress.NamingConventions.PrefixAllGlobals">
+		<properties>
+			<property name="prefixes" type="array">
+				<element value="otok_wc"/>
+				<element value="Otok_WC"/>
+				<element value="OtokWC"/>
+				<element value="OTOK_WC"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!-- Enforce the plugin text domain on every i18n call. -->
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="otok-for-woocommerce"/>
+			</property>
+		</properties>
+	</rule>
+
+	<!-- manage_woocommerce is a WooCommerce capability, unknown to the core
+	     capability sniff. -->
+	<rule ref="WordPress.WP.Capabilities">
+		<properties>
+			<property name="custom_capabilities" type="array">
+				<element value="manage_woocommerce"/>
+			</property>
+		</properties>
+	</rule>
+</ruleset>

@@ -1,0 +1,9 @@
+{
+	"plugins": [
+		"https://downloads.wordpress.org/plugin/woocommerce.latest-stable.zip",
+		"./otok-for-woocommerce"
+	],
+	"mappings": {
+		"wp-content/otok-ci": "./bin"
+	}
+}

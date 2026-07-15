@@ -1,0 +1,5 @@
+vendor/
+# ... but the bundled Action Scheduler ships verbatim, incl. its vendor dir.
+!otok-for-woocommerce/lib/action-scheduler/vendor/
+*.zip
+.phpcs-cache
