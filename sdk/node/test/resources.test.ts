@@ -4,6 +4,7 @@ import { OtokApiError } from "../src/errors";
 import {
   DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES,
   EMAIL_WEBHOOK_EVENT_TYPES,
+  ORDER_WEBHOOK_EVENT_TYPES,
 } from "../src/types";
 
 function json(status: number, body: unknown): Response {
@@ -34,6 +35,37 @@ describe("webhook event type constants", () => {
     expect(EMAIL_WEBHOOK_EVENT_TYPES).toContain("email.failed");
     // …but it is not part of the default subscription.
     expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain("email.failed");
+  });
+
+  it("order event types are registrable but never defaulted", () => {
+    expect(ORDER_WEBHOOK_EVENT_TYPES).toEqual([
+      "order.created",
+      "order.paid",
+      "order.refunded",
+      "order.cancelled",
+      "order.fulfilled",
+    ]);
+    // Order events are opt-in by listing: an endpoint registered without
+    // an explicit `events` list gets only the email delivery defaults.
+    for (const eventType of ORDER_WEBHOOK_EVENT_TYPES) {
+      expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
+    }
+  });
+
+  it("order events are listed verbatim at registration", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({
+        url: "https://hooks.example.com/otok",
+        events: ["order.created", "order.paid", "order.refunded"],
+      });
+      return json(201, { id: "we-1", secret: "whsec_x" });
+    });
+    const otok = makeClient(fetchMock as any);
+    await otok.webhookEndpoints.create({
+      url: "https://hooks.example.com/otok",
+      events: ["order.created", "order.paid", "order.refunded"],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -191,5 +223,226 @@ describe("duplicate marker on idempotent creates", () => {
       contact_id: "contact-1",
     });
     expect(booking.duplicate).toBe(true);
+  });
+});
+
+describe("orders", () => {
+  it("list serializes every documented filter", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe("/api/v1/orders");
+      expect(Object.fromEntries(parsed.searchParams)).toEqual({
+        status: "paid",
+        contact_id: "5f9f1b9b-0000-4000-8000-000000000001",
+        source: "api",
+        store_connection_id: "5f9f1b9b-0000-4000-8000-000000000002",
+        external_reference: "shop:1001",
+        placed_from: "2026-07-01T00:00:00Z",
+        placed_to: "2026-07-31T23:59:59Z",
+        limit: "10",
+        offset: "20",
+      });
+      return json(200, { data: [], total: 0, limit: 10, offset: 20 });
+    });
+    const otok = makeClient(fetchMock as any);
+    await otok.orders.list({
+      status: "paid",
+      contact_id: "5f9f1b9b-0000-4000-8000-000000000001",
+      source: "api",
+      store_connection_id: "5f9f1b9b-0000-4000-8000-000000000002",
+      external_reference: "shop:1001",
+      placed_from: "2026-07-01T00:00:00Z",
+      placed_to: "2026-07-31T23:59:59Z",
+      limit: 10,
+      offset: 20,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("issues the documented verb + path + body for each write method", async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      calls.push({
+        method: init.method,
+        path: new URL(String(url)).pathname,
+        body: init.body === undefined ? undefined : JSON.parse(init.body),
+      });
+      return json(201, { id: "o-1" });
+    });
+    const otok = makeClient(fetchMock as any);
+
+    await otok.orders.create({
+      email: "jane@example.com",
+      items: [
+        { title: "Widget", unit_price: 170, quantity: 2 },
+        { product_sku: "SKU-1" },
+      ],
+      shipping_total: 20,
+      financial_status: "paid",
+      external_reference: "shop:1001",
+    });
+    await otok.orders.get("o-1");
+    await otok.orders.createRefund("o-1", {
+      amount: 50,
+      external_refund_id: "refund-77",
+      reason: "Damaged",
+    });
+    await otok.orders.markPaid("o-1");
+    await otok.orders.markPaid("o-1", { payment_reference: "inv-1001" });
+    await otok.orders.cancel("o-1");
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/orders",
+        body: {
+          email: "jane@example.com",
+          items: [
+            { title: "Widget", unit_price: 170, quantity: 2 },
+            { product_sku: "SKU-1" },
+          ],
+          shipping_total: 20,
+          financial_status: "paid",
+          external_reference: "shop:1001",
+        },
+      },
+      { method: "GET", path: "/api/v1/orders/o-1", body: undefined },
+      {
+        method: "POST",
+        path: "/api/v1/orders/o-1/refunds",
+        body: { amount: 50, external_refund_id: "refund-77", reason: "Damaged" },
+      },
+      { method: "POST", path: "/api/v1/orders/o-1/mark-paid", body: {} },
+      {
+        method: "POST",
+        path: "/api/v1/orders/o-1/mark-paid",
+        body: { payment_reference: "inv-1001" },
+      },
+      // No request body on cancel.
+      { method: "POST", path: "/api/v1/orders/o-1/cancel", body: undefined },
+    ]);
+  });
+
+  it("create carries no top-level duplicate marker", async () => {
+    // Unlike contacts/deals/payments/bookings, both create and
+    // upsert-match answer 201 with the same full-order body — the only
+    // signals are created_at or a pre-check by external_reference.
+    const fetchMock = vi.fn(async () =>
+      json(201, {
+        id: "o-1",
+        external_reference: "shop:1001",
+        financial_status: "paid",
+        total: 360,
+        items: [],
+        refunds: [],
+        created_at: "2026-07-15T00:00:00.000Z",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const order = await otok.orders.create({
+      contact_id: "c-1",
+      external_reference: "shop:1001",
+    });
+    expect("duplicate" in order).toBe(false);
+    expect(order.created_at).toBe("2026-07-15T00:00:00.000Z");
+  });
+
+  it("refund replay surfaces the duplicate marker", async () => {
+    // A repeat POST with the same external_refund_id applies nothing and
+    // returns the current order state with duplicate: true.
+    const fetchMock = vi.fn(async () =>
+      json(201, {
+        duplicate: true,
+        order: {
+          id: "o-1",
+          financial_status: "partially_refunded",
+          refunded_total: 50,
+        },
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.orders.createRefund("o-1", {
+      amount: 50,
+      external_refund_id: "refund-77",
+    });
+    expect(result.duplicate).toBe(true);
+    expect(result.order.id).toBe("o-1");
+    expect(result.order.financial_status).toBe("partially_refunded");
+  });
+
+  it("refunding a never-paid order throws a typed 400", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(400, {
+        statusCode: 400,
+        error: "Bad Request",
+        error_code: "ORDER_NEVER_PAID",
+        message: "Cannot refund an order that was never paid.",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.orders
+      .createRefund("o-1", { amount: 50 })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(400);
+    expect(err.code).toBe("ORDER_NEVER_PAID");
+  });
+
+  it("feature-gate 403 maps to a typed error", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(403, {
+        message:
+          "Your current plan does not include access to this feature: orders. Please upgrade your plan.",
+        error_code: "FEATURE_NOT_INCLUDED_IN_PLAN",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.orders.list().catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
+  });
+
+  it("markPaid surfaces the typed transition and reference codes", async () => {
+    // Refund states are set by recording refunds, never by mark-paid.
+    const responses = [
+      json(409, {
+        statusCode: 409,
+        error: "Conflict",
+        error_code: "ORDER_ILLEGAL_TRANSITION",
+        message:
+          "Illegal status transition refunded → paid. Refund states are set by recording refunds.",
+      }),
+      json(404, {
+        statusCode: 404,
+        error: "Not Found",
+        error_code: "ORDER_PAYMENT_REFERENCE_NOT_FOUND",
+        message: "No payment matches the provided payment_reference.",
+      }),
+      json(409, {
+        statusCode: 409,
+        error: "Conflict",
+        error_code: "ORDER_PAYMENT_ALREADY_LINKED",
+        message: "The order is already linked to a different payment reference.",
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    const otok = makeClient(fetchMock as any);
+
+    let err = await otok.orders.markPaid("o-1").catch((e) => e);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("ORDER_ILLEGAL_TRANSITION");
+
+    err = await otok.orders
+      .markPaid("o-1", { payment_reference: "inv-x" })
+      .catch((e) => e);
+    expect(err.status).toBe(404);
+    expect(err.code).toBe("ORDER_PAYMENT_REFERENCE_NOT_FOUND");
+
+    err = await otok.orders
+      .markPaid("o-1", { payment_reference: "inv-y" })
+      .catch((e) => e);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("ORDER_PAYMENT_ALREADY_LINKED");
   });
 });

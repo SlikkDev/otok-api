@@ -34,6 +34,12 @@ from .types import (
     MeetingType,
     MessageTemplate,
     Note,
+    Order,
+    OrderCreateParams,
+    OrderListParams,
+    OrderMarkPaidParams,
+    OrderRefundParams,
+    OrderRefundResult,
     Paginated,
     Payment,
     PaymentCreateParams,
@@ -75,7 +81,8 @@ def _params_query(params: Optional[Any]) -> dict[str, QueryValue]:
 
 #: Documented ``limit`` cap for standard list endpoints (default 50).
 _STANDARD_PAGE_CAP = 500
-#: Documented ``limit`` cap for GET /v1/deals and /v1/payments (default 25).
+#: Documented ``limit`` cap for GET /v1/deals, /v1/payments and /v1/orders
+#: (default 25).
 _DEALS_PAYMENTS_PAGE_CAP = 100
 
 
@@ -577,6 +584,104 @@ class PaymentsApi:
                 body=dict(params or {}),
             ),
         )
+
+
+# ─────────────────────────── Orders ───────────────────────────
+
+
+class OrdersApi:
+    """Requires the Orders feature on the workspace's plan — without it
+    every call raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[OrderListParams] = None) -> Paginated:
+        """List orders, newest ``placed_at`` first. Rows omit
+        ``items``/``refunds`` — use ``get`` for the full order.
+        """
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/orders", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[OrderListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching order, auto-paginating ``GET /v1/orders``
+        (``limit`` cap 100 — orders paginate like deals and payments).
+        Accepts the same params as ``list``.
+        """
+        p: OrderListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(OrderListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, order_id: str) -> Order:
+        """Get a full order with ``items[]`` + ``refunds[]``."""
+        return cast(Order, self._http.request("GET", f"/v1/orders/{order_id}"))
+
+    def create(self, params: OrderCreateParams) -> Order:
+        """Create an order. Idempotent when ``external_reference`` is set: a
+        repeat POST with the same reference updates that order's mutable
+        fields instead of creating a duplicate (money fields apply only
+        while the order is still ``pending``; ``financial_status`` and the
+        contact never change on a match).
+
+        Unlike the other create endpoints the response carries NO top-level
+        ``duplicate`` flag — both outcomes answer 201 with the full order
+        (items + refunds). To distinguish, compare ``created_at`` or
+        pre-check with ``list({"external_reference": …})``.
+        """
+        return cast(Order, self._http.request("POST", "/v1/orders", body=params))
+
+    def create_refund(self, order_id: str, params: OrderRefundParams) -> OrderRefundResult:
+        """Record a refund on the order's append-only refund ledger and roll
+        its financial status to ``partially_refunded``/``refunded``. Returns
+        ``{"duplicate": bool, "order": …}`` — ``duplicate: True`` means the
+        ``external_refund_id`` was already recorded and nothing was applied.
+
+        ``external_refund_id`` is the idempotency key; WITHOUT it every call
+        appends a new refund, so supply it whenever your system can retry.
+        Refunds require the order to have ever been paid (400
+        ``ORDER_NEVER_PAID`` otherwise).
+        """
+        return cast(
+            OrderRefundResult,
+            self._http.request("POST", f"/v1/orders/{order_id}/refunds", body=params),
+        )
+
+    def mark_paid(self, order_id: str, params: Optional[OrderMarkPaidParams] = None) -> Order:
+        """Mark an order paid, recording a payment for the full order total
+        on the contact — or link onto an existing payment via
+        ``payment_reference``. Marking an already-paid order is a no-op
+        success; refund states raise a 409 ``ORDER_ILLEGAL_TRANSITION``
+        (refund states are set by recording refunds). Bad references raise
+        typed errors: 404 ``ORDER_PAYMENT_REFERENCE_NOT_FOUND``, 409
+        ``ORDER_PAYMENT_CONTACT_MISMATCH`` / ``ORDER_PAYMENT_NOT_LINKABLE``
+        / ``ORDER_PAYMENT_ALREADY_LINKED``.
+        """
+        return cast(
+            Order,
+            self._http.request(
+                "POST",
+                f"/v1/orders/{order_id}/mark-paid",
+                body=dict(params or {}),
+            ),
+        )
+
+    def cancel(self, order_id: str) -> Order:
+        """Cancel an order — stamps ``cancelled_at``. Cancellation is a
+        stamp, not a financial status: recorded revenue stands until refunds
+        are recorded. Cancelling an already-cancelled order is a no-op
+        success.
+        """
+        return cast(Order, self._http.request("POST", f"/v1/orders/{order_id}/cancel"))
 
 
 # ─────────────────────────── Bookings ───────────────────────────

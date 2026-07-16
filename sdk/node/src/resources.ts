@@ -30,6 +30,12 @@ import type {
   MessageTemplate,
   Note,
   NoteUpdateParams,
+  Order,
+  OrderCreateParams,
+  OrderListParams,
+  OrderMarkPaidParams,
+  OrderRefundParams,
+  OrderRefundResult,
   Paginated,
   Payment,
   PaymentCreateParams,
@@ -62,7 +68,10 @@ function listQuery(params: ListParams = {}): Record<string, QueryValue> {
 
 /** Documented `limit` cap for standard list endpoints (default 50). */
 const STANDARD_PAGE_CAP = 500;
-/** Documented `limit` cap for GET /v1/deals and /v1/payments (default 25). */
+/**
+ * Documented `limit` cap for GET /v1/deals, /v1/payments and /v1/orders
+ * (default 25).
+ */
 const DEALS_PAYMENTS_PAGE_CAP = 100;
 
 /**
@@ -526,6 +535,101 @@ export class PaymentsApi {
     return this.http.request("POST", `/v1/payments/${id}/refund`, {
       body: params,
     });
+  }
+}
+
+// ─────────────────────────── Orders ───────────────────────────
+
+/**
+ * Requires the Orders feature on the workspace's plan — every route throws
+ * 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
+export class OrdersApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * List orders, newest `placed_at` first. Rows omit `items`/`refunds` —
+   * use `get` for the full order.
+   */
+  list(params: OrderListParams = {}): Promise<Paginated<Order>> {
+    return this.http.request("GET", "/v1/orders", { query: { ...params } });
+  }
+
+  /**
+   * Iterate every matching order, auto-paginating GET /v1/orders (`limit`
+   * cap 100 — orders paginate like deals and payments). Accepts the same
+   * params as `list`.
+   */
+  iter(params: OrderListParams = {}): AsyncGenerator<Order, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /** Get a full order with `items[]` + `refunds[]`. */
+  get(id: string): Promise<Order> {
+    return this.http.request("GET", `/v1/orders/${id}`);
+  }
+
+  /**
+   * Create an order. Idempotent when `external_reference` is set: a repeat
+   * POST with the same reference updates that order's mutable fields
+   * instead of creating a duplicate (money fields apply only while the
+   * order is still `pending`; `financial_status` and the contact never
+   * change on a match).
+   *
+   * Unlike the other create endpoints the response carries NO top-level
+   * `duplicate` flag — both outcomes return 201 with the full order (items
+   * + refunds). To distinguish, compare `created_at` or pre-check with
+   * `list({ external_reference: … })`.
+   */
+  create(params: OrderCreateParams): Promise<Order> {
+    return this.http.request("POST", "/v1/orders", { body: params });
+  }
+
+  /**
+   * Record a refund on the order's append-only refund ledger and roll its
+   * financial status to `partially_refunded`/`refunded`. Returns
+   * `{ duplicate, order }` — `duplicate: true` means the
+   * `external_refund_id` was already recorded and nothing was applied.
+   *
+   * `external_refund_id` is the idempotency key; WITHOUT it every call
+   * appends a new refund, so supply it whenever your system can retry.
+   * Refunds require the order to have ever been paid (400
+   * `ORDER_NEVER_PAID` otherwise).
+   */
+  createRefund(id: string, params: OrderRefundParams): Promise<OrderRefundResult> {
+    return this.http.request("POST", `/v1/orders/${id}/refunds`, {
+      body: params,
+    });
+  }
+
+  /**
+   * Mark an order paid, recording a payment for the full order total on the
+   * contact — or link onto an existing payment via `payment_reference`.
+   * Marking an already-paid order is a no-op success; refund states (and
+   * voided orders) throw 409 `ORDER_ILLEGAL_TRANSITION` (refund states are
+   * set by recording refunds). Bad references throw typed errors: 404
+   * `ORDER_PAYMENT_REFERENCE_NOT_FOUND`, 409
+   * `ORDER_PAYMENT_CONTACT_MISMATCH` / `ORDER_PAYMENT_NOT_LINKABLE` /
+   * `ORDER_PAYMENT_ALREADY_LINKED`.
+   */
+  markPaid(id: string, params: OrderMarkPaidParams = {}): Promise<Order> {
+    return this.http.request("POST", `/v1/orders/${id}/mark-paid`, {
+      body: params,
+    });
+  }
+
+  /**
+   * Cancel an order — stamps `cancelled_at`. Cancellation is a stamp, not a
+   * financial status: recorded revenue stands until refunds are recorded.
+   * Cancelling an already-cancelled order is a no-op success.
+   */
+  cancel(id: string): Promise<Order> {
+    return this.http.request("POST", `/v1/orders/${id}/cancel`);
   }
 }
 

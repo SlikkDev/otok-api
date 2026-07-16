@@ -32,7 +32,7 @@ Errors on this endpoint use the structured envelope `{"error": {"code", "message
 - **201** — this request performed the send (fresh idempotency key).
 - **200** — idempotent replay of an already-processed key (`duplicate: true`).
 
-This is the only idempotent create route whose **status code** also distinguishes the two outcomes — the other idempotent creates (contacts, deals, payments, bookings) return 201 in both cases and carry the same top-level `duplicate` boolean.
+This is the only idempotent create route whose **status code** also distinguishes the two outcomes — the other idempotent creates (contacts, deals, payments, bookings) return 201 in both cases and carry the same top-level `duplicate` boolean. The one exception is [`POST /v1/orders`](orders.md#post-apiv1orders), which returns 201 in both cases but carries **no** `duplicate` field.
 
 ```json
 {

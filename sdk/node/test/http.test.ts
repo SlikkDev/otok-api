@@ -323,6 +323,25 @@ describe("HttpClient network-error retries", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("retries a POST that carries external_refund_id (order refunds)", async () => {
+    // A keyed order refund replays to duplicate: true server-side, so a
+    // network retry can never double-apply it.
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("ECONNRESET"))
+      .mockResolvedValueOnce(
+        jsonResponse(201, { duplicate: false, order: { id: "o-1" } }),
+      );
+    const client = makeClient(fetchMock as any);
+    const result = await client.request<{ order: { id: string } }>(
+      "POST",
+      "/v1/orders/o-1/refunds",
+      { body: { amount: 50, external_refund_id: "refund-77" } },
+    );
+    expect(result.order.id).toBe("o-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("an empty idempotency key does not make a POST retryable", async () => {
     const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
     const client = makeClient(fetchMock as any);

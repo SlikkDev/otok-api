@@ -299,6 +299,22 @@ class TestNetworkErrorRetries:
         assert result["id"] == "deal-1"
         assert transport.calls == 2
 
+    def test_retries_a_post_carrying_an_external_refund_id(self) -> None:
+        # A keyed order refund replays to duplicate=True server-side, so a
+        # network retry can never double-apply it.
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"duplicate": False, "order": {"id": "o-1"}})],
+        )
+        client = self._client(transport)
+        result = client.request(
+            "POST",
+            "/v1/orders/o-1/refunds",
+            body={"amount": 50, "external_refund_id": "refund-77"},
+        )
+        assert result["order"]["id"] == "o-1"
+        assert transport.calls == 2
+
     def test_an_empty_idempotency_key_does_not_make_a_post_retryable(self) -> None:
         transport = _FlakyTransport([ConnectionResetError("reset")], [])
         client = self._client(transport)

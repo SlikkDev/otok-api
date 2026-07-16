@@ -8,8 +8,8 @@
  *   `campaign_not_scheduled`;
  * - a top-level `error_code` field on the standard shape — e.g.
  *   `FEATURE_NOT_INCLUDED_IN_PLAN` (403: the workspace's plan lacks the
- *   feature behind the endpoint group — Deals, Payments, Campaigns, or
- *   Booking) and `CONTACT_MERGE_REQUIRED` (409 on contact updates whose
+ *   feature behind the endpoint group — Deals, Payments, Orders, Campaigns,
+ *   or Booking) and `CONTACT_MERGE_REQUIRED` (409 on contact updates whose
  *   phone/email belongs to another contact; the parked request's
  *   `merge_request_id` is on `body`).
  *

@@ -409,7 +409,7 @@ export interface EmailSendResult {
 // ─────────────────────────── Webhook endpoints ───────────────────────────
 
 /**
- * Every event type accepted by POST /v1/webhook-endpoints.
+ * Every email event type accepted by POST /v1/webhook-endpoints.
  *
  * `email.failed` is DEPRECATED: it is still accepted when listed explicitly
  * (existing registrations keep working) but it is NEVER delivered — nothing
@@ -429,7 +429,8 @@ export type EmailWebhookEventType = (typeof EMAIL_WEBHOOK_EVENT_TYPES)[number];
 /**
  * The default subscription when `events` is omitted at registration: the
  * three delivery events. The engagement types (`email.opened`,
- * `email.clicked`) are opt-in by explicit listing.
+ * `email.clicked`) — and all `order.*` events — are opt-in by explicit
+ * listing.
  */
 export const DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES = [
   "email.delivered",
@@ -438,22 +439,41 @@ export const DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES = [
 ] as const satisfies readonly EmailWebhookEventType[];
 
 /**
+ * The five order lifecycle events. Opt-in by listing: an endpoint
+ * registered without an explicit `events` list gets only the three default
+ * email delivery events — order events flow only to endpoints that list
+ * them. They fire for EVERY order write source (API, in-app, automations),
+ * not just API-created orders.
+ */
+export const ORDER_WEBHOOK_EVENT_TYPES = [
+  "order.created",
+  "order.paid",
+  "order.refunded",
+  "order.cancelled",
+  "order.fulfilled",
+] as const;
+export type OrderWebhookEventType = (typeof ORDER_WEBHOOK_EVENT_TYPES)[number];
+
+/** Any event type registrable on a webhook endpoint. */
+export type WebhookEventType = EmailWebhookEventType | OrderWebhookEventType;
+
+/**
  * POST /v1/webhook-endpoints (max 3 per workspace).
  * `events` defaults to the three delivery events (`email.delivered`,
  * `email.bounced`, `email.complained`); the engagement types
- * (`email.opened`, `email.clicked`) must be listed explicitly. An empty
- * array is rejected. `email.failed` is deprecated — accepted when listed,
- * never delivered.
+ * (`email.opened`, `email.clicked`) and the `order.*` lifecycle events must
+ * be listed explicitly. An empty array is rejected. `email.failed` is
+ * deprecated — accepted when listed, never delivered.
  */
 export interface WebhookEndpointCreateParams {
   url: string;
-  events?: EmailWebhookEventType[];
+  events?: WebhookEventType[];
 }
 
 export interface WebhookEndpoint {
   id: string;
   url: string;
-  events: EmailWebhookEventType[];
+  events: WebhookEventType[];
   created_at: string;
   [key: string]: unknown;
 }
@@ -522,13 +542,91 @@ export interface EmailClickedEvent {
   data: WebhookEventDataBase & { url: string };
 }
 
+/**
+ * Payload `data` of every `order.*` event — a snapshot of the order at
+ * event time. Money fields are JSON numbers in the order's charge currency;
+ * instants are ISO-8601 UTC or `null` (unlike email events, absent values
+ * are explicit `null`s, never omitted keys). `number` is the store display
+ * number when present, else the internal sequential order number as a
+ * string. `external_id` and `store_connection_id` are populated for orders
+ * synced from a connected store and are `null` otherwise.
+ */
+export interface OrderWebhookEventData {
+  order_id: string;
+  external_id: string | null;
+  number: string;
+  platform: string;
+  store_connection_id: string | null;
+  financial_status: OrderFinancialStatus;
+  fulfillment_status: OrderFulfillmentStatus;
+  currency: string;
+  total: number;
+  subtotal: number;
+  discount_total: number;
+  shipping_total: number;
+  tax_total: number;
+  refunded_total: number;
+  coupon_codes: string[];
+  item_count: number;
+  first_item_name: string | null;
+  placed_at: string;
+  paid_at: string | null;
+  cancelled_at: string | null;
+  refunded_at: string | null;
+  created_at: string;
+}
+
+/** The `refund` block carried by `order.refunded` events. */
+export interface OrderRefundBlock {
+  amount: number;
+  external_refund_id: string | null;
+  reason: string | null;
+  refunded_at: string;
+}
+
+export interface OrderCreatedEvent {
+  id: string;
+  type: "order.created";
+  created_at: string;
+  data: OrderWebhookEventData;
+}
+export interface OrderPaidEvent {
+  id: string;
+  type: "order.paid";
+  created_at: string;
+  data: OrderWebhookEventData;
+}
+export interface OrderRefundedEvent {
+  id: string;
+  type: "order.refunded";
+  created_at: string;
+  data: OrderWebhookEventData & { refund: OrderRefundBlock };
+}
+export interface OrderCancelledEvent {
+  id: string;
+  type: "order.cancelled";
+  created_at: string;
+  data: OrderWebhookEventData;
+}
+export interface OrderFulfilledEvent {
+  id: string;
+  type: "order.fulfilled";
+  created_at: string;
+  data: OrderWebhookEventData;
+}
+
 export type OtokWebhookEvent =
   | EmailDeliveredEvent
   | EmailBouncedEvent
   | EmailComplainedEvent
   | EmailFailedEvent
   | EmailOpenedEvent
-  | EmailClickedEvent;
+  | EmailClickedEvent
+  | OrderCreatedEvent
+  | OrderPaidEvent
+  | OrderRefundedEvent
+  | OrderCancelledEvent
+  | OrderFulfilledEvent;
 
 // ─────────────────────────── Campaigns ───────────────────────────
 
@@ -719,6 +817,311 @@ export interface Payment {
  */
 export interface PaymentCreateResult extends Payment {
   duplicate: boolean;
+}
+
+// ─────────────────────────── Orders ───────────────────────────
+
+export type OrderFinancialStatus =
+  | "pending"
+  | "paid"
+  | "partially_paid"
+  | "refunded"
+  | "partially_refunded"
+  | "voided";
+
+/**
+ * Read-only via the API — fulfillment is recorded in oToK (or by a
+ * connected store); no /v1 route sets it.
+ */
+export type OrderFulfillmentStatus =
+  | "unfulfilled"
+  | "partially_fulfilled"
+  | "fulfilled";
+
+/**
+ * A line item on POST /v1/orders (max 200 per order).
+ *
+ * Attach a catalog product with `product_id` (strict — unresolvable → 400
+ * `INVALID_PRODUCT`) or `product_sku` / `product_external_id` (tolerant —
+ * no match keeps the literal `title` with no product link); an inactive
+ * product always rejects (400 `PRODUCT_INACTIVE`). Resolution order:
+ * `product_id` → `product_sku` → `product_external_id`. When a product
+ * resolves, the line title derives from the product name (a client `title`
+ * is ignored); with no product, `title` is required (400 otherwise). The
+ * per-line `line_total` is server-computed:
+ * round2(quantity × unit_price × (1 − discount_percent/100)).
+ */
+export interface OrderItemParams {
+  product_id?: string;
+  product_sku?: string;
+  product_external_id?: string;
+  /** Required unless a product resolves (then derived from the product name). */
+  title?: string;
+  /** Denormalized SKU snapshot on the line (falls back to `product_sku`). */
+  sku?: string;
+  /**
+   * In the order currency. Omitted with a priced product → the product's
+   * price; omitted with a product that has no catalog price → 400
+   * `ORDER_ITEM_PRICE_REQUIRED`; omitted with no product → 0.
+   */
+  unit_price?: number;
+  /** Positive; decimals allowed (weight/hours). Default 1. */
+  quantity?: number;
+  /** Percent-only per-line discount, 0–100. */
+  discount_percent?: number;
+}
+
+/**
+ * POST /v1/orders — create an order (idempotent upsert via
+ * `external_reference`).
+ *
+ * Contact resolution as in deals/payments: provide `contact_id` OR
+ * `phone`/`email` (a matching contact is used, or created — `name` applies
+ * only on create). A phone and an email resolving to two different contacts
+ * throws 409 `CONTACT_MERGE_REQUIRED`.
+ *
+ * A repeat POST with the same `external_reference` UPDATES that order
+ * instead of creating a duplicate: `note` / `coupon_codes` / `placed_at` /
+ * `deal_id` always apply; the money fields (`items`, `currency`,
+ * `discount_total`, `shipping_total`, `tax_total`) apply only while the
+ * order is still `pending` — once paid, money is locked and corrections
+ * flow through refunds/cancel; `financial_status` and the order's contact
+ * never change on a match. Unlike the other create endpoints the response
+ * carries NO top-level `duplicate` flag — see {@link Order}.
+ */
+export interface OrderCreateParams {
+  contact_id?: string;
+  phone?: string;
+  email?: string;
+  /** Used only when a NEW contact is created. */
+  name?: string;
+  /** Max 200 items. */
+  items?: OrderItemParams[];
+  /** 3-letter code, uppercased; defaults to the workspace currency. */
+  currency?: string;
+  /** Document-level discount (≥ 0). */
+  discount_total?: number;
+  shipping_total?: number;
+  tax_total?: number;
+  /**
+   * `pending` (default) or `paid` — a paid create records the payment and
+   * fires order-paid automations. Never applied on an `external_reference`
+   * match.
+   */
+  financial_status?: "pending" | "paid";
+  /** ISO 8601; defaults to now. */
+  placed_at?: string;
+  /** Applied discount/coupon codes (max 50). */
+  coupon_codes?: string[];
+  /** Max 5000 chars. */
+  note?: string;
+  /**
+   * Link a deal of the SAME contact (404 `ORDER_DEAL_NOT_FOUND` when
+   * unknown, 409 `ORDER_DEAL_CONTACT_MISMATCH` for another contact's).
+   */
+  deal_id?: string;
+  /** Idempotency key — one reference maps to one order. Max 255 chars. */
+  external_reference?: string;
+}
+
+/**
+ * POST /v1/orders/:id/refunds — record a refund.
+ *
+ * `external_refund_id` is the idempotency key: a repeat POST with the same
+ * value applies nothing and answers `duplicate: true`. WITHOUT it refunds
+ * are NOT idempotent — every POST appends a new refund — so supply it
+ * whenever your system can retry.
+ */
+export interface OrderRefundParams {
+  /**
+   * Positive, in the order's currency; must not exceed the remaining total
+   * (`total` − `refunded_total`).
+   */
+  amount: number;
+  /** Idempotency key per order (max 255 chars). */
+  external_refund_id?: string;
+  /** Max 1000 chars. */
+  reason?: string;
+  /** ISO 8601; defaults to now. */
+  refunded_at?: string;
+}
+
+/** POST /v1/orders/:id/mark-paid (all fields optional). */
+export interface OrderMarkPaidParams {
+  /**
+   * The `external_reference` of an EXISTING payment (e.g. one your system
+   * already recorded via POST /v1/payments) to link the order onto instead
+   * of recording a new payment. Link-only — the payment's amount is never
+   * rewritten. Max 255 chars.
+   */
+  payment_reference?: string;
+}
+
+/**
+ * GET /v1/orders query params (no `search` on this route). Ordering is
+ * `placed_at` descending.
+ */
+export interface OrderListParams {
+  /** Financial status; unknown values are silently ignored (unfiltered). */
+  status?: OrderFinancialStatus;
+  contact_id?: string;
+  /**
+   * Exact match — `manual`, `api`, `automation` (store platform values are
+   * reserved for orders synced from a connected store).
+   */
+  source?: string;
+  /** Matches orders synced from that connected store. */
+  store_connection_id?: string;
+  /** Exact-match lookup by idempotency reference. */
+  external_reference?: string;
+  /** Orders placed at/after (ISO 8601). */
+  placed_from?: string;
+  /** Orders placed at/before (ISO 8601). */
+  placed_to?: string;
+  /**
+   * Page size (max 100, default 25). Out-of-range values are clamped
+   * server-side rather than rejected.
+   */
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Order line item (`items[]` on detail/write responses, ordered by
+ * `position`).
+ */
+export interface OrderItem {
+  id: string;
+  workspace_id: string;
+  order_id: string;
+  /** 0-based. */
+  position: number;
+  /** Soft catalog link — null when no product resolved. */
+  product_id: string | null;
+  /** Store-side product id — null for API-created lines. */
+  external_product_id: string | null;
+  title: string;
+  sku: string | null;
+  /** Decimal quantities allowed (weight/hours). */
+  quantity: number;
+  unit_price: number;
+  /** Percent-only per-line discount, 0–100. */
+  discount_percent: number | null;
+  /** Server-computed: round2(quantity × unit_price × (1 − discount%/100)). */
+  line_total: number;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Recorded refund (`refunds[]` on detail/write responses, ordered by
+ * `refunded_at` ascending).
+ */
+export interface OrderRefund {
+  id: string;
+  workspace_id: string;
+  order_id: string;
+  /** Caller idempotency key; null for keyless refunds. */
+  external_refund_id: string | null;
+  /** Positive, in the order's currency. */
+  amount: number;
+  currency: string;
+  reason: string | null;
+  /** Defaults to record time. */
+  refunded_at: string;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Order record as returned by the API. Money fields (`total`, `subtotal`,
+ * `discount_total`, `shipping_total`, `tax_total`, `refunded_total`, line
+ * `unit_price`/`line_total`, refund `amount`) are JSON numbers in the
+ * order's currency. List rows omit `items`/`refunds`; the detail read and
+ * every write response include them (plus the joined contact identity).
+ * Store-sync provenance fields (`store_connection_id`, `store_domain`,
+ * `external_order_id`, `number`, `external_updated_at`) are populated for
+ * orders synced from a connected store and are `null` otherwise.
+ *
+ * Unlike the other create endpoints, POST /v1/orders responses carry NO
+ * top-level `duplicate` flag — create and upsert-match both return 201 with
+ * the same full-order body. To distinguish, compare `created_at` or
+ * pre-check with `GET /v1/orders?external_reference=…`.
+ */
+export interface Order {
+  id: string;
+  workspace_id: string;
+  /** The order's contact (required, always set). */
+  contact_id: string;
+  contact_name: string | null;
+  contact_phone: string | null;
+  contact_email: string | null;
+  /** Internal per-workspace sequential number, assigned at create. */
+  order_number: number;
+  /** Store-side display number (e.g. "#1001") — null for API/app orders. */
+  number: string | null;
+  /** Origin: "api", "manual", "automation" (store platform names reserved). */
+  platform: string;
+  /** Same vocabulary as `platform` for non-store orders. */
+  source: string;
+  store_connection_id: string | null;
+  store_domain: string | null;
+  external_order_id: string | null;
+  /** Your idempotency key, unique per workspace. */
+  external_reference: string | null;
+  /** Optional link to a deal of the same contact. */
+  deal_id: string | null;
+  financial_status: OrderFinancialStatus;
+  fulfillment_status: OrderFulfillmentStatus;
+  /** 3-letter uppercase; defaults to the workspace currency. */
+  currency: string;
+  total: number;
+  subtotal: number;
+  discount_total: number;
+  shipping_total: number;
+  tax_total: number;
+  /** Rollup of the refund ledger. */
+  refunded_total: number;
+  /** Quantity sum rounded to the nearest integer. */
+  item_count: number;
+  first_item_name: string | null;
+  coupon_codes: string[];
+  /** Order time (defaults to creation time). */
+  placed_at: string;
+  /** Stamped on first entry into a paid state; kept through refund states. */
+  paid_at: string | null;
+  /** The cancellation stamp — cancellation is NOT a financial status. */
+  cancelled_at: string | null;
+  /** Last refund instant. */
+  refunded_at: string | null;
+  external_updated_at: string | null;
+  /** Reference of the recorded payment backing this order. */
+  payment_reference: string | null;
+  /** Payment-recording convergence stamp (informational). */
+  payment_synced_at: string | null;
+  note: string | null;
+  /** Read-only via the API — not settable on any /v1 route. */
+  metadata: Record<string, unknown> | null;
+  /** Null for API writes. */
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Detail/write responses only, ordered by `position`. */
+  items?: OrderItem[];
+  /** Detail/write responses only, ordered by `refunded_at` ascending. */
+  refunds?: OrderRefund[];
+  [key: string]: unknown;
+}
+
+/**
+ * Response of POST /v1/orders/:id/refunds (201 either way).
+ *
+ * `duplicate: true` = the `external_refund_id` was already recorded on this
+ * order; nothing was applied and the current order state is returned.
+ */
+export interface OrderRefundResult {
+  duplicate: boolean;
+  order: Order;
 }
 
 // ─────────────────────────── Bookings ───────────────────────────

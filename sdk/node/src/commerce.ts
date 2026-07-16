@@ -15,6 +15,9 @@ import type {
  * - orders map to deals through `external_reference` (one order = one deal),
  * - receipts carry a deterministic email idempotency key derived from the
  *   order id (one order = at most one receipt).
+ *
+ * Note: this layer records each order as a sales-pipeline entry (a deal) —
+ * for the Orders API itself (`/v1/orders`) use `otok.orders`.
  */
 
 export interface CommerceCustomer {
@@ -150,6 +153,9 @@ export class CommerceApi {
    * updates) a deal keyed by the order id, and optionally sends a receipt
    * email exactly once. Safe to retry and safe to call from at-least-once
    * webhook handlers — replays converge on the same contact/deal/receipt.
+   *
+   * Note: this records a sales-pipeline entry (a deal), not an order
+   * object — use `otok.orders` for the Orders API (`/v1/orders`).
    */
   async trackOrder(order: CommerceOrder): Promise<TrackOrderResult> {
     if (!order.orderId) throw new Error("@otok/node: order.orderId is required");

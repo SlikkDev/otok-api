@@ -31,7 +31,7 @@ const DEFAULT_MAX_RETRIES = 2;
 /** Base backoff delay; grows exponentially per retry with full jitter. */
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30_000;
-const SDK_VERSION = "0.2.0";
+const SDK_VERSION = "0.3.0";
 
 export type QueryValue = string | number | boolean | undefined;
 
@@ -121,24 +121,24 @@ export function isTransientNetworkError(err: unknown, depth = 0): boolean {
  * A network error is ambiguous — the request may or may not have reached
  * the server — so replaying it is only safe when a replay cannot
  * double-apply an effect: safe methods (GET/HEAD), or a write body that
- * carries its own idempotency key — `idempotency_key` (POST /v1/emails) or
- * `external_reference` (POST /v1/deals, POST /v1/payments). Everything
- * else surfaces the network error to the caller. (429/5xx HTTP responses
- * are a different case — the server answered — and keep their existing
- * retry behavior for all requests.)
+ * carries its own idempotency key — `idempotency_key` (POST /v1/emails),
+ * `external_reference` (POST /v1/deals, POST /v1/payments, POST
+ * /v1/orders), or `external_refund_id` (POST /v1/orders/:id/refunds).
+ * Everything else surfaces the network error to the caller. (429/5xx HTTP
+ * responses are a different case — the server answered — and keep their
+ * existing retry behavior for all requests.)
  */
 export function isNetworkRetrySafe(method: string, body: unknown): boolean {
   if (method === "GET" || method === "HEAD") return true;
   if (body && typeof body === "object" && !Array.isArray(body)) {
     const b = body as Record<string, unknown>;
-    if (typeof b.idempotency_key === "string" && b.idempotency_key !== "") {
-      return true;
-    }
-    if (
-      typeof b.external_reference === "string" &&
-      b.external_reference !== ""
-    ) {
-      return true;
+    for (const key of [
+      "idempotency_key",
+      "external_reference",
+      "external_refund_id",
+    ] as const) {
+      const value = b[key];
+      if (typeof value === "string" && value !== "") return true;
     }
   }
   return false;

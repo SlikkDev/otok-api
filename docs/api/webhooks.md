@@ -1,8 +1,8 @@
 # Webhooks
 
-Register HTTPS endpoints to receive delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md). Events are signed, retried, and deduplicable by event id.
+Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)) and **order events** (lifecycle events for [orders](orders.md)). Events are signed, retried, and deduplicable by event id.
 
-Webhook events fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`.
+**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion).
 
 All management endpoints require [authentication](getting-started.md#authentication). Errors use the structured envelope `{"error": {"code", "message"}}`.
 
@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see table below). Must be non-empty when present. **Omitted → the three delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — the engagement events `email.opened`/`email.clicked` are received only when explicitly listed. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
+| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — the engagement events `email.opened`/`email.clicked` **and all `order.*` events** are received only when explicitly listed. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -26,8 +26,8 @@ curl -X POST "https://app.otok.io/api/v1/webhook-endpoints" \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{
-    "url": "https://hooks.example.com/otok-email",
-    "events": ["email.delivered", "email.bounced", "email.complained", "email.opened", "email.clicked"]
+    "url": "https://hooks.example.com/otok-events",
+    "events": ["email.delivered", "email.bounced", "email.complained", "order.created", "order.paid"]
   }'
 ```
 
@@ -36,8 +36,8 @@ Response `201`:
 ```json
 {
   "id": "c9b8a7d6-e5f4-0312-2130-4a5b6c7d8e9f",
-  "url": "https://hooks.example.com/otok-email",
-  "events": ["email.delivered", "email.bounced", "email.complained", "email.opened", "email.clicked"],
+  "url": "https://hooks.example.com/otok-events",
+  "events": ["email.delivered", "email.bounced", "email.complained", "order.created", "order.paid"],
   "is_active": true,
   "secret": "whsec_XkQ2mP9rT5vW8yZ1aB4cD7eF0gH3jK6nL9qS2uV5xY8",
   "created_at": "2026-07-14T10:00:00.000Z"
@@ -79,6 +79,8 @@ Response **204**, no body. Deliveries stop immediately; anything still queued fo
 
 ## Event types
 
+### Email events
+
 | Type | Subscription | Fires when |
 |---|---|---|
 | `email.delivered` | default | The provider confirmed delivery of an API send |
@@ -90,9 +92,32 @@ Response **204**, no body. Deliveries stop immediately; anything still queued fo
 
 > A click does **not** emit an implied `email.opened` event. If you need "opened" semantics, treat a send as opened when you've received *either* `email.opened` or `email.clicked`.
 
+### Order events
+
+Five [order](orders.md) lifecycle events. All are **opt-in**: they are delivered only to endpoints that list them explicitly in `events` — an endpoint registered without an `events` list receives none of them.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `order.created` | opt-in | An order was created — by the API, in the app, or by an automation |
+| `order.paid` | opt-in | The order entered a paid state — `paid` or `partially_paid` (a paid create, `mark-paid`, or an in-app payment record); check `data.financial_status` to distinguish a deposit from full payment |
+| `order.refunded` | opt-in | A refund was recorded — `data.refund` carries the refund (see below) |
+| `order.cancelled` | opt-in | The order was cancelled (the `cancelled_at` stamp — the financial status is untouched) |
+| `order.fulfilled` | opt-in | The order was fulfilled. Fulfillment is recorded in-app — there is no `/v1` fulfillment route |
+
+Order events fire for **every** order write source, not just API-created orders. They are never fired for historical import ingestion.
+
 ## Delivery payload
 
-Every delivery is an HTTP `POST` with this JSON body:
+Every delivery is an HTTP `POST` with the same JSON envelope; the shape of `data` depends on the event family:
+
+| Field | Presence | Meaning |
+|---|---|---|
+| `id` | always | **Event id — stable across retries and shared across your endpoints.** Use it as your dedup key |
+| `type` | always | Event type |
+| `created_at` | always | When the event occurred (ISO 8601) |
+| `data` | always | Event data — see the per-family shapes below |
+
+### Email event `data`
 
 ```json
 {
@@ -112,9 +137,6 @@ Every delivery is an HTTP `POST` with this JSON body:
 
 | Field | Presence | Meaning |
 |---|---|---|
-| `id` | always | **Event id — stable across retries and shared across your endpoints.** Use it as your dedup key |
-| `type` | always | Event type |
-| `created_at` | always | When the event occurred (ISO 8601) |
 | `data.send_id` | always | The `id` returned by `POST /v1/emails` |
 | `data.idempotency_key` | always | Your idempotency key from the send |
 | `data.to` | always | Recipient address |
@@ -124,7 +146,64 @@ Every delivery is an HTTP `POST` with this JSON body:
 | `data.machine_open` | `email.opened` only | Always present on opens |
 | `data.url` | `email.clicked` only | Always present on clicks |
 
-Optional fields are **omitted, never null**.
+Optional email-event fields are **omitted, never null**.
+
+### Order event `data`
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-0718-2930-4a5b6c7d8e9f",
+  "type": "order.refunded",
+  "created_at": "2026-07-15T09:30:00.000Z",
+  "data": {
+    "order_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+    "external_id": null,
+    "number": "1042",
+    "platform": "api",
+    "store_connection_id": null,
+    "financial_status": "partially_refunded",
+    "fulfillment_status": "unfulfilled",
+    "currency": "ILS",
+    "total": 360,
+    "subtotal": 340,
+    "discount_total": 0,
+    "shipping_total": 20,
+    "tax_total": 0,
+    "refunded_total": 50,
+    "coupon_codes": ["SUMMER10"],
+    "item_count": 3,
+    "first_item_name": "Widget",
+    "placed_at": "2026-07-14T10:00:00.000Z",
+    "paid_at": "2026-07-14T10:00:00.000Z",
+    "cancelled_at": null,
+    "refunded_at": "2026-07-15T09:30:00.000Z",
+    "created_at": "2026-07-14T10:00:00.000Z",
+    "refund": {
+      "amount": 50,
+      "external_refund_id": "r-1",
+      "reason": "damaged",
+      "refunded_at": "2026-07-15T09:30:00.000Z"
+    }
+  }
+}
+```
+
+All five order events carry the same `data` fields (a snapshot of the order at event time):
+
+| Field | Meaning |
+|---|---|
+| `data.order_id` | The order's `id` |
+| `data.external_id` | Store-side order id — `null` for API- and app-created orders |
+| `data.number` | Display number **as a string**: the store display number when present, else the per-workspace sequential `order_number` |
+| `data.platform` | Order origin — `api`, `manual`, `automation` (store platform names reserved) |
+| `data.store_connection_id` | Store provenance — `null` for API- and app-created orders |
+| `data.financial_status` / `data.fulfillment_status` | Statuses at event time |
+| `data.currency` + money fields | `total`, `subtotal`, `discount_total`, `shipping_total`, `tax_total`, `refunded_total` — **JSON numbers** in the order's charge currency |
+| `data.coupon_codes` / `data.item_count` / `data.first_item_name` | Header rollups |
+| `data.placed_at` / `data.paid_at` / `data.cancelled_at` / `data.refunded_at` / `data.created_at` | ISO 8601 UTC, or `null` |
+| `data.refund` | **`order.refunded` only** — `{ amount, external_refund_id, reason, refunded_at }` for the refund that fired this event |
+
+Unlike email events, order event `data` always carries the full field set — absent values are explicit `null`s, not omitted keys.
 
 ## Request headers
 

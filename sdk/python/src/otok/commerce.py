@@ -7,6 +7,9 @@ Everything here is retry-safe by design:
 - orders map to deals through ``external_reference`` (one order = one deal),
 - receipts carry a deterministic email idempotency key derived from the
   order id (one order = at most one receipt).
+
+Note: this layer records each order as a sales-pipeline entry (a deal) —
+for the Orders API itself (``/v1/orders``) use ``client.orders``.
 """
 
 from __future__ import annotations
@@ -157,6 +160,9 @@ class CommerceApi:
         sends a receipt email exactly once. Safe to retry and safe to call
         from at-least-once webhook handlers — replays converge on the same
         contact/deal/receipt.
+
+        Note: this records a sales-pipeline entry (a deal), not an order
+        object — use ``client.orders`` for the Orders API (``/v1/orders``).
         """
         order_id = order.get("order_id")
         if not order_id:
