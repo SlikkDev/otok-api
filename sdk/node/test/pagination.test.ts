@@ -96,6 +96,58 @@ describe("pagination iterators", () => {
     expect(pages.map((p) => [p.limit, p.offset])).toEqual([[100, 0]]);
   });
 
+  it("orders.iter uses the deals/payments cap (100), clamping overrides", async () => {
+    const { fetchMock, pages } = pagedFetch(150);
+    const otok = makeClient(fetchMock as any);
+    const orders = await collect(otok.orders.iter({ limit: 250 }));
+    expect(orders).toHaveLength(150);
+    expect(orders[0]!.id).toBe("row-0");
+    expect(orders[149]!.id).toBe("row-149");
+    expect(pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+  });
+
+  it("orders.iter forwards the caller's filters on every page", async () => {
+    const { fetchMock, pages } = pagedFetch(250);
+    const otok = makeClient(fetchMock as any);
+    await collect(otok.orders.iter({ status: "paid", source: "api" }));
+    expect(pages).toHaveLength(3);
+    for (const page of pages) {
+      expect(page.query.get("status")).toBe("paid");
+      expect(page.query.get("source")).toBe("api");
+    }
+  });
+
+  it("orders.iter terminates on a short page despite a stale total", async () => {
+    // An order deleted between pages: the total still says more but the
+    // next page is empty — the iterator must terminate, not loop.
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      const body =
+        calls === 1
+          ? { data: [{ id: "row-0" }], total: 80, limit: 100, offset: 0 }
+          : { data: [], total: 80, limit: 100, offset: 1 };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const orders = await collect(otok.orders.iter());
+    expect(orders).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("orders.iter handles an empty result set with a single request", async () => {
+    const { fetchMock, pages } = pagedFetch(0);
+    const otok = makeClient(fetchMock as any);
+    expect(await collect(otok.orders.iter())).toEqual([]);
+    expect(pages.map((p) => [p.limit, p.offset])).toEqual([[100, 0]]);
+  });
+
   it("forwards the caller's filter params on every page", async () => {
     const { fetchMock, pages } = pagedFetch(750);
     const otok = makeClient(fetchMock as any);

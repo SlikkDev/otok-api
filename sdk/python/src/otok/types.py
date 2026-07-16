@@ -332,7 +332,7 @@ EmailWebhookEventType = Literal[
     "email.clicked",
 ]
 
-#: Every event type accepted at registration. ``email.failed`` is DEPRECATED:
+#: Every email event type accepted at registration. ``email.failed`` is DEPRECATED:
 #: still accepted in ``events`` for backward compatibility, but never
 #: delivered — a failing ``POST /v1/emails`` fails synchronously on the
 #: request itself, so there is no asynchronous failure callback.
@@ -353,6 +353,30 @@ DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES: tuple[EmailWebhookEventType, ...] = (
     "email.complained",
 )
 
+OrderWebhookEventType = Literal[
+    "order.created",
+    "order.paid",
+    "order.refunded",
+    "order.cancelled",
+    "order.fulfilled",
+]
+
+#: The five order lifecycle events. Opt-in by listing: an endpoint
+#: registered without an explicit ``events`` list gets only the three
+#: default email delivery events — order events flow only to endpoints that
+#: list them. They fire for EVERY order write source (API, in-app,
+#: automations), not just API-created orders.
+ORDER_WEBHOOK_EVENT_TYPES: tuple[OrderWebhookEventType, ...] = (
+    "order.created",
+    "order.paid",
+    "order.refunded",
+    "order.cancelled",
+    "order.fulfilled",
+)
+
+#: Any event type registrable on a webhook endpoint.
+WebhookEventType = Union[EmailWebhookEventType, OrderWebhookEventType]
+
 
 class _WebhookEndpointCreateRequired(TypedDict):
     url: str
@@ -363,12 +387,13 @@ class WebhookEndpointCreateParams(_WebhookEndpointCreateRequired, total=False):
 
     ``events`` defaults to the three delivery events (``email.delivered``,
     ``email.bounced``, ``email.complained``); the engagement types
-    (``email.opened``, ``email.clicked``) must be listed explicitly. An
-    empty list is rejected. ``email.failed`` is deprecated — accepted at
-    registration, but it never fires.
+    (``email.opened``, ``email.clicked``) and the ``order.*`` lifecycle
+    events must be listed explicitly. An empty list is rejected.
+    ``email.failed`` is deprecated — accepted at registration, but it never
+    fires.
     """
 
-    events: list[EmailWebhookEventType]
+    events: list[WebhookEventType]
 
 
 WebhookEndpoint = dict[str, Any]
@@ -463,6 +488,87 @@ class EmailClickedEvent(TypedDict):
     data: EmailClickedEventData
 
 
+class OrderWebhookEventData(TypedDict):
+    """Payload ``data`` of every ``order.*`` event. Money fields are JSON
+    numbers in the order's charge currency; instants are ISO-8601 UTC or
+    ``None``. ``number`` is the store display number when present, else the
+    per-workspace sequential order number as a string. ``external_id`` and
+    ``store_connection_id`` are populated for orders synced from a connected
+    store and are ``None`` otherwise.
+    """
+
+    order_id: str
+    external_id: Optional[str]
+    number: str
+    platform: str
+    store_connection_id: Optional[str]
+    financial_status: OrderFinancialStatus
+    fulfillment_status: OrderFulfillmentStatus
+    currency: str
+    total: float
+    subtotal: float
+    discount_total: float
+    shipping_total: float
+    tax_total: float
+    refunded_total: float
+    coupon_codes: list[str]
+    item_count: int
+    first_item_name: Optional[str]
+    placed_at: str
+    paid_at: Optional[str]
+    cancelled_at: Optional[str]
+    refunded_at: Optional[str]
+    created_at: str
+
+
+class OrderRefundBlock(TypedDict):
+    """The ``refund`` block carried by ``order.refunded`` events."""
+
+    amount: float
+    external_refund_id: Optional[str]
+    reason: Optional[str]
+    refunded_at: str
+
+
+class OrderRefundedEventData(OrderWebhookEventData):
+    refund: OrderRefundBlock
+
+
+class OrderCreatedEvent(TypedDict):
+    id: str
+    type: Literal["order.created"]
+    created_at: str
+    data: OrderWebhookEventData
+
+
+class OrderPaidEvent(TypedDict):
+    id: str
+    type: Literal["order.paid"]
+    created_at: str
+    data: OrderWebhookEventData
+
+
+class OrderRefundedEvent(TypedDict):
+    id: str
+    type: Literal["order.refunded"]
+    created_at: str
+    data: OrderRefundedEventData
+
+
+class OrderCancelledEvent(TypedDict):
+    id: str
+    type: Literal["order.cancelled"]
+    created_at: str
+    data: OrderWebhookEventData
+
+
+class OrderFulfilledEvent(TypedDict):
+    id: str
+    type: Literal["order.fulfilled"]
+    created_at: str
+    data: OrderWebhookEventData
+
+
 #: Any inbound webhook event. Discriminate on ``event["type"]``.
 OtokWebhookEvent = Union[
     EmailDeliveredEvent,
@@ -471,6 +577,11 @@ OtokWebhookEvent = Union[
     EmailFailedEvent,
     EmailOpenedEvent,
     EmailClickedEvent,
+    OrderCreatedEvent,
+    OrderPaidEvent,
+    OrderRefundedEvent,
+    OrderCancelledEvent,
+    OrderFulfilledEvent,
 ]
 
 # ─────────────────────────── Campaigns ───────────────────────────
@@ -656,6 +767,201 @@ class PaymentRefundParams(TypedDict, total=False):
 #: ``duplicate: bool`` — ``True`` when ``external_reference`` matched an
 #: existing payment that was updated instead (201 either way).
 Payment = dict[str, Any]
+
+# ─────────────────────────── Orders ───────────────────────────
+
+OrderFinancialStatus = Literal[
+    "pending",
+    "paid",
+    "partially_paid",
+    "refunded",
+    "partially_refunded",
+    "voided",
+]
+
+#: Read-only via the API — fulfillment is recorded in oToK (or by a
+#: connected store); no /v1 route sets it.
+OrderFulfillmentStatus = Literal["unfulfilled", "partially_fulfilled", "fulfilled"]
+
+
+class OrderItemParams(TypedDict, total=False):
+    """A line item on ``POST /v1/orders`` (max 200 per order).
+
+    Attach a catalog product with ``product_id`` (strict — unresolvable →
+    400 ``INVALID_PRODUCT``) or ``product_sku`` / ``product_external_id``
+    (tolerant — no match keeps the literal ``title`` with no product link);
+    an inactive product always rejects (400 ``PRODUCT_INACTIVE``).
+    Resolution order: ``product_id`` → ``product_sku`` →
+    ``product_external_id``. When a product resolves, the line title
+    derives from the product name (a client ``title`` is ignored); with no
+    product, ``title`` is required (400 otherwise). The per-line
+    ``line_total`` is server-computed:
+    round2(quantity × unit_price × (1 − discount_percent/100)).
+    """
+
+    product_id: str
+    product_sku: str
+    product_external_id: str
+    #: Required unless a product resolves (then derived from the product name).
+    title: str
+    #: Denormalized SKU snapshot on the line (falls back to ``product_sku``).
+    sku: str
+    #: In the order currency. Omitted with a priced product → the product's
+    #: price; omitted with a product that has no catalog price → 400
+    #: ``ORDER_ITEM_PRICE_REQUIRED``; omitted with no product → 0.
+    unit_price: float
+    #: Positive; decimals allowed (weight/hours). Default 1.
+    quantity: float
+    #: Percent-only per-line discount, 0–100.
+    discount_percent: float
+
+
+class OrderCreateParams(TypedDict, total=False):
+    """``POST /v1/orders`` — create an order (idempotent upsert via
+    ``external_reference``).
+
+    Contact resolution as in deals/payments: provide ``contact_id`` OR
+    ``phone``/``email`` (a matching contact is used, or created — ``name``
+    applies only on create). A phone and an email resolving to two
+    different contacts raises a 409 ``CONTACT_MERGE_REQUIRED``.
+
+    A repeat POST with the same ``external_reference`` UPDATES that order
+    instead of creating a duplicate: ``note`` / ``coupon_codes`` /
+    ``placed_at`` / ``deal_id`` always apply; the money fields (``items``,
+    ``currency``, ``discount_total``, ``shipping_total``, ``tax_total``)
+    apply only while the order is still ``pending`` — once paid, money is
+    locked and corrections flow through refunds/cancel; ``financial_status``
+    and the order's contact never change on a match. Unlike the other
+    create endpoints the response carries NO top-level ``duplicate`` flag —
+    see :data:`Order`.
+    """
+
+    contact_id: str
+    phone: str
+    email: str
+    #: Used only when a NEW contact is created.
+    name: str
+    #: Max 200 items.
+    items: list[OrderItemParams]
+    #: 3-letter code, uppercased; defaults to the workspace currency.
+    currency: str
+    #: Document-level discount (≥ 0).
+    discount_total: float
+    shipping_total: float
+    tax_total: float
+    #: ``pending`` (default) or ``paid`` — a paid create records the payment
+    #: and fires order-paid automations. Never applied on an
+    #: ``external_reference`` match.
+    financial_status: Literal["pending", "paid"]
+    #: ISO 8601; defaults to now.
+    placed_at: str
+    #: Applied discount/coupon codes (max 50).
+    coupon_codes: list[str]
+    #: Max 5000 chars.
+    note: str
+    #: Link a deal of the SAME contact (404 ``ORDER_DEAL_NOT_FOUND`` when
+    #: unknown, 409 ``ORDER_DEAL_CONTACT_MISMATCH`` for another contact's).
+    deal_id: str
+    #: Idempotency key — one reference maps to one order. Max 255 chars.
+    external_reference: str
+
+
+class _OrderRefundRequired(TypedDict):
+    #: Positive, in the order's currency; must not exceed the remaining
+    #: total (``total − refunded_total``).
+    amount: float
+
+
+class OrderRefundParams(_OrderRefundRequired, total=False):
+    """``POST /v1/orders/:id/refunds`` — record a refund.
+
+    ``external_refund_id`` is the idempotency key: a repeat POST with the
+    same value applies nothing and answers ``duplicate: True``. WITHOUT it
+    refunds are NOT idempotent — every POST appends a new refund — so
+    supply it whenever your system can retry.
+    """
+
+    #: Idempotency key per order (max 255 chars).
+    external_refund_id: str
+    #: Max 1000 chars.
+    reason: str
+    #: ISO 8601; defaults to now.
+    refunded_at: str
+
+
+class OrderMarkPaidParams(TypedDict, total=False):
+    """``POST /v1/orders/:id/mark-paid`` (all fields optional)."""
+
+    #: The ``external_reference`` of an EXISTING payment (e.g. one your
+    #: system already recorded via ``POST /v1/payments``) to link the order
+    #: onto instead of recording a new payment. Link-only — the payment's
+    #: amount is never rewritten. Max 255 chars.
+    payment_reference: str
+
+
+class OrderListParams(TypedDict, total=False):
+    """``GET /v1/orders`` query params (no ``search`` on this route).
+    Ordering is ``placed_at`` descending.
+    """
+
+    #: Financial status; unknown values are silently ignored (unfiltered).
+    status: OrderFinancialStatus
+    contact_id: str
+    #: Exact match — ``manual``, ``api``, ``automation`` (store platform
+    #: values are reserved for orders synced from a connected store).
+    source: str
+    #: Matches orders synced from that connected store.
+    store_connection_id: str
+    #: Exact-match lookup by idempotency reference.
+    external_reference: str
+    #: Orders placed at/after (ISO 8601).
+    placed_from: str
+    #: Orders placed at/before (ISO 8601).
+    placed_to: str
+    #: Page size (max 100, default 25). Out-of-range values are clamped
+    #: server-side rather than rejected.
+    limit: int
+    offset: int
+
+
+#: Order record as returned by the API (open — servers may add fields).
+#: Money fields (``total``, ``subtotal``, ``discount_total``,
+#: ``shipping_total``, ``tax_total``, ``refunded_total``, line
+#: ``unit_price``/``line_total``, refund ``amount``) are JSON numbers in
+#: the order's currency. Every response joins the contact identity
+#: (``contact_name``/``contact_phone``/``contact_email``); list rows omit
+#: ``items``/``refunds``, which the detail read and every write response
+#: include. Store-sync provenance fields (``store_connection_id``,
+#: ``store_domain``, ``external_order_id``, ``number``,
+#: ``external_updated_at``) are populated for orders synced from a
+#: connected store and are ``None`` otherwise.
+#:
+#: Unlike the other create endpoints, ``POST /v1/orders`` responses carry
+#: NO top-level ``duplicate`` flag — create and upsert-match both answer
+#: 201 with the same full-order body. To distinguish, compare
+#: ``created_at`` or pre-check with ``GET /v1/orders?external_reference=…``.
+Order = dict[str, Any]
+
+#: Order line item (``items[]`` on detail/write responses, ordered by
+#: ``position``).
+OrderItem = dict[str, Any]
+
+#: Recorded refund (``refunds[]`` on detail/write responses, ordered by
+#: ``refunded_at`` ascending).
+OrderRefund = dict[str, Any]
+
+
+class OrderRefundResult(TypedDict):
+    """Response of ``POST /v1/orders/:id/refunds`` (201 either way).
+
+    ``duplicate: True`` = the ``external_refund_id`` was already recorded
+    on this order; nothing was applied and the current order state is
+    returned.
+    """
+
+    duplicate: bool
+    order: dict[str, Any]
+
 
 # ─────────────────────────── Bookings ───────────────────────────
 

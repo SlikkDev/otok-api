@@ -2,7 +2,7 @@
 
 Developer resources for integrating with **oToK** — public REST API reference, webhook contract, and integration guides.
 
-oToK is a multichannel marketing communication platform (WhatsApp, email, web). Its REST API lets you sync contacts, run WhatsApp campaigns, send template messages and transactional email, manage deals and payments, and drive bookings from your own systems.
+oToK is a multichannel marketing communication platform (WhatsApp, email, web). Its REST API lets you sync contacts, run WhatsApp campaigns, send template messages and transactional email, manage deals, payments, and e-commerce orders, and drive bookings from your own systems.
 
 ## Documentation
 
@@ -18,6 +18,7 @@ Quick links:
 - [Contacts](docs/api/contacts.md) — upsert contacts, manage notes
 - [Campaigns](docs/api/campaigns.md) & [Templates](docs/api/templates.md) — WhatsApp messaging
 - [Deals & Pipelines](docs/api/deals.md) and [Payments](docs/api/payments.md)
+- [Orders](docs/api/orders.md) — e-commerce orders: line items, refunds, mark-paid/cancel
 - [Transactional Emails](docs/api/emails.md) and [Webhooks](docs/api/webhooks.md)
 - [Bookings & Meeting Types](docs/api/bookings.md)
 

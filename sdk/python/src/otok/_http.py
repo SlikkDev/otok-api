@@ -227,15 +227,17 @@ def _is_network_retry_safe(method: str, body: Any) -> bool:
     the server — so replaying it is only safe when a replay cannot
     double-apply an effect: safe methods (GET/HEAD), or a write body that
     carries its own idempotency key — ``idempotency_key``
-    (``POST /v1/emails``) or ``external_reference`` (``POST /v1/deals``,
-    ``POST /v1/payments``). Everything else surfaces the network error to
-    the caller. (429/5xx HTTP responses are a different case — the server
-    answered — and keep their existing retry behavior for all requests.)
+    (``POST /v1/emails``), ``external_reference`` (``POST /v1/deals``,
+    ``POST /v1/payments``, ``POST /v1/orders``), or ``external_refund_id``
+    (``POST /v1/orders/:id/refunds``). Everything else surfaces the network
+    error to the caller. (429/5xx HTTP responses are a different case — the
+    server answered — and keep their existing retry behavior for all
+    requests.)
     """
     if method.upper() in ("GET", "HEAD"):
         return True
     if isinstance(body, Mapping):
-        for key in ("idempotency_key", "external_reference"):
+        for key in ("idempotency_key", "external_reference", "external_refund_id"):
             value = body.get(key)
             if isinstance(value, str) and value:
                 return True

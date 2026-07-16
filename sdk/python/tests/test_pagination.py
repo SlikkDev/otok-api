@@ -83,6 +83,59 @@ class TestPaginationIterators:
         list(client.payments.iter())
         assert page_shapes(transport) == [(100, 0)]
 
+    def test_orders_iter_uses_the_deals_payments_cap(self) -> None:
+        client, transport = make_client(150)
+        orders = list(client.orders.iter({"limit": 250}))
+        assert len(orders) == 150
+        assert orders[0]["id"] == "row-0"
+        assert orders[-1]["id"] == "row-149"
+        assert page_shapes(transport) == [(100, 0), (100, 100)]
+
+    def test_orders_iter_forwards_the_callers_filters_on_every_page(self) -> None:
+        client, transport = make_client(250)
+        list(client.orders.iter({"status": "paid", "source": "api"}))
+        assert len(transport.pages) == 3
+        for page in transport.pages:
+            assert page["query"]["status"] == ["paid"]
+            assert page["query"]["source"] == ["api"]
+
+    def test_orders_iter_terminates_on_a_short_page_despite_a_stale_total(self) -> None:
+        class StaleTotalTransport:
+            """An order deleted between pages: the total still says more but
+            the next page is empty — the iterator must terminate, not loop.
+            """
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def send(self, request: TransportRequest) -> TransportResponse:
+                self.calls += 1
+                body: dict[str, Any] = {
+                    "data": [{"id": "row-0"}] if self.calls == 1 else [],
+                    "total": 80,
+                    "limit": 100,
+                    "offset": 0 if self.calls == 1 else 1,
+                }
+                return TransportResponse(
+                    status=200,
+                    headers={"content-type": "application/json"},
+                    body=json.dumps(body).encode("utf-8"),
+                )
+
+        transport = StaleTotalTransport()
+        client = OtokClient(
+            "otok_live_testkey",
+            base_url="https://example.test/api",
+            transport=transport,
+        )
+        assert len(list(client.orders.iter())) == 1
+        assert transport.calls == 2
+
+    def test_orders_iter_handles_an_empty_result_set_with_a_single_request(self) -> None:
+        client, transport = make_client(0)
+        assert list(client.orders.iter()) == []
+        assert page_shapes(transport) == [(100, 0)]
+
     def test_forwards_the_callers_filter_params_on_every_page(self) -> None:
         client, transport = make_client(750)
         list(

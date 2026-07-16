@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.1.0"
+  version: "1.2.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts, tags and
-    groups, WhatsApp campaigns and templates, deals and pipelines, payments, transactional
-    email, outbound webhooks, and bookings.
+    groups, WhatsApp campaigns and templates, deals and pipelines, payments, orders,
+    transactional email, outbound webhooks, and bookings.
 
     ## Authentication
 
@@ -21,8 +21,9 @@ info:
     The REST API requires a plan with API access (**Growth or higher**); other plans receive `403`.
 
     Endpoint groups that mirror a plan-gated product area additionally require that feature on
-    the workspace's plan — deals/pipelines (`deals`), payments (`payments`), campaigns
-    (`campaigns`), bookings/meeting-types (`booking`). Every route in a gated group answers
+    the workspace's plan — deals/pipelines (`deals`), payments (`payments`), orders
+    (`orders`), campaigns (`campaigns`), bookings/meeting-types (`booking`). Every route in a
+    gated group answers
     `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` (a body **without** a `statusCode`
     field) when the plan lacks the feature. Contacts, notes, tags, contact groups, templates,
     emails, and webhook endpoints require only plan-wide API access.
@@ -36,7 +37,7 @@ info:
     2. **Framework errors** (validation, auth, rate limiting, most resource errors) use
        `{"statusCode", "message", "error"}`, where `message` is a string or an array of
        per-field validation messages. Some 4xx responses extend this shape with a
-       machine-readable `error_code` field (deals, payments, bookings, contacts).
+       machine-readable `error_code` field (deals, payments, orders, bookings, contacts).
 
     Request bodies are strictly validated: unknown body properties are rejected with 400.
     Path `:id` parameters must be UUIDs; a non-UUID id returns 400 (except
@@ -44,8 +45,8 @@ info:
 
     ## Deletion
 
-    The API never deletes customer data — contacts, deals, payments, campaigns, tags, and
-    contact groups have no DELETE routes. The only DELETE endpoints are for resources the API
+    The API never deletes customer data — contacts, deals, payments, orders, campaigns,
+    tags, and contact groups have no DELETE routes. The only DELETE endpoints are for resources the API
     owns: `DELETE /v1/notes/{id}` and `DELETE /v1/webhook-endpoints/{id}`.
 
     ## Rate limits
@@ -62,22 +63,40 @@ info:
     ## Pagination
 
     Most list endpoints return `{ "data", "total", "limit", "offset" }` with `limit`
-    default 50 (hard cap 500). `GET /v1/deals` and `GET /v1/payments` use dedicated query
-    parameters with `limit` default 25 (cap 100); absent or empty `limit`/`offset` values
-    default, while malformed values return `400` (`"Invalid limit: must be a non-negative
-    integer"`). Unrecognized enum filter values on these two routes are still silently
-    ignored.
+    default 50 (hard cap 500). `GET /v1/deals`, `GET /v1/payments`, and `GET /v1/orders`
+    use dedicated query parameters with `limit` default 25 (cap 100); absent or empty
+    `limit`/`offset` values default. On deals and payments, malformed values return `400`
+    (`"Invalid limit: must be a non-negative integer"`); on orders, paging **never**
+    returns 400 — malformed or zero values silently default and out-of-range values are
+    clamped. Unrecognized enum filter values on these routes are still silently ignored.
 
     ## Idempotency
 
     - Contacts upsert by `phone`/`email`.
-    - Deals and payments upsert by `external_reference`.
+    - Deals, payments, and orders upsert by `external_reference`.
+    - Order refunds are idempotent per `external_refund_id` — only when you supply one.
     - Emails require an explicit `idempotency_key`.
     - Booking creation is idempotent per slot + meeting type + contact (server-derived, no key).
 
     Idempotent create responses carry a top-level boolean `duplicate` field — `false` on a
-    fresh create, `true` when the call matched an existing record. Status codes are 201 for
-    both outcomes everywhere except `POST /v1/emails`, which answers 201 fresh / 200 replay.
+    fresh create, `true` when the call matched an existing record — with one exception:
+    `POST /v1/orders` returns the same full order body for both outcomes and **no
+    `duplicate` marker** (compare `created_at`, or pre-check with
+    `GET /v1/orders?external_reference=...`); the order **refund** endpoint does return
+    `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
+    `POST /v1/emails`, which answers 201 fresh / 200 replay.
+
+    ## Changes in 1.2.0
+
+    - New **Orders** resource group (`/v1/orders*`) and the five `order.*` webhook
+      event types.
+    - **Schema correction** for existing consumers: deal and payment response money —
+      `Deal.amount`, `Payment.total_amount`, and payment entry `amount`/`recognized_amount` —
+      is now typed as a JSON **number**. Spec versions up to 1.1.0 incorrectly documented
+      these response fields as decimal strings (e.g. `"3600.00"`); the API has always
+      returned JSON numbers (e.g. `3600`), so nothing changed on the wire — but clients
+      generated from the earlier schema will see these declared types change from
+      `string` to `number` on regeneration.
   contact:
     name: oToK
     url: https://app.otok.io
@@ -110,10 +129,12 @@ tags:
     description: Deal CRUD-minus-delete, stage moves, win/lose, idempotent upsert via `external_reference`.
   - name: Payments
     description: One-time / recurring / installment payments, entries, refunds.
+  - name: Orders
+    description: E-commerce-grade orders on contacts — idempotent create via `external_reference`, refund ledger, mark-paid, cancel. No update or delete routes.
   - name: Emails
     description: "`POST /v1/emails` — idempotent raw transactional sends with opt-in tracking."
   - name: Webhook endpoints
-    description: Register receivers for email delivery/engagement events on API-originated sends.
+    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, and `order.*` lifecycle events from every order source.
   - name: Meeting types
     description: Read meeting types and query open slots.
   - name: Bookings
@@ -1761,6 +1782,576 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  # ───────────────────────────── Orders ─────────────────────────────
+  /v1/orders:
+    get:
+      operationId: listOrders
+      tags: [Orders]
+      summary: List orders
+      description: |
+        Uses dedicated query parameters (no generic `filter`) and the deals/payments
+        pagination defaults (`limit` default 25, cap 100) — with one deliberate
+        difference: paging on this route **never returns 400**. Malformed or zero
+        `limit`/`offset` values silently default (25 / 0) and out-of-range values are
+        clamped. Unrecognized `status`/`source` values are silently ignored (unfiltered
+        result). Ordered by **`placed_at` descending** (not `created_at`). Rows include
+        the joined `contact_name`/`contact_phone`/`contact_email` and **omit
+        `items`/`refunds`** — fetch a single order to read them. There is no `search`
+        parameter on this route.
+      parameters:
+        - name: status
+          in: query
+          description: Financial status. Any other value is silently ignored (unfiltered result).
+          schema:
+            type: string
+            enum: [pending, paid, partially_paid, refunded, partially_refunded, voided]
+        - name: contact_id
+          in: query
+          description: |
+            Exact match. Malformed → 400 `"contact_id must be a UUID"` (note the wording
+            differs from deals/payments); empty (`?contact_id=`) is treated as absent.
+          schema:
+            type: string
+            format: uuid
+        - name: source
+          in: query
+          description: |
+            Exact match — `manual`, `api`, or `automation`; orders synced from a
+            connected store carry the store platform name.
+          schema:
+            type: string
+        - name: store_connection_id
+          in: query
+          description: |
+            Exact match on the store-sync provenance field — orders synced from a
+            connected store. Malformed → 400 `"store_connection_id must be a UUID"`.
+          schema:
+            type: string
+            format: uuid
+        - name: external_reference
+          in: query
+          description: Exact match — look up an order by your idempotency reference.
+          schema:
+            type: string
+        - name: placed_from
+          in: query
+          description: 'Orders placed at/after this instant. Unparseable → 400 `"placed_from is not a valid date"`.'
+          schema:
+            type: string
+            format: date-time
+        - name: placed_to
+          in: query
+          description: 'Orders placed at/before this instant. Unparseable → 400 `"placed_to is not a valid date"`.'
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/LenientLimitParam"
+        - $ref: "#/components/parameters/LenientOffsetParam"
+      responses:
+        "200":
+          description: Paginated order list (rows omit `items`/`refunds`).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Order"
+        "400":
+          description: |
+            A malformed UUID query parameter (`"contact_id must be a UUID"`,
+            `"store_connection_id must be a UUID"`) or an unparseable date bound
+            (`"placed_from is not a valid date"`, `"placed_to is not a valid date"`).
+            Never a paging error on this route.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createOrder
+      tags: [Orders]
+      summary: Create an order (idempotent upsert via `external_reference`)
+      description: |
+        Creates an order — or, when `external_reference` matches an existing order in the
+        workspace, **updates its mutable fields** (race-safe: a concurrent create losing
+        the uniqueness race retries as an update against the winner). On a match:
+
+        - Always updated (when present in the body): `note`, `coupon_codes`, `placed_at`,
+          `deal_id`.
+        - Money fields (`items`, `currency`, `discount_total`, `shipping_total`,
+          `tax_total`) apply **only while the order is still `pending`** — once paid,
+          money is locked and repeat POSTs silently skip these fields (corrections flow
+          through refunds/cancel).
+        - `financial_status` is **never** changed on a match — an exact replay of a
+          created-as-paid POST is a clean no-op, and a repeat POST can never resurrect a
+          cancelled order. Status moves ride the mark-paid/cancel/refund endpoints.
+        - The contact is **never re-pointed** on a match (unlike deals). Contact
+          resolution still runs first, so a repeat POST must still carry `contact_id` or
+          `phone`/`email` (and phone/email upsert side effects still apply to the contact
+          itself).
+
+        Contact resolution is shared with the contacts upsert: `contact_id` wins;
+        otherwise `phone`/`email` are upserted (phone match wins, email fallback). Line
+        totals are server-computed: `line_total` = round2(`quantity` × `unit_price` ×
+        (1 − `discount_percent`/100)); `subtotal` = the sum of rounded line totals;
+        `total` = max(0, `subtotal` − `discount_total` + `shipping_total` + `tax_total`).
+        Rounding is 2-decimal half-up.
+
+        The response is **201 in both cases** with the full order (items + refunds +
+        joined contact identity). **Unlike the other idempotent creates there is no
+        top-level `duplicate` field** — both outcomes return the same body. To
+        distinguish, compare `created_at` or pre-check with
+        `GET /v1/orders?external_reference=...`.
+
+        Creation fires order-created automations (plus order-paid when created as
+        `paid`), writes the contact's activity timeline, and emits registered
+        `order.created` (and `order.paid`) webhooks; a paid create records a completed
+        payment for the full order total in the order's currency on the contact's
+        payment history. Writes are attributed to source `api`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderCreate"
+      responses:
+        "201":
+          description: |
+            The full order (created or updated — same body either way, no `duplicate`
+            marker) with `items`, `refunds`, and joined contact identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderDetail"
+        "400":
+          description: |
+            Coded errors (as `error_code`): `INVALID_PRODUCT`, `PRODUCT_INACTIVE`,
+            `ORDER_ITEM_PRICE_REQUIRED` (a dynamic-priced product without an explicit
+            `unit_price`) — or a missing contact reference (`"Provide contact_id, or a
+            phone/email…"`), a line with neither product nor title (`"Order items
+            require a title or product_id"`), `"placed_at is not a valid date"`,
+            money-field checks (`"discount_total must be a non-negative number"`, …), or
+            a validation array.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Plan-wide API access, `error_code: FEATURE_NOT_INCLUDED_IN_PLAN` — the plan
+            lacks the Orders feature (body without a `statusCode` field) — or
+            `error_code: PLAN_LIMIT_EXCEEDED` — order cap reached (only when a cap is
+            set on the workspace; orders are uncapped by default on all tiers).
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/FeatureGateError"
+        "404":
+          description: |
+            `"Contact not found"` (`contact_id` not in this workspace), or
+            `error_code: "ORDER_DEAL_NOT_FOUND"` — `deal_id` unknown to the workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            Coded conflicts (as `error_code`): `CONTACT_MERGE_REQUIRED` (phone and email
+            resolve to two different existing contacts — a merge request is opened, its
+            `merge_request_id` is included, and the order is **not** created),
+            `ORDER_DEAL_CONTACT_MISMATCH` (`deal_id` belongs to another contact), or
+            `ORDER_REFERENCE_EXISTS` (`"An order with this external_reference already
+            exists."` — normally auto-resolved into an update by the retry path, so
+            callers should not normally observe it).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/orders/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getOrder
+      tags: [Orders]
+      summary: Get one order with items and refunds
+      responses:
+        "200":
+          description: |
+            The full order: header + `items` (ordered by `position`) + `refunds`
+            (ordered by `refunded_at` ascending) + joined contact identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderDetail"
+              example:
+                id: 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c
+                workspace_id: 0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0
+                contact_id: 9e8d7c6b-5a49-4837-9605-f4e3d2c1b0a9
+                contact_name: Dana Levi
+                contact_phone: "+972501234567"
+                contact_email: dana@example.com
+                order_number: 1042
+                number: null
+                platform: api
+                source: api
+                store_connection_id: null
+                store_domain: null
+                external_order_id: null
+                external_reference: shop-88123
+                deal_id: null
+                financial_status: pending
+                fulfillment_status: unfulfilled
+                currency: ILS
+                total: 360
+                subtotal: 340
+                discount_total: 0
+                shipping_total: 20
+                tax_total: 0
+                refunded_total: 0
+                item_count: 2
+                first_item_name: Widget
+                coupon_codes: []
+                placed_at: "2026-07-14T09:58:00.000Z"
+                paid_at: null
+                cancelled_at: null
+                refunded_at: null
+                external_updated_at: null
+                payment_reference: null
+                payment_synced_at: null
+                note: null
+                metadata: null
+                created_by: null
+                created_at: "2026-07-14T09:58:04.000Z"
+                updated_at: "2026-07-14T09:58:04.000Z"
+                items:
+                  - id: 1a2b3c4d-5e6f-4a0b-9c8d-7e6f5a4b3c2d
+                    workspace_id: 0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0
+                    order_id: 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c
+                    position: 0
+                    product_id: null
+                    external_product_id: null
+                    title: Widget
+                    sku: WID-1
+                    quantity: 2
+                    unit_price: 170
+                    discount_percent: null
+                    line_total: 340
+                    created_at: "2026-07-14T09:58:04.000Z"
+                refunds: []
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: |
+            `"Order not found"` — unknown id or another workspace's order
+            (deliberately indistinguishable).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/orders/{id}/refunds:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: refundOrder
+      tags: [Orders]
+      summary: Record a refund (idempotent via `external_refund_id`)
+      description: |
+        Appends to the order's append-only refund ledger, rolls `financial_status` to
+        `partially_refunded` or `refunded` (a full-rollup refund → `refunded`; these two
+        states are reachable **only** through refunds, never through a status endpoint),
+        stamps `refunded_at` on the header, mirrors the refund into the recorded
+        payment, and fires order-refunded automations + the `order.refunded` webhook.
+
+        Refunds require the order to have **ever been paid** (`paid_at` set — includes
+        `partially_paid`); refunding a cancelled-but-paid order is allowed (cancellation
+        doesn't touch the money axis). The amount must not exceed the remaining total
+        (`total` − `refunded_total`).
+
+        **Idempotency:** a repeat POST with the same `external_refund_id` applies
+        nothing and returns `duplicate: true` with the current order state. **Without
+        `external_refund_id`, refunds are NOT idempotent** — every POST appends a new
+        refund; supply one whenever your system can retry.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amount]
+              properties:
+                amount:
+                  type: number
+                  exclusiveMinimum: 0
+                  maximum: 9999999999
+                  description: |
+                    In the order's currency; must not exceed the remaining total
+                    (`total` − `refunded_total`).
+                external_refund_id:
+                  type: string
+                  maxLength: 255
+                  description: |
+                    **Idempotency key** — a repeat POST with the same value on this
+                    order applies nothing and returns `duplicate: true`. Strongly
+                    recommended whenever your system can retry.
+                reason:
+                  type: string
+                  maxLength: 1000
+                refunded_at:
+                  type: string
+                  format: date-time
+                  description: ISO 8601; defaults to now.
+      responses:
+        "201":
+          description: The `duplicate` marker plus the full current order (items + refunds).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderRefundResult"
+              example:
+                duplicate: false
+                order:
+                  id: 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c
+                  workspace_id: 0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0
+                  contact_id: 9e8d7c6b-5a49-4837-9605-f4e3d2c1b0a9
+                  contact_name: Dana Levi
+                  contact_phone: "+972501234567"
+                  contact_email: dana@example.com
+                  order_number: 1042
+                  number: null
+                  platform: api
+                  source: api
+                  store_connection_id: null
+                  store_domain: null
+                  external_order_id: null
+                  external_reference: shop-88123
+                  deal_id: null
+                  financial_status: partially_refunded
+                  fulfillment_status: unfulfilled
+                  currency: ILS
+                  total: 360
+                  subtotal: 340
+                  discount_total: 0
+                  shipping_total: 20
+                  tax_total: 0
+                  refunded_total: 50
+                  item_count: 2
+                  first_item_name: Widget
+                  coupon_codes: []
+                  placed_at: "2026-07-14T09:58:00.000Z"
+                  paid_at: "2026-07-14T10:12:00.000Z"
+                  cancelled_at: null
+                  refunded_at: "2026-07-15T08:30:00.000Z"
+                  external_updated_at: null
+                  payment_reference: pay-2026-1042
+                  payment_synced_at: "2026-07-14T10:12:01.000Z"
+                  note: null
+                  metadata: null
+                  created_by: null
+                  created_at: "2026-07-14T09:58:04.000Z"
+                  updated_at: "2026-07-15T08:30:00.000Z"
+                  items:
+                    - id: 1a2b3c4d-5e6f-4a0b-9c8d-7e6f5a4b3c2d
+                      workspace_id: 0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0
+                      order_id: 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c
+                      position: 0
+                      product_id: null
+                      external_product_id: null
+                      title: Widget
+                      sku: WID-1
+                      quantity: 2
+                      unit_price: 170
+                      discount_percent: null
+                      line_total: 340
+                      created_at: "2026-07-14T09:58:04.000Z"
+                  refunds:
+                    - id: 2b3c4d5e-6f7a-4b1c-8d9e-0f1a2b3c4d5e
+                      workspace_id: 0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0
+                      order_id: 5f6a7b8c-9d0e-4f1a-8b2c-3d4e5f6a7b8c
+                      external_refund_id: r-1
+                      amount: 50
+                      currency: ILS
+                      reason: damaged
+                      refunded_at: "2026-07-15T08:30:00.000Z"
+                      created_at: "2026-07-15T08:30:00.000Z"
+        "400":
+          description: |
+            `error_code: "ORDER_NEVER_PAID"` (`"Cannot refund an order that was never
+            paid."`), `"Refund amount must be a positive number"`, `"Refund amount
+            exceeds the order's remaining total (<max>)"`, `"refundedAt is not a valid
+            date"`, or a validation array.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Order not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code: "STORE_SYNCED_READ_ONLY"` — the order is synced from a
+            connected store and is read-only via the API.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/orders/{id}/mark-paid:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: markOrderPaid
+      tags: [Orders]
+      summary: Mark an order paid
+      description: |
+        Moves `financial_status` to `paid`, records the payment — a completed one-time
+        payment for the full order total in the order's currency on the contact's
+        payment history — or **links onto an existing payment** via `payment_reference`,
+        and fires order-paid automations + the `order.paid` webhook.
+
+        Transition rules: allowed from `pending` and `partially_paid`; an already-`paid`
+        order is a **no-op success** (201, no side effects, no duplicate automations);
+        from `refunded`/`partially_refunded`/`voided` → 409 `ORDER_ILLEGAL_TRANSITION`
+        (refund states are set by recording refunds). `paid_at` is stamped on first
+        entry into a paid state and is historical — it is kept through later refund
+        states. A cancelled `pending` order can still be marked paid (the `cancelled_at`
+        stamp does not affect the ladder).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                payment_reference:
+                  type: string
+                  maxLength: 255
+                  description: |
+                    The `external_reference` of an **existing** payment row (e.g. one
+                    your system already recorded via `POST /v1/payments`) to link the
+                    order onto instead of recording a new payment. Link-only — the
+                    payment's amount is never rewritten. Validated **before** linking
+                    (see the 404/409 responses).
+      responses:
+        "201":
+          description: The full order (items + refunds + joined contact identity).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: |
+            `"Order not found"`, or `error_code: "ORDER_PAYMENT_REFERENCE_NOT_FOUND"` —
+            no payment in this workspace matches `payment_reference`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            Coded conflicts (as `error_code`): `ORDER_ILLEGAL_TRANSITION` (from a refund
+            state or `voided`), `ORDER_PAYMENT_CONTACT_MISMATCH` (the payment belongs to
+            another contact), `ORDER_PAYMENT_NOT_LINKABLE` (not a one-time payment with
+            a completed charge), `ORDER_PAYMENT_ALREADY_LINKED` (the order is already
+            linked to a **different** payment reference — re-sending the same reference
+            is fine), or `STORE_SYNCED_READ_ONLY` (the order is synced from a connected
+            store and is read-only via the API).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+              example:
+                statusCode: 409
+                error: Conflict
+                error_code: ORDER_ILLEGAL_TRANSITION
+                message: "Illegal status transition refunded → paid. Refund states are set by recording refunds."
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/orders/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: cancelOrder
+      tags: [Orders]
+      summary: Cancel an order
+      description: |
+        Stamps `cancelled_at` and fires order-cancelled automations + the
+        `order.cancelled` webhook. No request body.
+
+        Cancellation is a **stamp, not a status**: `financial_status` keeps its last
+        state — recorded revenue stands until a refund is recorded (cancel a paid order,
+        then record refunds as money is returned). **Idempotent:** cancelling an
+        already-cancelled order is a 201 no-op (no duplicate automations). A cancelled
+        `pending` order can still be marked paid later — cancel is workflow state on the
+        fulfillment side, not a financial transition.
+      responses:
+        "201":
+          description: |
+            The full order (items + refunds + joined contact identity) with
+            `cancelled_at` set.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Order not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code: "STORE_SYNCED_READ_ONLY"` — the order is synced from a
+            connected store and is read-only via the API.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
   # ───────────────────────────── Emails ─────────────────────────────
   /v1/emails:
     post:
@@ -1952,15 +2543,16 @@ paths:
                   type: array
                   minItems: 1
                   items:
-                    $ref: "#/components/schemas/EmailEventType"
+                    $ref: "#/components/schemas/WebhookEventType"
                   description: |
                     Event types to receive. Must be non-empty when present. **Omitted →
                     the three delivery events** (`email.delivered`, `email.bounced`,
                     `email.complained`) — the engagement events
-                    `email.opened`/`email.clicked` are received only when explicitly
-                    listed. `email.failed` is **deprecated**: still accepted when listed
-                    explicitly (the registration succeeds and echoes it in `events`), but
-                    it is never delivered.
+                    `email.opened`/`email.clicked` and the five `order.*` lifecycle
+                    events are received only when explicitly listed. `email.failed` is
+                    **deprecated**: still accepted when listed explicitly (the
+                    registration succeeds and echoes it in `events`), but it is never
+                    delivered.
       responses:
         "201":
           description: The created endpoint, including the one-time `secret`.
@@ -2597,6 +3189,150 @@ webhooks:
       responses:
         "200":
           description: Return any 2xx within 10 seconds to settle the delivery.
+  order.created:
+    post:
+      operationId: orderCreatedEvent
+      tags: [Webhook endpoints]
+      summary: order.created — an order was created
+      description: |
+        Opt-in order lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires for every order write source (API, in-app,
+        automations), never for historical import ingestion. A paid create also emits
+        `order.paid`.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderCreatedEvent"
+      responses:
+        "200":
+          description: |
+            Return any 2xx within 10 seconds to settle the delivery. Non-2xx (including
+            3xx — redirects are not followed) counts as a failure and is retried.
+  order.paid:
+    post:
+      operationId: orderPaidEvent
+      tags: [Webhook endpoints]
+      summary: order.paid — the order entered a paid state
+      description: |
+        Opt-in order lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires when the order enters a paid state: a create with
+        `financial_status: "paid"`, or `POST /v1/orders/{id}/mark-paid` (and equivalent
+        in-app/automation writes).
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderPaidEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  order.refunded:
+    post:
+      operationId: orderRefundedEvent
+      tags: [Webhook endpoints]
+      summary: order.refunded — a refund was recorded on the order
+      description: |
+        Opt-in order lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. In addition to the shared order `data` fields,
+        `data.refund` carries the refund that fired this event.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderRefundedEvent"
+            examples:
+              partialRefund:
+                value:
+                  id: a1b2c3d4-e5f6-0718-2930-4a5b6c7d8e9f
+                  type: order.refunded
+                  created_at: "2026-07-15T09:30:00.000Z"
+                  data:
+                    order_id: 0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9
+                    external_id: null
+                    number: "1042"
+                    platform: api
+                    store_connection_id: null
+                    financial_status: partially_refunded
+                    fulfillment_status: unfulfilled
+                    currency: ILS
+                    total: 360
+                    subtotal: 340
+                    discount_total: 0
+                    shipping_total: 20
+                    tax_total: 0
+                    refunded_total: 50
+                    coupon_codes: [SUMMER10]
+                    item_count: 3
+                    first_item_name: Widget
+                    placed_at: "2026-07-14T10:00:00.000Z"
+                    paid_at: "2026-07-14T10:00:00.000Z"
+                    cancelled_at: null
+                    refunded_at: "2026-07-15T09:30:00.000Z"
+                    created_at: "2026-07-14T10:00:00.000Z"
+                    refund:
+                      amount: 50
+                      external_refund_id: r-1
+                      reason: damaged
+                      refunded_at: "2026-07-15T09:30:00.000Z"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  order.cancelled:
+    post:
+      operationId: orderCancelledEvent
+      tags: [Webhook endpoints]
+      summary: order.cancelled — the order was cancelled
+      description: |
+        Opt-in order lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Cancellation is the `cancelled_at` stamp — the
+        `financial_status` in `data` keeps its last state (cancellation is not a
+        financial status).
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderCancelledEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  order.fulfilled:
+    post:
+      operationId: orderFulfilledEvent
+      tags: [Webhook endpoints]
+      summary: order.fulfilled — the order was fulfilled
+      description: |
+        Opt-in order lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fulfillment is recorded in-app — there is no `/v1`
+        fulfillment route, so this event only ever originates from non-API writes.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrderFulfilledEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
 
 components:
   securitySchemes:
@@ -2700,13 +3436,35 @@ components:
         type: integer
         minimum: 0
         default: 0
+    LenientLimitParam:
+      name: limit
+      in: query
+      description: |
+        Default 25, cap 100, floor 1. Unlike `GET /v1/deals`/`GET /v1/payments`, paging
+        here never returns 400 — absent, empty, malformed, or zero values silently
+        default to 25, and out-of-range values are clamped into 1–100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 25
+    LenientOffsetParam:
+      name: offset
+      in: query
+      description: |
+        Default 0, floor 0. Absent, empty, or malformed values silently default to 0;
+        negative values are clamped to 0 — never a 400.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
     WebhookEventHeader:
       name: X-Otok-Event
       in: header
       required: true
       description: The event type (e.g. `email.bounced`).
       schema:
-        $ref: "#/components/schemas/EmailEventType"
+        $ref: "#/components/schemas/WebhookEventType"
     WebhookEventIdHeader:
       name: X-Otok-Event-Id
       in: header
@@ -2765,7 +3523,7 @@ components:
     FeatureNotIncluded:
       description: |
         The workspace's plan lacks the feature this resource group requires — deals,
-        payments, campaigns, or booking — and answers with the
+        payments, orders, campaigns, or booking — and answers with the
         `FEATURE_NOT_INCLUDED_IN_PLAN` body (note: no `statusCode` field; the message
         embeds the lowercase feature id, so key on `error_code`). A plan without API
         access at all (Growth or higher required) answers with the standard shape instead.
@@ -2848,7 +3606,8 @@ components:
           type: string
           description: |
             Machine-readable code present on some 4xx responses (deals, payments,
-            bookings, contacts). Prefer it over matching on message text when documented.
+            orders, bookings, contacts). Prefer it over matching on message text when
+            documented.
       additionalProperties: true
     CodedError:
       title: Coded error
@@ -2871,8 +3630,9 @@ components:
       title: Feature-gate error
       description: |
         Returned with `403` when the workspace's plan lacks the feature a gated resource
-        group requires (deals/pipelines → `deals`, payments → `payments`, campaigns →
-        `campaigns`, bookings/meeting-types → `booking`). Unlike the standard framework
+        group requires (deals/pipelines → `deals`, payments → `payments`, orders →
+        `orders`, campaigns → `campaigns`, bookings/meeting-types → `booking`). Unlike
+        the standard framework
         shape there is **no `statusCode` field**. The message embeds the lowercase
         plan-feature id, not the product display name — key on `error_code`, not on the
         message text.
@@ -3769,9 +4529,9 @@ components:
         `GET /v1/deals`, `GET /v1/deals/{id}`, `POST /v1/deals`, and
         `PATCH /v1/deals/{id}` additionally join the contact's identity
         (`contact_name`/`contact_phone`/`contact_email`); the `/stage` and `/status`
-        action routes return the bare deal row without them. Note: documented response
-        examples show `amount` serialized as a decimal **string** (e.g. `"3600.00"`) even
-        though it is written as a number.
+        action routes return the bare deal row without them. `amount` serializes as a
+        **JSON number** (e.g. `3600`) in responses — spec versions before 1.2.0
+        incorrectly documented it as a decimal string; the wire has not changed.
       properties:
         id:
           type: string
@@ -3798,8 +4558,8 @@ components:
           type: string
           description: Derived from the product name while a product is attached.
         amount:
-          type: [string, "null"]
-          description: 'Decimal string in responses (e.g. "3600.00").'
+          type: [number, "null"]
+          description: JSON number in responses, rounded to 2 decimals.
         currency:
           type: [string, "null"]
         status:
@@ -3981,10 +4741,9 @@ components:
       type: object
       title: Payment (header)
       description: |
-        The payment header (the arrangement). Note: documented response examples show
-        monetary values serialized as decimal **strings** (e.g. `"350.00"`). List rows
-        include joined `contact_name`/`contact_phone`/`contact_email` and do **not**
-        include entries.
+        The payment header (the arrangement). Monetary values serialize as **JSON
+        numbers** (e.g. `350`) in responses. List rows include joined
+        `contact_name`/`contact_phone`/`contact_email` and do **not** include entries.
       properties:
         id:
           type: string
@@ -4009,8 +4768,10 @@ components:
         currency:
           type: [string, "null"]
         total_amount:
-          type: [string, "null"]
-          description: Decimal string in responses.
+          type: [number, "null"]
+          description:
+            JSON number in responses, rounded to 2 decimals (incorrectly documented
+            as a decimal string in spec versions before 1.2.0).
         arrangement_status:
           type: string
           enum: [active, completed, cancelled]
@@ -4071,7 +4832,8 @@ components:
       description: |
         An individual charge/refund in the payment's schedule. Refund entries carry
         **negative** `amount`/`recognized_amount` and point at the charge they reverse via
-        `refunds_entry_id`. Monetary values are decimal strings in responses.
+        `refunds_entry_id`. Monetary values serialize as JSON numbers in responses
+        (incorrectly documented as decimal strings in spec versions before 1.2.0).
       properties:
         id:
           type: string
@@ -4088,8 +4850,8 @@ components:
         sequence:
           type: integer
         amount:
-          type: [string, "null"]
-          description: Decimal string; negative on refund entries.
+          type: [number, "null"]
+          description: JSON number; negative on refund entries.
         currency:
           type: [string, "null"]
         status:
@@ -4102,8 +4864,8 @@ components:
           type: [string, "null"]
           format: date-time
         recognized_amount:
-          type: [string, "null"]
-          description: Decimal string; negative on refund entries.
+          type: [number, "null"]
+          description: JSON number; negative on refund entries.
         recognized_at:
           type: [string, "null"]
           format: date-time
@@ -4289,6 +5051,417 @@ components:
           minimum: 1
           description: Recurring only; `null` clears.
 
+    # ── Orders ──
+    Order:
+      type: object
+      title: Order (header)
+      description: |
+        The order header. Money fields (`total`, `subtotal`, `discount_total`,
+        `shipping_total`, `tax_total`, `refunded_total`) serialize as **JSON numbers**,
+        rounded to 2 decimals in the order's charge currency — the same serialization
+        deals and payments use. The joined contact identity
+        (`contact_name`/`contact_phone`/`contact_email`) is included on list rows
+        **and** detail/write responses. List rows omit `items`/`refunds`.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: string
+          format: uuid
+          description: The order's contact — required, always set.
+        order_number:
+          type: integer
+          description: Internal per-workspace sequential number, assigned at create.
+        number:
+          type: [string, "null"]
+          description: |
+            Store-side display number (e.g. `"#1001"`) — `null` for API/manual orders.
+        platform:
+          type: string
+          description: |
+            Origin: `"api"` for API-created orders, `"manual"` for in-app,
+            `"automation"` for automation-created; orders synced from a connected store
+            carry the store platform name.
+        source:
+          type: string
+          description: Same vocabulary as `platform` for non-store orders.
+        store_connection_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Store-sync provenance — populated for orders synced from a connected store;
+            `null` for API/manual orders.
+        store_domain:
+          type: [string, "null"]
+          description: Store-sync provenance — `null` for API/manual orders.
+        external_order_id:
+          type: [string, "null"]
+          description: Store-side order id — `null` for API/manual orders.
+        external_reference:
+          type: [string, "null"]
+          description: Idempotency key, unique per workspace.
+        deal_id:
+          type: [string, "null"]
+          format: uuid
+          description: Optional link to a deal of the same contact.
+        financial_status:
+          type: string
+          enum: [pending, paid, partially_paid, refunded, partially_refunded, voided]
+          description: |
+            `partially_paid` appears on reads (set in-app) but is not reachable through
+            `/v1` writes; `refunded`/`partially_refunded` are set only by recording
+            refunds. Cancellation is a separate `cancelled_at` stamp, not a financial
+            status.
+        fulfillment_status:
+          type: string
+          enum: [unfulfilled, partially_fulfilled, fulfilled]
+          description: |
+            **Read-only via the API** — recorded in-app or by store sync; no `/v1` route
+            sets it.
+        currency:
+          type: string
+          description: 3-letter uppercase; defaults to the workspace currency.
+        total:
+          type: number
+          description: |
+            max(0, `subtotal` − `discount_total` + `shipping_total` + `tax_total`),
+            2-decimal half-up.
+        subtotal:
+          type: number
+          description: Sum of rounded line totals.
+        discount_total:
+          type: number
+          description: Document-level discount.
+        shipping_total:
+          type: number
+        tax_total:
+          type: number
+        refunded_total:
+          type: number
+          description: Rollup of the refund ledger.
+        item_count:
+          type: integer
+          description: Quantity sum rounded to the nearest integer.
+        first_item_name:
+          type: [string, "null"]
+        coupon_codes:
+          type: array
+          items:
+            type: string
+          description: Applied discount/coupon codes.
+        placed_at:
+          type: string
+          format: date-time
+          description: Order time (defaults to creation time).
+        paid_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            Stamped on first entry into a paid state; historical — kept through later
+            refund states.
+        cancelled_at:
+          type: [string, "null"]
+          format: date-time
+          description: The cancellation stamp — cancellation is not a financial status.
+        refunded_at:
+          type: [string, "null"]
+          format: date-time
+          description: Last refund instant.
+        external_updated_at:
+          type: [string, "null"]
+          format: date-time
+          description: Store-sync snapshot clock — `null` for API/manual orders.
+        payment_reference:
+          type: [string, "null"]
+          description: |
+            Reference of the recorded payment backing this order (see the mark-paid
+            endpoint).
+        payment_synced_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            Informational — when the recorded payment backing this order was last
+            synced.
+        note:
+          type: [string, "null"]
+        metadata:
+          type: [object, "null"]
+          description: Not settable via the API (in-app/store provenance).
+        created_by:
+          type: [string, "null"]
+          format: uuid
+          description: "`null` for API writes."
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        contact_name:
+          type: [string, "null"]
+          description: Joined on list rows and detail/write responses.
+        contact_phone:
+          type: [string, "null"]
+          description: Joined on list rows and detail/write responses.
+        contact_email:
+          type: [string, "null"]
+          description: Joined on list rows and detail/write responses.
+      additionalProperties: true
+    OrderItem:
+      type: object
+      title: Order line item
+      description: |
+        Included on detail/write responses only, ordered by `position`. `line_total` is
+        server-computed: round2(`quantity` × `unit_price` × (1 −
+        `discount_percent`/100)).
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        position:
+          type: integer
+          description: 0-based.
+        product_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            Soft catalog link — `null` when no product resolved; survives product
+            deletion as `null`.
+        external_product_id:
+          type: [string, "null"]
+          description: Store-side product id — `null` for API-created lines.
+        title:
+          type: string
+          description: Denormalized snapshot.
+        sku:
+          type: [string, "null"]
+          description: Denormalized snapshot.
+        quantity:
+          type: number
+          description: Decimal quantities allowed (weight/hours).
+        unit_price:
+          type: number
+          description: In the order currency.
+        discount_percent:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 100
+          description: Percent-only per-line discount.
+        line_total:
+          type: number
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    OrderRefund:
+      type: object
+      title: Order refund
+      description: |
+        A row in the order's append-only refund ledger. Included on detail/write
+        responses only, ordered by `refunded_at` ascending.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        external_refund_id:
+          type: [string, "null"]
+          description: Caller idempotency key; `null` for keyless refunds.
+        amount:
+          type: number
+          description: Positive, in the order currency.
+        currency:
+          type: string
+          description: The order's currency.
+        reason:
+          type: [string, "null"]
+        refunded_at:
+          type: string
+          format: date-time
+          description: Defaults to record time.
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    OrderDetail:
+      title: Order with items & refunds
+      description: |
+        Single-order responses (`GET /{id}` and all write routes) return the header plus
+        `items` (ordered by `position`) and `refunds` (ordered by `refunded_at`
+        ascending).
+      allOf:
+        - $ref: "#/components/schemas/Order"
+        - type: object
+          required: [items, refunds]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/OrderItem"
+            refunds:
+              type: array
+              items:
+                $ref: "#/components/schemas/OrderRefund"
+    OrderRefundResult:
+      type: object
+      title: Order refund result
+      description: |
+        `POST /v1/orders/{id}/refunds` response — the `duplicate` marker plus the full
+        current order (items + refunds).
+      required: [duplicate, order]
+      properties:
+        duplicate:
+          type: boolean
+          description: |
+            `true` when the `external_refund_id` was already recorded on this order —
+            nothing was applied and the current order state is returned.
+        order:
+          $ref: "#/components/schemas/OrderDetail"
+    OrderCreate:
+      type: object
+      title: Order create/upsert payload
+      description: |
+        Provide `contact_id`, or `phone`/`email` (upserted like `POST /v1/contacts`).
+        When `external_reference` matches an existing order the request updates it
+        instead — see the endpoint description for which fields apply on a match.
+      additionalProperties: false
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+          description: Existing contact (404 if not in this workspace). Wins over `phone`/`email`.
+        phone:
+          type: string
+          maxLength: 32
+          description: International format preferred.
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+          maxLength: 200
+          description: Used only when a **new** contact is created.
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/OrderItemCreate"
+        currency:
+          type: string
+          maxLength: 8
+          description: Uppercased. Omitted → workspace default currency.
+        discount_total:
+          type: number
+          minimum: 0
+          maximum: 9999999999
+          description: Document-level discount.
+        shipping_total:
+          type: number
+          minimum: 0
+          maximum: 9999999999
+        tax_total:
+          type: number
+          minimum: 0
+          maximum: 9999999999
+        financial_status:
+          type: string
+          enum: [pending, paid]
+          default: pending
+          description: |
+            A `paid` create records the payment and fires order-paid automations. Never
+            applied on an `external_reference` match.
+        placed_at:
+          type: string
+          format: date-time
+          description: ISO 8601; defaults to now.
+        coupon_codes:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+        note:
+          type: string
+          maxLength: 5000
+        deal_id:
+          type: string
+          format: uuid
+          description: |
+            Must be a deal of the same contact — 404 `ORDER_DEAL_NOT_FOUND` when unknown
+            to the workspace, 409 `ORDER_DEAL_CONTACT_MISMATCH` when it belongs to
+            another contact.
+        external_reference:
+          type: string
+          maxLength: 255
+          description: "**Idempotency key**, unique per workspace."
+    OrderItemCreate:
+      type: object
+      title: Order item payload
+      description: |
+        A product reference is optional; resolution order is `product_id` →
+        `product_sku` → `product_external_id` (first provided wins). `product_id` is
+        **strict** — unresolvable → 400 `INVALID_PRODUCT`;
+        `product_sku`/`product_external_id` are **tolerant** — no match keeps the
+        literal `title` with `product_id: null`. An **inactive** match always rejects
+        (400 `PRODUCT_INACTIVE`). When a product resolves, the line title derives from
+        the product name (client `title` ignored).
+      additionalProperties: false
+      properties:
+        product_id:
+          type: string
+          format: uuid
+          description: Explicit catalog product (strict).
+        product_sku:
+          type: string
+          maxLength: 120
+          description: Resolve by SKU (tolerant).
+        product_external_id:
+          type: string
+          maxLength: 255
+          description: Resolve by your external product id (tolerant).
+        title:
+          type: string
+          maxLength: 300
+          description: |
+            Required unless a product resolves (`"Order items require a title or
+            product_id"` otherwise); ignored when a product resolves.
+        sku:
+          type: string
+          maxLength: 120
+          description: Denormalized SKU snapshot on the line (falls back to `product_sku`).
+        unit_price:
+          type: number
+          minimum: 0
+          maximum: 9999999999
+          description: |
+            Omitted with a priced product → the product's price. Omitted with a
+            dynamic-priced product (no catalog price) → 400
+            `ORDER_ITEM_PRICE_REQUIRED`. Omitted with no product → 0.
+        quantity:
+          type: number
+          exclusiveMinimum: 0
+          default: 1
+          description: Positive; decimals allowed.
+        discount_percent:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Percent-only per-line discount.
+
     # ── Emails ──
     EmailSendRequest:
       type: object
@@ -4385,6 +5558,29 @@ components:
           format: date-time
 
     # ── Webhook endpoints ──
+    WebhookEventType:
+      type: string
+      title: Webhook event type
+      enum:
+        - email.delivered
+        - email.bounced
+        - email.complained
+        - email.failed
+        - email.opened
+        - email.clicked
+        - order.created
+        - order.paid
+        - order.refunded
+        - order.cancelled
+        - order.fulfilled
+      description: |
+        The full registration vocabulary for webhook endpoints — the six email events
+        (see `EmailEventType` for their semantics) plus the five `order.*` lifecycle
+        events (see `OrderEventType`; payloads under this spec's webhooks section).
+        Order events ride the same signing, retry schedule, and delivery behavior as
+        the email events; they are received only when explicitly listed at
+        registration, and fire for **every** order write source (API, in-app,
+        automations) — never for historical imports.
     EmailEventType:
       type: string
       title: Email event type
@@ -4401,6 +5597,21 @@ components:
         accepted at registration (echoed in `events`) but never delivered; nothing produces
         this event, and a failing `POST /v1/emails` send fails synchronously on the request
         itself.
+    OrderEventType:
+      type: string
+      title: Order event type
+      enum:
+        - order.created
+        - order.paid
+        - order.refunded
+        - order.cancelled
+        - order.fulfilled
+      description: |
+        The five order lifecycle events. All are **opt-in**: delivered only to endpoints
+        that list them explicitly in `events` — an endpoint registered without an
+        `events` list receives none of them. They fire for **every** order write source
+        (API, in-app, automations), never for historical import ingestion. Payload
+        shape: `OrderEventBase` (plus the `refund` block on `OrderRefundedEvent`).
     WebhookEndpoint:
       type: object
       title: Webhook endpoint
@@ -4413,7 +5624,7 @@ components:
         events:
           type: array
           items:
-            $ref: "#/components/schemas/EmailEventType"
+            $ref: "#/components/schemas/WebhookEventType"
         is_active:
           type: boolean
         created_at:
@@ -4559,6 +5770,190 @@ components:
                   description: |
                     Always present on clicks — the original destination URL (may be an
                     empty string in rare cases).
+
+    # ── Order webhook events ──
+    OrderEventBase:
+      type: object
+      title: Order event (base)
+      description: |
+        Every delivery is an HTTP POST with this JSON body — the same envelope
+        (`id`/`type`/`created_at`/`data`), headers, signing, and retry policy as the
+        email events (see `EmailEventBase`). Unlike email events, order event `data`
+        always carries the **full field set** — absent values are explicit `null`s,
+        never omitted keys. The `data` object is a snapshot of the order at event time.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it as
+            your dedup key.
+        type:
+          $ref: "#/components/schemas/OrderEventType"
+        created_at:
+          type: string
+          format: date-time
+          description: When the event occurred.
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - order_id
+            - external_id
+            - number
+            - platform
+            - store_connection_id
+            - financial_status
+            - fulfillment_status
+            - currency
+            - total
+            - subtotal
+            - discount_total
+            - shipping_total
+            - tax_total
+            - refunded_total
+            - coupon_codes
+            - item_count
+            - first_item_name
+            - placed_at
+            - paid_at
+            - cancelled_at
+            - refunded_at
+            - created_at
+          properties:
+            order_id:
+              type: string
+              format: uuid
+              description: The order's `id`.
+            external_id:
+              type: [string, "null"]
+              description: Store-side order id — `null` for API- and app-created orders.
+            number:
+              type: string
+              description: |
+                Display number **as a string**: the store display number when present,
+                else the internal sequential `order_number` rendered as a string.
+            platform:
+              type: string
+              description: |
+                Order origin — `api`, `manual`, or `automation` (store platform names
+                reserved).
+            store_connection_id:
+              type: [string, "null"]
+              format: uuid
+              description: Store provenance — `null` for API- and app-created orders.
+            financial_status:
+              type: string
+              enum: [pending, paid, partially_paid, refunded, partially_refunded, voided]
+              description: Financial status at event time.
+            fulfillment_status:
+              type: string
+              enum: [unfulfilled, partially_fulfilled, fulfilled]
+              description: Fulfillment status at event time.
+            currency:
+              type: string
+              description: 3-letter uppercase — the order's charge currency.
+            total:
+              type: number
+              description: |
+                JSON number, rounded to 2 decimals, in the order's charge currency
+                (same for all money fields below).
+            subtotal:
+              type: number
+            discount_total:
+              type: number
+            shipping_total:
+              type: number
+            tax_total:
+              type: number
+            refunded_total:
+              type: number
+            coupon_codes:
+              type: array
+              items:
+                type: string
+            item_count:
+              type: integer
+            first_item_name:
+              type: [string, "null"]
+            placed_at:
+              type: string
+              format: date-time
+              description: ISO 8601 UTC (instants below are ISO 8601 UTC or `null`).
+            paid_at:
+              type: [string, "null"]
+              format: date-time
+            cancelled_at:
+              type: [string, "null"]
+              format: date-time
+            refunded_at:
+              type: [string, "null"]
+              format: date-time
+            created_at:
+              type: string
+              format: date-time
+    OrderCreatedEvent:
+      title: order.created event
+      allOf:
+        - $ref: "#/components/schemas/OrderEventBase"
+        - type: object
+          properties:
+            type:
+              const: order.created
+    OrderPaidEvent:
+      title: order.paid event
+      allOf:
+        - $ref: "#/components/schemas/OrderEventBase"
+        - type: object
+          properties:
+            type:
+              const: order.paid
+    OrderRefundedEvent:
+      title: order.refunded event
+      allOf:
+        - $ref: "#/components/schemas/OrderEventBase"
+        - type: object
+          properties:
+            type:
+              const: order.refunded
+            data:
+              type: object
+              additionalProperties: true
+              required: [refund]
+              properties:
+                refund:
+                  type: object
+                  description: The refund that fired this event.
+                  required: [amount, external_refund_id, reason, refunded_at]
+                  properties:
+                    amount:
+                      type: number
+                      description: Positive, in the order's currency.
+                    external_refund_id:
+                      type: [string, "null"]
+                      description: The caller's refund idempotency key — `null` for keyless refunds.
+                    reason:
+                      type: [string, "null"]
+                    refunded_at:
+                      type: string
+                      format: date-time
+    OrderCancelledEvent:
+      title: order.cancelled event
+      allOf:
+        - $ref: "#/components/schemas/OrderEventBase"
+        - type: object
+          properties:
+            type:
+              const: order.cancelled
+    OrderFulfilledEvent:
+      title: order.fulfilled event
+      allOf:
+        - $ref: "#/components/schemas/OrderEventBase"
+        - type: object
+          properties:
+            type:
+              const: order.fulfilled
 
     # ── Meeting types & bookings ──
     MeetingType:

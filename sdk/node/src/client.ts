@@ -8,6 +8,7 @@ import {
   DealsApi,
   EmailsApi,
   MeetingTypesApi,
+  OrdersApi,
   PaymentsApi,
   PipelinesApi,
   TagsApi,
@@ -33,7 +34,8 @@ export type OtokClientOptions = HttpClientOptions;
  * errors (connection reset/refused, DNS failure, socket timeout) share the
  * same bounded backoff, but only for requests that are safe to replay:
  * GET/HEAD, or writes carrying an idempotency key (`idempotency_key`,
- * `external_reference`) — other writes surface the network error.
+ * `external_reference`, `external_refund_id`) — other writes surface the
+ * network error.
  */
 export class OtokClient {
   readonly contacts: ContactsApi;
@@ -45,6 +47,7 @@ export class OtokClient {
   readonly campaigns: CampaignsApi;
   readonly templates: TemplatesApi;
   readonly payments: PaymentsApi;
+  readonly orders: OrdersApi;
   readonly meetingTypes: MeetingTypesApi;
   readonly bookings: BookingsApi;
   readonly webhookEndpoints: WebhookEndpointsApi;
@@ -64,6 +67,7 @@ export class OtokClient {
     this.campaigns = new CampaignsApi(this.http);
     this.templates = new TemplatesApi(this.http);
     this.payments = new PaymentsApi(this.http);
+    this.orders = new OrdersApi(this.http);
     this.meetingTypes = new MeetingTypesApi(this.http);
     this.bookings = new BookingsApi(this.http);
     this.webhookEndpoints = new WebhookEndpointsApi(this.http);

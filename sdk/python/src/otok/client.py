@@ -19,6 +19,7 @@ from .resources import (
     DealsApi,
     EmailsApi,
     MeetingTypesApi,
+    OrdersApi,
     PaymentsApi,
     PipelinesApi,
     TagsApi,
@@ -43,8 +44,8 @@ class OtokClient:
     network errors (connection reset/refused, DNS failure, socket timeout)
     share the same bounded backoff, but only for requests that are safe to
     replay: GET/HEAD, or writes carrying an idempotency key
-    (``idempotency_key``, ``external_reference``) — other writes surface
-    the network error.
+    (``idempotency_key``, ``external_reference``, ``external_refund_id``) —
+    other writes surface the network error.
 
     :param api_key: API key (``otok_live_…``), sent as
         ``Authorization: Bearer <key>``.
@@ -85,6 +86,7 @@ class OtokClient:
         self.campaigns = CampaignsApi(self._http)
         self.templates = TemplatesApi(self._http)
         self.payments = PaymentsApi(self._http)
+        self.orders = OrdersApi(self._http)
         self.meeting_types = MeetingTypesApi(self._http)
         self.bookings = BookingsApi(self._http)
         self.webhook_endpoints = WebhookEndpointsApi(self._http)

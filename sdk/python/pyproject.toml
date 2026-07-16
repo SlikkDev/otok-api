@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "otok"
 dynamic = ["version"]
-description = "Official Python SDK for the oToK marketing platform public API (/v1) — contacts, deals, transactional email, webhooks, and a high-level e-commerce layer."
+description = "Official Python SDK for the oToK marketing platform public API (/v1) — contacts, deals, orders, transactional email, webhooks, and a high-level e-commerce layer."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -17,6 +17,7 @@ keywords = [
   "sdk",
   "api-client",
   "e-commerce",
+  "orders",
   "webhooks",
   "transactional-email",
 ]

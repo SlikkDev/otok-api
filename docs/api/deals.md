@@ -53,6 +53,8 @@ Deal responses include all deal fields — `id`, `workspace_id`, `pipeline_id`, 
 
 `GET /v1/deals`, `GET /v1/deals/:id`, `POST /v1/deals`, and `PATCH /v1/deals/:id` additionally join the contact's identity: `contact_name`, `contact_phone`, `contact_email`. The `/stage` and `/status` action routes return the bare deal row **without** these joined fields.
 
+`amount` serializes as a **JSON number** rounded to 2 decimals (e.g. `3600`), in both requests and responses. (Earlier revisions of this page showed a decimal string `"3600.00"` in the response example — that was a documentation error; the API has always returned a number.)
+
 ## GET /api/v1/deals
 
 This route uses dedicated query parameters (not the generic `filter`), and its own pagination defaults — see [where deals and payments differ](getting-started.md#where-deals-and-payments-differ).
@@ -170,7 +172,7 @@ Response `201`:
   "stage_id": "st-1111…",
   "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
   "title": "Annual plan — Dana Levi",
-  "amount": "3600.00",
+  "amount": 3600,
   "currency": "ILS",
   "status": "open",
   "expected_close_at": "2026-08-01T00:00:00.000Z",

@@ -24,6 +24,8 @@ All endpoints require [authentication](getting-started.md#authentication). Payme
 
 Refund entries carry **negative** `amount`/`recognized_amount` and point at the charge they reverse via `refunds_entry_id`.
 
+Money fields — the header's `total_amount` and each entry's `amount`/`recognized_amount` — serialize as **JSON numbers** rounded to 2 decimals (e.g. `350`), in both requests and responses. (Earlier revisions of this page showed decimal strings like `"350.00"` in response examples — that was a documentation error; the API has always returned numbers.)
+
 Single-payment responses (`GET /:id` and all write routes) return `{ ...header, entries: [...] }` with entries ordered by `sequence`. **List rows do not include entries.**
 
 ## GET /api/v1/payments
@@ -134,7 +136,7 @@ Response `201`:
   "type": "one_time",
   "title": "Onboarding session",
   "currency": "ILS",
-  "total_amount": "350.00",
+  "total_amount": 350,
   "arrangement_status": "completed",
   "method": "card",
   "purchase_date": "2026-07-14T10:00:00.000Z",
@@ -146,11 +148,11 @@ Response `201`:
       "id": "e1d2c3b4-…",
       "payment_id": "7b6a5c4d-…",
       "sequence": 1,
-      "amount": "350.00",
+      "amount": 350,
       "currency": "ILS",
       "status": "completed",
       "paid_at": "2026-07-14T10:00:00.000Z",
-      "recognized_amount": "350.00",
+      "recognized_amount": 350,
       "recognized_at": "2026-07-14T10:00:00.000Z",
       "kind": "charge",
       "refunds_entry_id": null
