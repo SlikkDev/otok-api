@@ -12,6 +12,7 @@ from otok import (
     DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES,
     EMAIL_WEBHOOK_EVENT_TYPES,
     ORDER_WEBHOOK_EVENT_TYPES,
+    PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
     OtokAPIError,
     OtokClient,
 )
@@ -112,6 +113,78 @@ class TestContacts:
             "DELETE",
             "/api/v1/notes/n-1",
         )
+
+
+class TestContactDocuments:
+    def test_defaults_to_a_stored_only_read_without_a_live_param(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "documents": [],
+                    "live": {"attempted": False, "ok": True, "complete": True, "error": None},
+                },
+            )
+        )
+        result = client.contacts.list_documents("c-1")
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/contacts/c-1/documents"
+        assert query_of(request) == {}
+        assert result["live"]["attempted"] is False
+        assert result["documents"] == []
+
+    def test_serializes_the_live_opt_in(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "documents": [
+                        {
+                            "key": "sumit:123456",
+                            "kind": "tax_invoice_receipt",
+                            "rawType": None,
+                            "isCredit": False,
+                            "provider": "sumit",
+                            "documentId": "123456",
+                            "number": "2043",
+                            # Legacy number-only rows have no URL — callers
+                            # must check before opening.
+                            "url": None,
+                            "date": "2026-07-14T10:00:00.000Z",
+                            "amount": 350,
+                            "currency": "ILS",
+                            "origin": "merged",
+                            "sources": [
+                                {"type": "contact_payment", "id": "p-1"},
+                                {"type": "provider", "provider": "sumit"},
+                            ],
+                        }
+                    ],
+                    "live": {"attempted": True, "ok": True, "complete": True, "error": None},
+                },
+            )
+        )
+        result = client.contacts.list_documents("c-1", live=True)
+        assert query_of(last_request(transport)) == {"live": ["true"]}
+        assert result["live"]["attempted"] is True
+        assert result["documents"][0]["kind"] == "tax_invoice_receipt"
+        assert result["documents"][0]["url"] is None
+
+    def test_404s_exactly_like_contacts_get_for_an_unknown_contact(self) -> None:
+        client, _ = make_client(
+            json_response(
+                404,
+                {
+                    "statusCode": 404,
+                    "error": "Not Found",
+                    "message": "contacts with ID c-missing not found",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.contacts.list_documents("c-missing")
+        assert excinfo.value.status == 404
 
 
 class TestTagsAndGroups:
@@ -289,6 +362,20 @@ class TestEmailsAndWebhookEndpoints:
         for event_type in ORDER_WEBHOOK_EVENT_TYPES:
             assert event_type not in defaults
 
+    def test_payment_request_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES == (
+            "payment_request.created",
+            "payment_request.paid",
+            "payment_request.expired",
+            "payment_request.cancelled",
+        )
+        # Payment-request events are opt-in by listing, like the order
+        # events: an endpoint registered without an explicit `events` list
+        # gets only the email delivery defaults.
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        for event_type in PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES:
+            assert event_type not in defaults
+
     def test_order_events_are_listed_verbatim_at_registration(self) -> None:
         client, transport = make_client(json_response(201, {"id": "we-1", "secret": "whsec_x"}))
         client.webhook_endpoints.create(
@@ -448,6 +535,166 @@ class TestPayments:
             {"type": "one_time", "amount": 350, "external_reference": "inv-1"}
         )
         assert payment["duplicate"] is True
+
+
+class TestPaymentRequests:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client()
+        client.payment_requests.list(
+            {
+                "status": "pending",
+                "contact_id": "5f9f1b9b-0000-4000-8000-000000000001",
+                "deal_id": "5f9f1b9b-0000-4000-8000-000000000002",
+                "limit": 10,
+                "offset": 20,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/payment-requests"
+        assert query_of(request) == {
+            "status": ["pending"],
+            "contact_id": ["5f9f1b9b-0000-4000-8000-000000000001"],
+            "deal_id": ["5f9f1b9b-0000-4000-8000-000000000002"],
+            "limit": ["10"],
+            "offset": ["20"],
+        }
+
+    def test_writes_issue_the_documented_verb_and_path(self) -> None:
+        client, transport = make_client(json_response(201, {"id": "pr-1"}))
+        client.payment_requests.create(
+            {
+                "phone": "+972501234567",
+                "name": "Dana Levi",
+                "amount": 250,
+                "currency": "ILS",
+                "title": "Onboarding session",
+                "vat_mode": "inclusive",
+                "vat_rate": 18,
+            }
+        )
+        request = last_request(transport)
+        assert (request.method, transport.request_path()) == (
+            "POST",
+            "/api/v1/payment-requests",
+        )
+        assert transport.request_body() == {
+            "phone": "+972501234567",
+            "name": "Dana Levi",
+            "amount": 250,
+            "currency": "ILS",
+            "title": "Onboarding session",
+            "vat_mode": "inclusive",
+            "vat_rate": 18,
+        }
+        client.payment_requests.get("pr-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/payment-requests/pr-1",
+        )
+        client.payment_requests.cancel("pr-1")
+        request = last_request(transport)
+        assert (request.method, transport.request_path()) == (
+            "POST",
+            "/api/v1/payment-requests/pr-1/cancel",
+        )
+        assert request.body is None  # no request body on cancel
+
+    def test_create_returns_checkout_diagnostics_and_no_duplicate_marker(self) -> None:
+        # There is no idempotency key on this resource: a repeat POST mints
+        # a second payable link, so no `duplicate` field can exist.
+        client, _ = make_client(
+            json_response(
+                201,
+                {
+                    "id": "pr-1",
+                    "status": "pending",
+                    "charge_kind": "checkout",
+                    "amount": 250,
+                    "currency": "ILS",
+                    "pay_url": "https://app.otok.io/pay/pr_tok",
+                    "checkout_url": "https://provider.example/checkout/1",
+                    "checkout_error": None,
+                },
+            )
+        )
+        request = client.payment_requests.create({"contact_id": "c-1", "amount": 250})
+        assert "duplicate" not in request
+        assert request["pay_url"] == "https://app.otok.io/pay/pr_tok"
+        assert request["checkout_url"] == "https://provider.example/checkout/1"
+        assert request["checkout_error"] is None
+
+    def test_create_surfaces_the_no_payment_provider_code(self) -> None:
+        client, _ = make_client(
+            json_response(
+                400,
+                {
+                    "statusCode": 400,
+                    "error": "Bad Request",
+                    "error_code": "NO_PAYMENT_PROVIDER",
+                    "message": (
+                        "No payment provider is connected — connect Cardcom or Sumit "
+                        "in Settings → Integrations first."
+                    ),
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.payment_requests.create({"contact_id": "c-1", "amount": 100})
+        assert excinfo.value.status == 400
+        assert excinfo.value.code == "NO_PAYMENT_PROVIDER"
+
+    def test_cancel_surfaces_the_typed_409s(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "statusCode": 409,
+                    "error": "Conflict",
+                    "message": "Only pending payment requests can be cancelled",
+                },
+            ),
+            json_response(
+                409,
+                {
+                    "statusCode": 409,
+                    "error": "Conflict",
+                    "error_code": "TOKEN_REQUEST_NOT_CANCELLABLE",
+                    "message": (
+                        "Direct saved-card charges cannot be cancelled — the charge "
+                        "orchestration resolves them"
+                    ),
+                },
+            ),
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.payment_requests.cancel("pr-1")
+        assert excinfo.value.status == 409
+        assert excinfo.value.code is None
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.payment_requests.cancel("pr-2")
+        assert excinfo.value.status == 409
+        assert excinfo.value.code == "TOKEN_REQUEST_NOT_CANCELLABLE"
+
+    def test_feature_gate_403_embeds_the_workspace_payments_feature_id(self) -> None:
+        # Pay-links are gated by `workspace_payments`, NOT the `payments`
+        # ledger feature — the message embeds whichever id is missing.
+        client, _ = make_client(
+            json_response(
+                403,
+                {
+                    "message": (
+                        "Your current plan does not include access to this feature: "
+                        "workspace_payments. Please upgrade your plan."
+                    ),
+                    "error_code": "FEATURE_NOT_INCLUDED_IN_PLAN",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.payment_requests.list()
+        assert excinfo.value.status == 403
+        assert excinfo.value.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
 
 
 class TestOrders:

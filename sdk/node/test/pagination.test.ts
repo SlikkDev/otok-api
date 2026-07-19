@@ -96,6 +96,20 @@ describe("pagination iterators", () => {
     expect(pages.map((p) => [p.limit, p.offset])).toEqual([[100, 0]]);
   });
 
+  it("paymentRequests.iter uses the deals/payments cap (100) and forwards filters", async () => {
+    const { fetchMock, pages } = pagedFetch(120);
+    const otok = makeClient(fetchMock as any);
+    const requests = await collect(
+      otok.paymentRequests.iter({ status: "pending" }),
+    );
+    expect(requests).toHaveLength(120);
+    expect(pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+    for (const page of pages) expect(page.query.get("status")).toBe("pending");
+  });
+
   it("orders.iter uses the deals/payments cap (100), clamping overrides", async () => {
     const { fetchMock, pages } = pagedFetch(150);
     const otok = makeClient(fetchMock as any);

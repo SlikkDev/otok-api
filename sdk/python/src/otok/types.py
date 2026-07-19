@@ -374,8 +374,31 @@ ORDER_WEBHOOK_EVENT_TYPES: tuple[OrderWebhookEventType, ...] = (
     "order.fulfilled",
 )
 
+PaymentRequestWebhookEventType = Literal[
+    "payment_request.created",
+    "payment_request.paid",
+    "payment_request.expired",
+    "payment_request.cancelled",
+]
+
+#: The four payment-request (pay-link) lifecycle events. Opt-in by listing,
+#: like the order events: an endpoint registered without an explicit
+#: ``events`` list receives none of them. They fire for hosted pay-links
+#: from EVERY mint source (API and in-app) — never for direct saved-card
+#: charges or internal dunning-recovery links.
+PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES: tuple[PaymentRequestWebhookEventType, ...] = (
+    "payment_request.created",
+    "payment_request.paid",
+    "payment_request.expired",
+    "payment_request.cancelled",
+)
+
 #: Any event type registrable on a webhook endpoint.
-WebhookEventType = Union[EmailWebhookEventType, OrderWebhookEventType]
+WebhookEventType = Union[
+    EmailWebhookEventType,
+    OrderWebhookEventType,
+    PaymentRequestWebhookEventType,
+]
 
 
 class _WebhookEndpointCreateRequired(TypedDict):
@@ -387,8 +410,9 @@ class WebhookEndpointCreateParams(_WebhookEndpointCreateRequired, total=False):
 
     ``events`` defaults to the three delivery events (``email.delivered``,
     ``email.bounced``, ``email.complained``); the engagement types
-    (``email.opened``, ``email.clicked``) and the ``order.*`` lifecycle
-    events must be listed explicitly. An empty list is rejected.
+    (``email.opened``, ``email.clicked``), the ``order.*`` lifecycle
+    events, and the ``payment_request.*`` lifecycle events must be listed
+    explicitly. An empty list is rejected.
     ``email.failed`` is deprecated — accepted at registration, but it never
     fires.
     """
@@ -569,6 +593,65 @@ class OrderFulfilledEvent(TypedDict):
     data: OrderWebhookEventData
 
 
+class PaymentRequestWebhookEventData(TypedDict):
+    """Payload ``data`` of every ``payment_request.*`` event — a snapshot of
+    the payment request at event time, following the order-event
+    conventions: money is a JSON number in the request's currency, instants
+    are ISO-8601 UTC or ``None``, and the full field set is always present
+    (explicit nulls, never omitted keys). ``test_mode: True`` marks
+    authorise-only test rows — their ``paid`` events never represent real
+    money. ``contact_payment_id`` links the settled /v1/payments ledger row
+    once paid. Provider correlation refs and row metadata are deliberately
+    excluded — read ``GET /v1/payment-requests/:id`` when you need them.
+    """
+
+    payment_request_id: str
+    status: PaymentRequestStatus
+    contact_id: Optional[str]
+    deal_id: Optional[str]
+    provider: str
+    amount: float
+    currency: str
+    title: Optional[str]
+    vat_mode: Optional[PaymentVatMode]
+    vat_rate: Optional[float]
+    test_mode: bool
+    pay_url: Optional[str]
+    contact_payment_id: Optional[str]
+    expires_at: Optional[str]
+    paid_at: Optional[str]
+    cancelled_at: Optional[str]
+    created_at: Optional[str]
+
+
+class PaymentRequestCreatedEvent(TypedDict):
+    id: str
+    type: Literal["payment_request.created"]
+    created_at: str
+    data: PaymentRequestWebhookEventData
+
+
+class PaymentRequestPaidEvent(TypedDict):
+    id: str
+    type: Literal["payment_request.paid"]
+    created_at: str
+    data: PaymentRequestWebhookEventData
+
+
+class PaymentRequestExpiredEvent(TypedDict):
+    id: str
+    type: Literal["payment_request.expired"]
+    created_at: str
+    data: PaymentRequestWebhookEventData
+
+
+class PaymentRequestCancelledEvent(TypedDict):
+    id: str
+    type: Literal["payment_request.cancelled"]
+    created_at: str
+    data: PaymentRequestWebhookEventData
+
+
 #: Any inbound webhook event. Discriminate on ``event["type"]``.
 OtokWebhookEvent = Union[
     EmailDeliveredEvent,
@@ -582,6 +665,10 @@ OtokWebhookEvent = Union[
     OrderRefundedEvent,
     OrderCancelledEvent,
     OrderFulfilledEvent,
+    PaymentRequestCreatedEvent,
+    PaymentRequestPaidEvent,
+    PaymentRequestExpiredEvent,
+    PaymentRequestCancelledEvent,
 ]
 
 # ─────────────────────────── Campaigns ───────────────────────────
@@ -684,6 +771,10 @@ PaymentType = Literal["one_time", "recurring", "installments"]
 PaymentEntryStatus = Literal["pending", "completed", "failed", "refunded"]
 PaymentInterval = Literal["weekly", "monthly", "quarterly", "yearly"]
 PaymentMethod = Literal["cash", "card", "bank_transfer", "other"]
+#: VAT posture of a recurring plan / payment request: "inclusive" (VAT is
+#: included in the amount) or "exclusive" (the amount is net; VAT is added on
+#: top — exclusive + rate 0 = VAT-exempt). Always paired with a ``vat_rate``.
+PaymentVatMode = Literal["inclusive", "exclusive"]
 
 
 class _PaymentCreateRequired(TypedDict):
@@ -725,9 +816,20 @@ class PaymentCreateParams(_PaymentCreateRequired, total=False):
     recurring_end_at: str
     #: recurring only: max charge cycles (min 1).
     recurring_max_occurrences: int
+    #: Recurring only, always together with ``vat_rate`` (a full pair — a
+    #: lone leg 400s, and on other types the pair 400s). Omitted → the
+    #: attached product's pair, else the workspace default. On an
+    #: ``external_reference`` match a provided pair re-prices the plan.
+    vat_mode: PaymentVatMode
+    #: Recurring only, with ``vat_mode``: VAT percent (0–100, ≤2 decimals).
+    vat_rate: float
     #: installments only: number of installments (min 2).
     installment_count: int
     external_reference: str
+    #: Free-form JSON stored on the payment — max 2048 bytes serialized (400
+    #: over the cap). On an ``external_reference`` match the provided object
+    #: REPLACES the stored one (omit to keep it).
+    metadata: dict[str, Any]
 
 
 class PaymentUpdateParams(TypedDict, total=False):
@@ -743,6 +845,16 @@ class PaymentUpdateParams(TypedDict, total=False):
     auto_generate: bool
     recurring_end_at: Optional[str]
     recurring_max_occurrences: Optional[int]
+    #: Recurring only: replace the plan's stored VAT pair — always together
+    #: with ``vat_rate``. Unlike the other type-restricted fields this is NOT
+    #: silently ignored on other types (400), and lone legs / ``None``s are
+    #: rejected. Omit both to keep the stored pair.
+    vat_mode: PaymentVatMode
+    #: Recurring only, with ``vat_mode``: VAT percent (0–100, ≤2 decimals).
+    vat_rate: float
+    #: Replace the payment's metadata object (max 2048 bytes serialized), or
+    #: ``None`` to clear it. Omit to leave it as-is.
+    metadata: Optional[dict[str, Any]]
 
 
 class PaymentListParams(TypedDict, total=False):
@@ -767,6 +879,184 @@ class PaymentRefundParams(TypedDict, total=False):
 #: ``duplicate: bool`` — ``True`` when ``external_reference`` matched an
 #: existing payment that was updated instead (201 either way).
 Payment = dict[str, Any]
+
+# ─────────────────────────── Payment requests ───────────────────────────
+
+PaymentRequestStatus = Literal["pending", "paid", "expired", "cancelled"]
+
+#: Currencies accepted by the workspace payment providers.
+PaymentRequestCurrency = Literal["ILS", "USD", "EUR", "GBP"]
+
+#: Canonical Israeli tax-document taxonomy (payment requests + contact
+#: documents).
+PaymentDocumentKind = Literal[
+    "tax_invoice",
+    "tax_invoice_receipt",
+    "receipt",
+    "receipt_for_invoice",
+    "proforma_invoice",
+    "donation_receipt",
+    "credit_invoice",
+    "credit_invoice_receipt",
+    "credit_receipt",
+    "credit_donation_receipt",
+    "order",
+    "price_quote",
+    "delivery_note",
+    "payment_demand",
+]
+
+
+class _PaymentRequestCreateRequired(TypedDict):
+    #: Amount to collect, in major units (≤2 decimals, min 0.01).
+    amount: float
+
+
+class PaymentRequestCreateParams(_PaymentRequestCreateRequired, total=False):
+    """``POST /v1/payment-requests`` — mint a hosted pay-link through the
+    workspace's own connected payment provider (Cardcom / Sumit).
+
+    The payer resolves like payments/deals: provide ``contact_id``, OR
+    ``phone``/``email`` (a matching contact is used, or created), OR a
+    ``deal_id`` alone (the deal's contact pays).
+
+    **There is NO idempotency key on this resource** — a repeat POST mints
+    a second, independently payable link (cancel extras via
+    ``payment_requests.cancel``). Because of that, the SDK never
+    auto-retries this call on transient network errors.
+    """
+
+    contact_id: str
+    phone: str
+    email: str
+    #: Used only when a NEW contact is created.
+    name: str
+    #: Deal to bind the request to; alone, the deal's contact is the payer.
+    deal_id: str
+    #: Omitted → the workspace payment currency.
+    currency: PaymentRequestCurrency
+    #: Payer-facing charge title (≤200 chars).
+    title: str
+    #: ≤2000 chars.
+    note: str
+    #: Max card installments offered on the hosted page (1–36).
+    max_installments: int
+    #: Tax-document kind to auto-issue; omitted → the provider/account default.
+    document_kind: PaymentDocumentKind
+    #: Auto-issue an Israeli tax document on successful charge (default True).
+    auto_issue_document: bool
+    #: Link expiry (ISO 8601). Clamped server-side to at most 72 hours from
+    #: now (1 hour for test-mode requests); omitted → the maximum.
+    expires_at: str
+    #: Authorise-only test run — 400 when the connected provider has no test
+    #: mode. Test requests never record real money.
+    test_mode: bool
+    #: Pre-expiry reminder emails; omitted → the workspace default.
+    reminders_enabled: bool
+    #: Offer the payer a save-my-card checkbox on the pay page — honored only
+    #: when the connected provider supports card capture at checkout.
+    offer_card_save: bool
+    #: Per-request VAT override — always together with ``vat_rate`` (a lone
+    #: leg 400s). Omitted → the workspace payments default.
+    vat_mode: PaymentVatMode
+    #: With ``vat_mode``: VAT percent (0–100, ≤2 decimals).
+    vat_rate: float
+
+
+class PaymentRequestListParams(TypedDict, total=False):
+    """``GET /v1/payment-requests`` query params. Pages like deals/payments
+    (default 25, cap 100; malformed paging 400s). Unlike deals/payments, an
+    unknown ``status`` value 400s instead of being silently ignored.
+    """
+
+    status: PaymentRequestStatus
+    contact_id: str
+    deal_id: str
+    #: Page size (max 100, default 25).
+    limit: int
+    offset: int
+
+
+#: Payment request (pay-link) record as returned by the API (open — servers
+#: may add fields). Lifecycle: pending → paid | expired | cancelled.
+#: ``pay_url`` is the shareable hosted pay-page URL (computed on
+#: create/get/list; the cancel response is the bare row without computed
+#: fields; ``None`` on system-created ``charge_kind: "token"`` saved-card
+#: rows). Once paid, ``contact_payment_id`` links the settled /v1/payments
+#: ledger row and ``document`` (get/list) carries the issued tax-document
+#: pointer. Create responses additionally carry ``checkout_url`` /
+#: ``checkout_error`` (a provider failure at mint leaves the row pending
+#: with ``checkout_error`` set — the link still works; the hosted page
+#: retries the provider session on open). List rows join
+#: ``contact_name``/``contact_phone``/``contact_email`` and a computed
+#: ``refunded_total``.
+PaymentRequest = dict[str, Any]
+
+# ─────────────────────────── Contact documents ───────────────────────────
+
+ContactDocumentOrigin = Literal["stored", "live", "merged"]
+
+
+class _ContactDocumentSourceRequired(TypedDict):
+    type: Literal["contact_payment", "payment_entry", "payment_request", "provider"]
+
+
+class ContactDocumentSource(_ContactDocumentSourceRequired, total=False):
+    """One record a contact document was aggregated from. ``id`` is present
+    on the row-backed types; ``paymentId`` on ``payment_entry`` sources;
+    ``provider`` on ``provider`` sources.
+    """
+
+    id: str
+    paymentId: str
+    provider: str
+
+
+class ContactDocument(TypedDict):
+    """One aggregated financial document (invoice / receipt / credit
+    document) of a contact. ``url`` MAY be ``None`` (legacy number-only
+    rows) — check before opening.
+    """
+
+    #: Aggregator-computed stable render key; carries no semantics.
+    key: str
+    #: Canonical kind when resolvable; else ``None`` with ``rawType`` set.
+    kind: Optional[PaymentDocumentKind]
+    rawType: Optional[str]
+    isCredit: bool
+    provider: Optional[str]
+    documentId: Optional[str]
+    #: Human-facing document number.
+    number: Optional[str]
+    url: Optional[str]
+    #: ISO 8601 UTC. Stored: host-row instant; live: provider document date.
+    date: Optional[str]
+    amount: Optional[float]
+    currency: Optional[str]
+    origin: ContactDocumentOrigin
+    sources: list[ContactDocumentSource]
+
+
+class ContactDocumentsLive(TypedDict):
+    """Status of the opt-in live provider lookup."""
+
+    #: A live provider lookup was attempted.
+    attempted: bool
+    #: ``False`` = the provider lookup failed or timed out.
+    ok: bool
+    #: ``False`` = the live listing may be missing documents (partial).
+    complete: bool
+    error: Optional[Literal["timeout", "provider_error"]]
+
+
+class ContactDocumentsResult(TypedDict):
+    """Response of ``GET /v1/contacts/:id/documents``. ``documents`` is
+    sorted date-descending (nulls last).
+    """
+
+    documents: list[ContactDocument]
+    live: ContactDocumentsLive
+
 
 # ─────────────────────────── Orders ───────────────────────────
 

@@ -285,6 +285,21 @@ describe("HttpClient network-error retries", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does NOT retry a payment-request create (no idempotency key exists)", async () => {
+    // POST /v1/payment-requests has NO idempotency key of any kind — a
+    // replay would mint a second, independently payable link — so the
+    // network error must surface after exactly one attempt (the same
+    // posture as bookings.create, whose idempotency is server-derived).
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
+    const client = makeClient(fetchMock as any);
+    await expect(
+      client.request("POST", "/v1/payment-requests", {
+        body: { contact_id: "c-1", amount: 250, title: "Session" },
+      }),
+    ).rejects.toThrow("fetch failed");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("does NOT retry PATCH/DELETE requests", async () => {
     const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
     const client = makeClient(fetchMock as any);

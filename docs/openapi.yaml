@@ -1,12 +1,12 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.2.0"
+  version: "1.3.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts, tags and
-    groups, WhatsApp campaigns and templates, deals and pipelines, payments, orders,
-    transactional email, outbound webhooks, and bookings.
+    groups, WhatsApp campaigns and templates, deals and pipelines, payments, payment
+    requests (pay-links), orders, transactional email, outbound webhooks, and bookings.
 
     ## Authentication
 
@@ -21,11 +21,16 @@ info:
     The REST API requires a plan with API access (**Growth or higher**); other plans receive `403`.
 
     Endpoint groups that mirror a plan-gated product area additionally require that feature on
-    the workspace's plan — deals/pipelines (`deals`), payments (`payments`), orders
-    (`orders`), campaigns (`campaigns`), bookings/meeting-types (`booking`). Every route in a
-    gated group answers
+    the workspace's plan — deals/pipelines (`deals`), payments and contact documents
+    (`payments`), payment requests (`workspace_payments`), orders (`orders`), campaigns
+    (`campaigns`), bookings/meeting-types (`booking`). Every route in a gated group answers
     `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` (a body **without** a `statusCode`
-    field) when the plan lacks the feature. Contacts, notes, tags, contact groups, templates,
+    field) when the plan lacks the feature. Note the two distinct payment gates:
+    `/v1/payments*` and `GET /v1/contacts/{id}/documents` require the **`payments`** feature
+    (the payments ledger), while `/v1/payment-requests*` requires **`workspace_payments`**
+    (collecting money through the workspace's own connected payment provider) — a workspace
+    can hold either feature without the other, and the 403 message embeds whichever feature
+    id is missing. Contacts, notes, tags, contact groups, templates,
     emails, and webhook endpoints require only plan-wide API access.
 
     ## Error shapes
@@ -63,12 +68,15 @@ info:
     ## Pagination
 
     Most list endpoints return `{ "data", "total", "limit", "offset" }` with `limit`
-    default 50 (hard cap 500). `GET /v1/deals`, `GET /v1/payments`, and `GET /v1/orders`
+    default 50 (hard cap 500). `GET /v1/deals`, `GET /v1/payments`,
+    `GET /v1/payment-requests`, and `GET /v1/orders`
     use dedicated query parameters with `limit` default 25 (cap 100); absent or empty
-    `limit`/`offset` values default. On deals and payments, malformed values return `400`
+    `limit`/`offset` values default. On deals, payments, and payment requests, malformed
+    values return `400`
     (`"Invalid limit: must be a non-negative integer"`); on orders, paging **never**
     returns 400 — malformed or zero values silently default and out-of-range values are
-    clamped. Unrecognized enum filter values on these routes are still silently ignored.
+    clamped. Unrecognized enum filter values on deals/payments/orders are silently
+    ignored; `GET /v1/payment-requests` instead rejects an unknown `status` with 400.
 
     ## Idempotency
 
@@ -77,6 +85,9 @@ info:
     - Order refunds are idempotent per `external_refund_id` — only when you supply one.
     - Emails require an explicit `idempotency_key`.
     - Booking creation is idempotent per slot + meeting type + contact (server-derived, no key).
+    - **Payment requests have NO idempotency key** — `POST /v1/payment-requests` is **not**
+      idempotent: a repeat POST mints a second, independently payable link. Cancel extras
+      with `POST /v1/payment-requests/{id}/cancel`.
 
     Idempotent create responses carry a top-level boolean `duplicate` field — `false` on a
     fresh create, `true` when the call matched an existing record — with one exception:
@@ -85,6 +96,23 @@ info:
     `GET /v1/orders?external_reference=...`); the order **refund** endpoint does return
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
     `POST /v1/emails`, which answers 201 fresh / 200 replay.
+
+    ## Changes in 1.3.0
+
+    - New **Payment requests** resource group (`/v1/payment-requests*`) — hosted pay-links
+      collected through the workspace's own connected payment provider (Cardcom / Sumit) —
+      and the four `payment_request.*` webhook event types (opt-in by listing, like the
+      order events). Gated by the `workspace_payments` plan feature (distinct from the
+      `payments` ledger gate).
+    - New `GET /v1/contacts/{id}/documents` — read-only listing of a contact's financial
+      documents (invoices, receipts, credit documents), with an opt-in `?live=true`
+      provider lookup. Gated by the `payments` feature.
+    - Payments: `POST /v1/payments` and `PATCH /v1/payments/{id}` accept a `vat_mode` +
+      `vat_rate` pair (**recurring plans only**, always together) and a free-form
+      `metadata` object (≤ 2048 bytes serialized; replace-on-write, `null` clears on
+      PATCH). Payment and payment-entry response fields are now fully documented,
+      including the recurring auto-charging/dunning fields, the stored VAT pair, and
+      entry-level refund/credit-document fields.
 
     ## Changes in 1.2.0
 
@@ -129,12 +157,16 @@ tags:
     description: Deal CRUD-minus-delete, stage moves, win/lose, idempotent upsert via `external_reference`.
   - name: Payments
     description: One-time / recurring / installment payments, entries, refunds.
+  - name: Payment requests
+    description: Hosted pay-by-link requests collected through the workspace's own connected payment provider (Cardcom / Sumit). Mint, list, get, cancel — **no idempotency key**; a repeat POST mints a second link. Requires the `workspace_payments` feature.
+  - name: Contact documents
+    description: Read-only listing of a contact's financial documents (invoices, receipts, credit documents), aggregated from stored document pointers with an opt-in live provider lookup. Requires the `payments` feature.
   - name: Orders
     description: E-commerce-grade orders on contacts — idempotent create via `external_reference`, refund ledger, mark-paid, cancel. No update or delete routes.
   - name: Emails
     description: "`POST /v1/emails` — idempotent raw transactional sends with opt-in tracking."
   - name: Webhook endpoints
-    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, and `order.*` lifecycle events from every order source.
+    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, `order.*` lifecycle events from every order source, and `payment_request.*` pay-link lifecycle events.
   - name: Meeting types
     description: Read meeting types and query open slots.
   - name: Bookings
@@ -322,6 +354,69 @@ paths:
                 error_code: CONTACT_MERGE_REQUIRED
                 merge_request_id: 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
                 message: "This change would give the contact a phone or email that already belongs to another contact. A merge request was opened — resolve it (merge or dismiss) to apply the change."
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/contacts/{id}/documents:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: listContactDocuments
+      tags: [Contact documents]
+      summary: List a contact's financial documents
+      description: |
+        Read-only listing of the contact's financial documents — invoices, receipts, and
+        credit documents — aggregated from every stored document pointer on the contact's
+        payments, payment entries, and payment requests, deduplicated, merged, and sorted
+        date-descending (nulls last). **Requires the `payments` plan feature** (the same
+        gate as `/v1/payments*`), in addition to API access.
+
+        Responds `{ documents, live }`. Each document carries `kind` (canonical type, or
+        `null` with the provider's `rawType`), `isCredit`, `provider`, `documentId`,
+        `number`, `url`, `date`, `amount`, `currency`, `origin`, and its `sources`. A
+        document's `url` **may be null** (legacy number-only rows) — always check before
+        opening.
+
+        By default only **stored** document pointers are returned. Pass `?live=true` to
+        additionally query the connected payment provider for a live document listing and
+        merge it in (bounded to ~2.5 s; a timeout or provider failure degrades to the
+        stored listing, reported in `live.error` — never an error response). With no
+        connected/entitled provider the live lookup degrades to an empty listing.
+      parameters:
+        - name: live
+          in: query
+          required: false
+          description: |
+            `true` | `false` (default `false`). Any other value returns 400
+            (`"Invalid live: must be true or false"`).
+          schema:
+            type: string
+            enum: ["true", "false"]
+      responses:
+        "200":
+          description: The aggregated document listing plus the live-lookup status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactDocumentsResult"
+        "400":
+          description: Non-UUID contact id, or a malformed `live` value.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: |
+            `"contacts with ID <id> not found"` — same lookup and wording as
+            `GET /v1/contacts/{id}`, so an unknown or cross-workspace contact answers
+            identically instead of returning an empty-but-plausible document list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/contacts/{id}/notes:
@@ -1499,10 +1594,13 @@ paths:
         **updates it**. Only mutable fields are applied on a match:
 
         - Always (when present): `product_id`, `title` (subject to the product title lock),
-          `note`, `method`.
+          `note`, `method`, `metadata` (the provided object **replaces** the stored one —
+          omit it to keep it).
         - Only when the existing payment is `one_time`: `amount`, `status`.
         - Only when it is `recurring`: `auto_generate`, `recurring_end_at`,
-          `recurring_max_occurrences`.
+          `recurring_max_occurrences`, and the `vat_mode`+`vat_rate` pair (a full pair
+          **re-prices** the plan — future cycles are charged and documented with the new
+          posture).
         - Never restructured on a match: `type`, `interval`, `installment_count`,
           `purchase_date` — and, unlike deals, **the contact is NOT re-pointed** on a match.
 
@@ -1535,7 +1633,10 @@ paths:
         "400":
           description: |
             Bad type/amount, installment/schedule validation, `INVALID_PRODUCT` /
-            `PRODUCT_INACTIVE`, or a missing contact reference.
+            `PRODUCT_INACTIVE`, a missing contact reference, a VAT-pair violation
+            (`"vatMode/vatRate apply to recurring plans only"` /
+            `"vat_mode and vat_rate must be provided together"`), or an oversized
+            `metadata` object (`"metadata exceeds 2048 bytes serialized"`).
           content:
             application/json:
               schema:
@@ -1588,6 +1689,11 @@ paths:
         conditions may auto-complete it; extending them never silently reactivates a
         completed plan. A one-time status change fires the matching automation after the
         update.
+
+        A full `vat_mode`+`vat_rate` pair replaces a **recurring** plan's stored VAT
+        posture (future cycles are charged and documented with the new pair) — lone legs
+        and `null`s are rejected, and on non-recurring payments the pair returns 400.
+        `metadata` replaces the stored object (`null` clears it; omit to keep it).
       requestBody:
         required: true
         content:
@@ -1604,7 +1710,10 @@ paths:
         "400":
           description: |
             `"This charge already has refunds; reverse those instead of marking it
-            refunded/failed"` — use `/refund` — or recurring end-condition validation errors.
+            refunded/failed"` — use `/refund` — or recurring end-condition validation
+            errors, VAT-pair violations (`"vatMode/vatRate apply to recurring plans
+            only"` / `"vatMode and vatRate must be provided together"`), or an oversized
+            `metadata` object (`"metadata exceeds 2048 bytes serialized"`).
           content:
             application/json:
               schema:
@@ -1775,6 +1884,216 @@ paths:
           $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           description: '`"Payment not found"` / `"Payment entry not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Payment requests ─────────────────────────────
+  /v1/payment-requests:
+    get:
+      operationId: listPaymentRequests
+      tags: [Payment requests]
+      summary: List payment requests
+      description: |
+        Uses dedicated query parameters and the deals/payments pagination family
+        (`limit` default 25, cap 100; absent or empty values default; malformed values
+        return 400 `"Invalid limit: must be a non-negative integer"`). Unlike
+        deals/payments, an unknown `status` value returns 400 rather than being silently
+        ignored. Ordered by `created_at` descending. Rows include joined
+        `contact_name`/`contact_phone`/`contact_email` and a computed `refunded_total`.
+      parameters:
+        - name: status
+          in: query
+          description: Unknown values return 400.
+          schema:
+            type: string
+            enum: [pending, paid, expired, cancelled]
+        - name: contact_id
+          in: query
+          description: Malformed (non-UUID) values return 400; empty values are treated as absent.
+          schema:
+            type: string
+            format: uuid
+        - name: deal_id
+          in: query
+          description: Malformed (non-UUID) values return 400; empty values are treated as absent.
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated payment-request list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PaymentRequest"
+        "400":
+          description: |
+            A malformed `limit`/`offset`
+            (`"Invalid limit: must be a non-negative integer"`), a malformed UUID filter
+            (`"Invalid contact_id: must be a UUID"`), or an unknown `status`
+            (`"Invalid status: must be one of pending, paid, expired, cancelled"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createPaymentRequest
+      tags: [Payment requests]
+      summary: Create a payment request (mint a pay-link)
+      description: |
+        Mints a hosted-checkout pay-link through the workspace's connected payment
+        provider (Cardcom / Sumit) and returns the row with its shareable `pay_url`.
+        Requires a connected provider — otherwise 400 with
+        `error_code: "NO_PAYMENT_PROVIDER"`.
+
+        **NOT idempotent — there is no idempotency key on this resource.** A repeat POST
+        mints a second, **independently payable** link; cancel extras via
+        `POST /v1/payment-requests/{id}/cancel`. Do not blindly retry this call after a
+        network failure without first checking `GET /v1/payment-requests` for the link
+        you may have already minted.
+
+        The payer contact resolves like payments/deals: `contact_id` wins; otherwise
+        `phone`/`email` are upserted like `POST /v1/contacts` (same
+        409 `CONTACT_MERGE_REQUIRED` behavior); a `deal_id` alone also works — the deal's
+        contact pays. None of the four → 400.
+
+        Expiry is clamped server-side to at most 72 hours from now (1 hour for test-mode
+        requests); reminder emails, payment verification, tax-document auto-issue, and
+        the payer receipt behave exactly as for in-app-minted links. The response also
+        carries `checkout_url`/`checkout_error`: a provider failure at mint time leaves
+        the row `pending` **without** a checkout session (`checkout_error` set) — the
+        public pay page lazily re-creates the session when opened, so the link still
+        works once the provider recovers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequestCreate"
+      responses:
+        "201":
+          description: The minted payment request, including `pay_url`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequestCreateResult"
+        "400":
+          description: |
+            `error_code: "NO_PAYMENT_PROVIDER"` (no connected provider), body
+            validation (amount bounds, unsupported `currency`, bad `expires_at`),
+            a VAT-pair violation (`"vat_mode and vat_rate must be provided together"`),
+            `test_mode: true` when the connected provider has no test mode, or a missing
+            payer reference (`"Provide contact_id, a phone/email to resolve the payer
+            contact, or a deal_id"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: Unknown `contact_id` or `deal_id` in this workspace.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          $ref: "#/components/responses/ContactMergeRequired"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/payment-requests/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getPaymentRequest
+      tags: [Payment requests]
+      summary: Get a payment request
+      responses:
+        "200":
+          description: |
+            The payment request, with its computed `pay_url` and — once paid — the
+            issued tax `document` pointer.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Payment request not found"` — unknown in this workspace.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/payment-requests/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: cancelPaymentRequest
+      tags: [Payment requests]
+      summary: Cancel a pending payment request
+      description: |
+        Withdraws the pay-link — the hosted page stops accepting payment. No request
+        body. **Pending requests only** (the cancel is a compare-and-set on `status`):
+        already paid/expired/cancelled rows answer 409, and direct saved-card charge rows
+        answer 409 `TOKEN_REQUEST_NOT_CANCELLABLE`. A payer already on the hosted page
+        can still complete — such late completions are verified and recorded (the row
+        resurrects to `paid`) rather than dropping the money.
+      responses:
+        "201":
+          description: |
+            The cancelled row (`status: "cancelled"`, `cancelled_at` stamped). Unlike
+            the other reads, the cancel response is the bare row — it carries no
+            computed `pay_url`/`document` fields.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentRequest"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Payment request not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `"Only pending payment requests can be cancelled"` (already
+            paid/expired/cancelled), or `error_code: "TOKEN_REQUEST_NOT_CANCELLABLE"` —
+            direct saved-card charge rows are resolved by the charge orchestration and
+            can never be operator-cancelled.
           content:
             application/json:
               schema:
@@ -2548,8 +2867,9 @@ paths:
                     Event types to receive. Must be non-empty when present. **Omitted →
                     the three delivery events** (`email.delivered`, `email.bounced`,
                     `email.complained`) — the engagement events
-                    `email.opened`/`email.clicked` and the five `order.*` lifecycle
-                    events are received only when explicitly listed. `email.failed` is
+                    `email.opened`/`email.clicked`, the five `order.*` lifecycle
+                    events, and the four `payment_request.*` lifecycle events are
+                    received only when explicitly listed. `email.failed` is
                     **deprecated**: still accepted when listed explicitly (the
                     registration succeeds and echoes it in `events`), but it is never
                     delivered.
@@ -3333,6 +3653,122 @@ webhooks:
       responses:
         "200":
           description: Return any 2xx within 10 seconds to settle the delivery.
+  payment_request.created:
+    post:
+      operationId: paymentRequestCreatedEvent
+      tags: [Webhook endpoints]
+      summary: payment_request.created — a pay-link was minted
+      description: |
+        Opt-in pay-link lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires for every hosted pay-link mint (API and in-app).
+        **Hosted pay-links only:** direct saved-card charges and internal
+        dunning-recovery links never emit `payment_request.*` events.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequestCreatedEvent"
+      responses:
+        "200":
+          description: |
+            Return any 2xx within 10 seconds to settle the delivery. Non-2xx (including
+            3xx — redirects are not followed) counts as a failure and is retried.
+  payment_request.paid:
+    post:
+      operationId: paymentRequestPaidEvent
+      tags: [Webhook endpoints]
+      summary: payment_request.paid — the payer completed the pay-link
+      description: |
+        Opt-in pay-link lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires when the payment is verified with the provider,
+        including a **late completion** of an already-cancelled link (a payer who was on
+        the hosted page when it was cancelled). `data.contact_payment_id` links the
+        settled payment ledger row. Test-mode completions fire too — check
+        `data.test_mode` before recording revenue.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequestPaidEvent"
+            examples:
+              paidLink:
+                value:
+                  id: c3d4e5f6-0718-2930-4a5b-6c7d8e9f0a1b
+                  type: payment_request.paid
+                  created_at: "2026-07-15T11:20:00.000Z"
+                  data:
+                    payment_request_id: 0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0
+                    status: paid
+                    contact_id: 9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c
+                    deal_id: null
+                    provider: sumit
+                    amount: 250
+                    currency: ILS
+                    title: Onboarding session
+                    vat_mode: inclusive
+                    vat_rate: 18
+                    test_mode: false
+                    pay_url: https://app.otok.io/pay/pr_k3J9…
+                    contact_payment_id: 7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d
+                    expires_at: "2026-07-18T09:00:00.000Z"
+                    paid_at: "2026-07-15T11:20:00.000Z"
+                    cancelled_at: null
+                    created_at: "2026-07-15T09:00:00.000Z"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  payment_request.expired:
+    post:
+      operationId: paymentRequestExpiredEvent
+      tags: [Webhook endpoints]
+      summary: payment_request.expired — the pay-link passed its deadline unpaid
+      description: |
+        Opt-in pay-link lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires when a pending link passes `expires_at` unpaid —
+        from the expiry sweep, or lazily when the expired link is opened.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequestExpiredEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  payment_request.cancelled:
+    post:
+      operationId: paymentRequestCancelledEvent
+      tags: [Webhook endpoints]
+      summary: payment_request.cancelled — the pay-link was withdrawn
+      description: |
+        Opt-in pay-link lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires on `POST /v1/payment-requests/{id}/cancel` and on
+        in-app cancels. A payer already on the hosted page can still complete after the
+        cancel — a later `payment_request.paid` for the same request supersedes this
+        event.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PaymentRequestCancelledEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
 
 components:
   securitySchemes:
@@ -3523,7 +3959,8 @@ components:
     FeatureNotIncluded:
       description: |
         The workspace's plan lacks the feature this resource group requires — deals,
-        payments, orders, campaigns, or booking — and answers with the
+        payments (payments + contact documents), workspace_payments (payment requests),
+        orders, campaigns, or booking — and answers with the
         `FEATURE_NOT_INCLUDED_IN_PLAN` body (note: no `statusCode` field; the message
         embeds the lowercase feature id, so key on `error_code`). A plan without API
         access at all (Growth or higher required) answers with the standard shape instead.
@@ -3630,7 +4067,8 @@ components:
       title: Feature-gate error
       description: |
         Returned with `403` when the workspace's plan lacks the feature a gated resource
-        group requires (deals/pipelines → `deals`, payments → `payments`, orders →
+        group requires (deals/pipelines → `deals`, payments and contact documents →
+        `payments`, payment requests → `workspace_payments`, orders →
         `orders`, campaigns → `campaigns`, bookings/meeting-types → `booking`). Unlike
         the standard framework
         shape there is **no `statusCode` field**. The message embeds the lowercase
@@ -4797,6 +5235,42 @@ components:
           format: date-time
         recurring_max_occurrences:
           type: [integer, "null"]
+        recurring_payment_method_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            The saved card funding the plan's automatic charges, when one is attached.
+        recurring_last_attempt_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the charging sweep last attempted this plan's due cycle.
+        recurring_failure_count:
+          type: integer
+          description: Consecutive failed automatic charge attempts (reset on success).
+        recurring_paused_at:
+          type: [string, "null"]
+          format: date-time
+          description: Set when automatic charging is paused after the retry ladder ran out.
+        recurring_next_retry_at:
+          type: [string, "null"]
+          format: date-time
+          description: Earliest instant the next automatic retry of a failed cycle may run.
+        recurring_dunning_started_at:
+          type: [string, "null"]
+          format: date-time
+          description: First-failure anchor of the current automatic-charging retry episode.
+        vat_mode:
+          type: [string, "null"]
+          enum: [inclusive, exclusive, null]
+          description: |
+            The recurring plan's stored VAT pair (with `vat_rate`) — `inclusive` (VAT
+            included in the amount) or `exclusive` (the amount is net; VAT added on top;
+            exclusive + rate 0 = VAT-exempt). Null on non-recurring payments and on plans
+            created before VAT granularity — such plans resolve the live workspace
+            default each cycle.
+        vat_rate:
+          type: [number, "null"]
+          description: VAT rate percent (0–100, at most 2 decimals); null with `vat_mode`.
         installment_count:
           type: [integer, "null"]
         external_reference:
@@ -4807,6 +5281,10 @@ components:
           description: '`"api"` for API writes.'
         metadata:
           type: [object, "null"]
+          description: |
+            Free-form JSON stored on the payment. May carry integration payloads and the
+            standardized external tax-document pointer under `metadata.document`
+            (`{ provider, id, number, type, url }`).
         created_by:
           type: [string, "null"]
           format: uuid
@@ -4878,6 +5356,19 @@ components:
           description: On refund entries, the charge entry being reversed.
         note:
           type: [string, "null"]
+        provider_refund_ref:
+          type: [string, "null"]
+          description: |
+            Provider-side transaction reference of a gateway-executed refund (null for
+            ledger-only refunds recorded via this API).
+        refund_idempotency_key:
+          type: [string, "null"]
+          description: The idempotency key a provider-executed refund was requested with.
+        credit_document:
+          type: [object, "null"]
+          description: |
+            Credit document issued alongside a provider-executed refund, in the
+            standardized `{ provider, id, number, type, url }` shape.
         created_at:
           type: string
           format: date-time
@@ -4998,6 +5489,25 @@ components:
           type: integer
           minimum: 1
           description: Recurring only — total charge cycles ever.
+        vat_mode:
+          type: string
+          enum: [inclusive, exclusive]
+          description: |
+            **Recurring plans only, always together with `vat_rate`** (a full pair —
+            on other types the pair returns 400 `"vatMode/vatRate apply to recurring
+            plans only"`; a lone leg returns 400). The VAT posture the plan's cycles
+            are charged and documented with: `inclusive` (VAT included in the amount) or
+            `exclusive` (the amount is net; VAT is added on top; exclusive + rate 0 =
+            VAT-exempt). Omitted → the plan stores the attached product's VAT pair, else
+            the workspace default. On an `external_reference` match a provided pair
+            **re-prices** the plan.
+        vat_rate:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: |
+            Recurring only, always together with `vat_mode`: VAT rate percent (0–100, at
+            most 2 decimal places).
         installment_count:
           type: integer
           minimum: 2
@@ -5009,6 +5519,13 @@ components:
           type: string
           maxLength: 255
           description: "**Idempotency key**, unique per workspace."
+        metadata:
+          type: object
+          description: |
+            Free-form JSON stored on the payment — **max 2048 bytes serialized** (400
+            `"metadata exceeds 2048 bytes serialized"` over the cap). Returned on reads
+            and surfaced to payment automations. On an `external_reference` match the
+            provided object **replaces** the stored one (omit to keep it).
     PaymentPatch:
       type: object
       title: Payment patch payload
@@ -5050,6 +5567,464 @@ components:
           type: [integer, "null"]
           minimum: 1
           description: Recurring only; `null` clears.
+        vat_mode:
+          type: string
+          enum: [inclusive, exclusive]
+          description: |
+            **Recurring only: replace the plan's stored VAT pair — always together with
+            `vat_rate`.** Unlike the other type-restricted patch fields this is NOT
+            silently ignored on other types (400 `"vatMode/vatRate apply to recurring
+            plans only"`), and lone legs / `null`s are rejected (400 `"vatMode and
+            vatRate must be provided together"`) — the stored pair is a complete value.
+            Future cycles are charged and documented with the new pair. Omit both to
+            leave the pair as-is.
+        vat_rate:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: |
+            Recurring only, always together with `vat_mode`: VAT rate percent (0–100, at
+            most 2 decimal places).
+        metadata:
+          type: [object, "null"]
+          description: |
+            Replace the payment's free-form metadata object (max 2048 bytes serialized),
+            or `null` to clear it. Omit to leave it as-is.
+
+    # ── Payment requests ──
+    PaymentRequest:
+      type: object
+      title: Payment request (pay-link)
+      description: |
+        A pay-by-link request collected through the workspace's own connected payment
+        provider. Monetary values serialize as JSON numbers. Responses return the full
+        stored row (additional provider-correlation fields may appear) plus computed
+        fields: `pay_url` (the shareable hosted-checkout link) on create/get/list — the
+        cancel response is the bare row without computed fields — and `document` (the
+        issued tax-document pointer, once paid) on get/list. List rows additionally
+        include joined `contact_name`/`contact_phone`/`contact_email` and a computed
+        `refunded_total`.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: [string, "null"]
+          format: uuid
+          description: The payer contact. Null only after the contact was deleted.
+        deal_id:
+          type: [string, "null"]
+          format: uuid
+          description: The deal the request is bound to, when minted for a deal.
+        provider:
+          type: string
+          enum: [cardcom, sumit]
+          description: The connected provider the money moves through.
+        status:
+          type: string
+          enum: [pending, paid, expired, cancelled]
+          description: "Lifecycle: pending → paid | expired | cancelled."
+        charge_kind:
+          type: string
+          enum: [checkout, token]
+          description: |
+            `checkout` = a hosted pay-link (the rows this API mints). `token` rows are
+            direct saved-card charge anchors created by the system — they appear in
+            list/get, carry `pay_url: null`, cannot be cancelled
+            (409 `TOKEN_REQUEST_NOT_CANCELLABLE`), and never emit `payment_request.*`
+            webhook events.
+        amount:
+          type: number
+          description: Amount to collect, in major units (JSON number).
+        currency:
+          type: string
+          enum: [ILS, USD, EUR, GBP]
+        title:
+          type: [string, "null"]
+          description: Payer-facing charge title.
+        note:
+          type: [string, "null"]
+        max_installments:
+          type: [integer, "null"]
+          description: Max card installments offered on the hosted page.
+        auto_issue_document:
+          type: boolean
+          description: Auto-issue an Israeli tax document on successful charge.
+        document_kind:
+          type: [string, "null"]
+          description: |
+            Tax-document kind to auto-issue; null = the provider/account default. See
+            `PaymentRequestCreate.document_kind` for the vocabulary.
+        public_token:
+          type: string
+          description: |
+            High-entropy public pay-link token (`pr_…`) — the last path segment of
+            `pay_url`. Treat it as a secret of the payer.
+        provider_checkout_ref:
+          type: [string, "null"]
+          description: Provider-side checkout-session reference, when minted.
+        provider_payment_ref:
+          type: [string, "null"]
+          description: Provider-side payment/transaction reference, once paid.
+        provider_customer_ref:
+          type: [string, "null"]
+          description: Provider-side customer reference, when known.
+        test_mode:
+          type: boolean
+          description: |
+            Authorise-only test run — test requests never record real money and expire
+            within 1 hour.
+        vat_mode:
+          type: [string, "null"]
+          enum: [inclusive, exclusive, null]
+          description: |
+            The resolved VAT posture stamped at mint (request override → workspace
+            default): the checkout, the auto-issued document, and any later refund
+            credit-document all price with this pair. Null on rows minted before VAT
+            granularity.
+        vat_rate:
+          type: [number, "null"]
+          description: VAT rate percent (0–100); null with `vat_mode`.
+        reminders_enabled:
+          type: boolean
+          description: Pre-expiry reminder emails for this request.
+        reminder_count:
+          type: integer
+          description: Reminder tiers already sent.
+        last_reminder_at:
+          type: [string, "null"]
+          format: date-time
+        expires_at:
+          type: [string, "null"]
+          format: date-time
+          description: Link deadline (clamped at mint; ≤72h, 1h in test mode).
+        paid_at:
+          type: [string, "null"]
+          format: date-time
+        cancelled_at:
+          type: [string, "null"]
+          format: date-time
+        contact_payment_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            The `/v1/payments` ledger row a verified payment landed on — set once paid.
+        metadata:
+          type: [object, "null"]
+          description: |
+            System-managed row metadata (e.g. the issued `document` pointer, checkout
+            diagnostics). Not writable via this API.
+        created_by:
+          type: [string, "null"]
+          format: uuid
+          description: Null for API mints.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        pay_url:
+          type: [string, "null"]
+          description: |
+            The shareable hosted pay-page URL
+            (`https://app.otok.io/pay/<public_token>`). Computed on create/get/list —
+            absent on the cancel response — and null on `charge_kind: "token"` rows,
+            which have no payer-facing page.
+        document:
+          type: [object, "null"]
+          description: |
+            The issued tax-document pointer (`{ provider, id, number, type, url }`) once
+            the request is paid — computed on get/list; null while unpaid.
+        contact_name:
+          type: [string, "null"]
+          description: Joined on list rows.
+        contact_phone:
+          type: [string, "null"]
+          description: Joined on list rows.
+        contact_email:
+          type: [string, "null"]
+          description: Joined on list rows.
+        refunded_total:
+          type: number
+          description: |
+            List rows only — total already refunded against this request's settled
+            charge (0 while unrefunded).
+      additionalProperties: true
+    PaymentRequestCreateResult:
+      title: Payment request create result
+      description: |
+        `POST /v1/payment-requests` response — the minted row plus checkout diagnostics.
+      allOf:
+        - $ref: "#/components/schemas/PaymentRequest"
+        - type: object
+          properties:
+            checkout_url:
+              type: [string, "null"]
+              description: |
+                The provider checkout-session URL minted for the link, when the
+                provider answered at mint time. The payer-facing URL to share remains
+                `pay_url` — the hosted page (re)creates the provider session as needed.
+            checkout_error:
+              type: [string, "null"]
+              description: |
+                Set when the provider checkout mint failed — the row stays `pending`
+                and the pay page retries the session when the link is opened; null on
+                success.
+    PaymentRequestCreate:
+      type: object
+      title: Payment request create payload
+      description: |
+        Provide the payer as `contact_id`, OR `phone`/`email` (upserted like
+        `POST /v1/contacts`), OR a `deal_id` alone (the deal's contact pays). **There is
+        no idempotency key on this resource — a repeat POST mints a second, independently
+        payable link.**
+      additionalProperties: false
+      required: [amount]
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+          description: Existing contact (the payer). Wins over `phone`/`email`.
+        phone:
+          type: string
+          maxLength: 32
+          description: Contact phone (E.164). A matching contact is used, or created.
+        email:
+          type: string
+          format: email
+          description: Contact email. A matching contact is used, or created.
+        name:
+          type: string
+          maxLength: 200
+          description: Used only when a new contact is created.
+        deal_id:
+          type: string
+          format: uuid
+          description: |
+            Deal to bind the request to. When no contact is given, the deal's contact is
+            the payer.
+        amount:
+          type: number
+          minimum: 0.01
+          maximum: 9999999999.99
+          description: Amount to collect, in major units (at most 2 decimal places).
+        currency:
+          type: string
+          enum: [ILS, USD, EUR, GBP]
+          description: Omitted → the workspace payment currency.
+        title:
+          type: string
+          maxLength: 200
+          description: Payer-facing charge title.
+        note:
+          type: string
+          maxLength: 2000
+        max_installments:
+          type: integer
+          minimum: 1
+          maximum: 36
+          description: Max card installments offered on the hosted page (1–36).
+        document_kind:
+          type: string
+          enum:
+            - tax_invoice
+            - tax_invoice_receipt
+            - receipt
+            - receipt_for_invoice
+            - proforma_invoice
+            - donation_receipt
+            - credit_invoice
+            - credit_invoice_receipt
+            - credit_receipt
+            - credit_donation_receipt
+            - order
+            - price_quote
+            - delivery_note
+            - payment_demand
+          description: |
+            Tax-document kind to auto-issue on payment; omitted → the provider/account
+            default.
+        auto_issue_document:
+          type: boolean
+          default: true
+          description: Auto-issue an Israeli tax document on successful charge.
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            Link expiry (ISO 8601). Clamped server-side to at most 72 hours from now
+            (1 hour for test-mode requests); omitted → the maximum.
+        test_mode:
+          type: boolean
+          description: |
+            Authorise-only test run — rejected (400) when the connected provider has no
+            test mode. Test requests never record real money.
+        reminders_enabled:
+          type: boolean
+          description: Pre-expiry reminder emails for this request; omitted → the workspace default.
+        offer_card_save:
+          type: boolean
+          description: |
+            Offer the payer a save-my-card checkbox on the pay page — honored only when
+            the connected provider supports card capture at checkout.
+        vat_mode:
+          type: string
+          enum: [inclusive, exclusive]
+          description: |
+            Per-request VAT override — mode and rate travel as a PAIR (each required
+            when the other is present; a lone leg returns 400). Omitted → the workspace
+            payments default. VAT-exempt = `exclusive` + rate 0.
+        vat_rate:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: |
+            VAT rate percent (0–100, at most 2 decimal places); see `vat_mode` — the
+            pair travels together.
+
+    # ── Contact documents ──
+    ContactDocument:
+      type: object
+      title: Contact financial document
+      description: |
+        One aggregated financial document (invoice / receipt / credit document) of a
+        contact.
+      required:
+        - key
+        - kind
+        - rawType
+        - isCredit
+        - provider
+        - documentId
+        - number
+        - url
+        - date
+        - amount
+        - currency
+        - origin
+        - sources
+      properties:
+        key:
+          type: string
+          description: Aggregator-computed stable render key; carries no semantics.
+        kind:
+          type: [string, "null"]
+          enum:
+            - tax_invoice
+            - tax_invoice_receipt
+            - receipt
+            - receipt_for_invoice
+            - proforma_invoice
+            - donation_receipt
+            - credit_invoice
+            - credit_invoice_receipt
+            - credit_receipt
+            - credit_donation_receipt
+            - order
+            - price_quote
+            - delivery_note
+            - payment_demand
+            - null
+          description: Canonical document kind when resolvable; else null with `rawType` set.
+        rawType:
+          type: [string, "null"]
+          description: Original provider/free-text type label when `kind` is null.
+        isCredit:
+          type: boolean
+          description: Credit/refund document.
+        provider:
+          type: [string, "null"]
+          enum: [cardcom, sumit, null]
+        documentId:
+          type: [string, "null"]
+          description: Provider durable document id, when the provider exposes one.
+        number:
+          type: [string, "null"]
+          description: Human-facing document number.
+        url:
+          type: [string, "null"]
+          description: |
+            **May be null** (legacy number-only rows) — always check before opening, and
+            only open http(s) URLs.
+        date:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            ISO 8601 UTC. Stored documents: the host-row instant; live documents: the
+            provider document date.
+        amount:
+          type: [number, "null"]
+          description: |
+            Stored documents: the host-row amount; live documents: the document's own
+            value.
+        currency:
+          type: [string, "null"]
+        origin:
+          type: string
+          enum: [stored, live, merged]
+          description: |
+            Where the document came from — a stored pointer, the live provider listing,
+            or both (merged).
+        sources:
+          type: array
+          description: |
+            The records this document was aggregated from. Each item is one of
+            `{type: "contact_payment", id}`, `{type: "payment_entry", id, paymentId}`,
+            `{type: "payment_request", id}`, or `{type: "provider", provider}`.
+          items:
+            type: object
+            required: [type]
+            properties:
+              type:
+                type: string
+                enum: [contact_payment, payment_entry, payment_request, provider]
+              id:
+                type: string
+                format: uuid
+              paymentId:
+                type: string
+                format: uuid
+                description: '`payment_entry` sources only — the entry''s parent payment.'
+              provider:
+                type: string
+                description: '`provider` sources only.'
+            additionalProperties: false
+      additionalProperties: false
+    ContactDocumentsResult:
+      type: object
+      title: Contact documents listing
+      description: |
+        `GET /v1/contacts/{id}/documents` response. `documents` is sorted date-descending
+        (nulls last; tiebreak number descending, numeric-aware).
+      required: [documents, live]
+      properties:
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContactDocument"
+        live:
+          type: object
+          description: Status of the opt-in live provider lookup.
+          required: [attempted, ok, complete, error]
+          properties:
+            attempted:
+              type: boolean
+              description: |
+                A live provider lookup was attempted (`?live=true` with a live-capable
+                deployment; `false` on stored-only reads).
+            ok:
+              type: boolean
+              description: '`false` = the provider lookup failed or timed out.'
+            complete:
+              type: boolean
+              description: '`false` = the live listing may be missing documents (partial).'
+            error:
+              type: [string, "null"]
+              enum: [timeout, provider_error, null]
 
     # ── Orders ──
     Order:
@@ -5573,14 +6548,20 @@ components:
         - order.refunded
         - order.cancelled
         - order.fulfilled
+        - payment_request.created
+        - payment_request.paid
+        - payment_request.expired
+        - payment_request.cancelled
       description: |
         The full registration vocabulary for webhook endpoints — the six email events
-        (see `EmailEventType` for their semantics) plus the five `order.*` lifecycle
-        events (see `OrderEventType`; payloads under this spec's webhooks section).
-        Order events ride the same signing, retry schedule, and delivery behavior as
-        the email events; they are received only when explicitly listed at
-        registration, and fire for **every** order write source (API, in-app,
-        automations) — never for historical imports.
+        (see `EmailEventType` for their semantics), the five `order.*` lifecycle
+        events (see `OrderEventType`), and the four `payment_request.*` pay-link
+        lifecycle events (see `PaymentRequestEventType`; payloads under this spec's
+        webhooks section).
+        Order and payment-request events ride the same signing, retry schedule, and
+        delivery behavior as the email events; they are received only when explicitly
+        listed at registration. Order events fire for **every** order write source
+        (API, in-app, automations) — never for historical imports.
     EmailEventType:
       type: string
       title: Email event type
@@ -5612,6 +6593,21 @@ components:
         `events` list receives none of them. They fire for **every** order write source
         (API, in-app, automations), never for historical import ingestion. Payload
         shape: `OrderEventBase` (plus the `refund` block on `OrderRefundedEvent`).
+    PaymentRequestEventType:
+      type: string
+      title: Payment-request event type
+      enum:
+        - payment_request.created
+        - payment_request.paid
+        - payment_request.expired
+        - payment_request.cancelled
+      description: |
+        The four pay-link lifecycle events. All are **opt-in**: delivered only to
+        endpoints that list them explicitly in `events` — an endpoint registered
+        without an `events` list receives none of them. **Hosted pay-links only**
+        (`charge_kind: "checkout"`): direct saved-card charges and internal
+        dunning-recovery links never emit these events. Payload shape:
+        `PaymentRequestEventBase`.
     WebhookEndpoint:
       type: object
       title: Webhook endpoint
@@ -5954,6 +6950,141 @@ components:
           properties:
             type:
               const: order.fulfilled
+
+    # ── Payment-request webhook events ──
+    PaymentRequestEventBase:
+      type: object
+      title: Payment-request event (base)
+      description: |
+        Every delivery is an HTTP POST with this JSON body — the same envelope
+        (`id`/`type`/`created_at`/`data`), headers, signing, and retry policy as the
+        email and order events (see `EmailEventBase`). Like order events, `data` always
+        carries the **full field set** — absent values are explicit `null`s, never
+        omitted keys. The `data` object is a snapshot of the payment request at event
+        time. Money is a JSON number in the request's currency; instants are ISO-8601
+        UTC or `null`. `test_mode: true` marks authorise-only test rows — their `paid`
+        events never represent real money.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it as
+            your dedup key.
+        type:
+          $ref: "#/components/schemas/PaymentRequestEventType"
+        created_at:
+          type: string
+          format: date-time
+          description: When the event occurred.
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - payment_request_id
+            - status
+            - contact_id
+            - deal_id
+            - provider
+            - amount
+            - currency
+            - title
+            - vat_mode
+            - vat_rate
+            - test_mode
+            - pay_url
+            - contact_payment_id
+            - expires_at
+            - paid_at
+            - cancelled_at
+            - created_at
+          properties:
+            payment_request_id:
+              type: string
+              format: uuid
+              description: The payment request's `id`.
+            status:
+              type: string
+              enum: [pending, paid, expired, cancelled]
+              description: Status at event time (`pending` on `payment_request.created`).
+            contact_id:
+              type: [string, "null"]
+              format: uuid
+            deal_id:
+              type: [string, "null"]
+              format: uuid
+            provider:
+              type: string
+              description: '`cardcom` or `sumit`.'
+            amount:
+              type: number
+              description: JSON number in the request's currency.
+            currency:
+              type: string
+            title:
+              type: [string, "null"]
+            vat_mode:
+              type: [string, "null"]
+              enum: [inclusive, exclusive, null]
+            vat_rate:
+              type: [number, "null"]
+            test_mode:
+              type: boolean
+              description: |
+                Always present. `true` = authorise-only test request — never real money.
+            pay_url:
+              type: [string, "null"]
+              description: The same hosted pay-link URL the API/app expose.
+            contact_payment_id:
+              type: [string, "null"]
+              format: uuid
+              description: The settled `/v1/payments` ledger row, linked once paid.
+            expires_at:
+              type: [string, "null"]
+              format: date-time
+              description: ISO 8601 UTC (instants below are ISO 8601 UTC or `null`).
+            paid_at:
+              type: [string, "null"]
+              format: date-time
+            cancelled_at:
+              type: [string, "null"]
+              format: date-time
+            created_at:
+              type: [string, "null"]
+              format: date-time
+    PaymentRequestCreatedEvent:
+      title: payment_request.created event
+      allOf:
+        - $ref: "#/components/schemas/PaymentRequestEventBase"
+        - type: object
+          properties:
+            type:
+              const: payment_request.created
+    PaymentRequestPaidEvent:
+      title: payment_request.paid event
+      allOf:
+        - $ref: "#/components/schemas/PaymentRequestEventBase"
+        - type: object
+          properties:
+            type:
+              const: payment_request.paid
+    PaymentRequestExpiredEvent:
+      title: payment_request.expired event
+      allOf:
+        - $ref: "#/components/schemas/PaymentRequestEventBase"
+        - type: object
+          properties:
+            type:
+              const: payment_request.expired
+    PaymentRequestCancelledEvent:
+      title: payment_request.cancelled event
+      allOf:
+        - $ref: "#/components/schemas/PaymentRequestEventBase"
+        - type: object
+          properties:
+            type:
+              const: payment_request.cancelled
 
     # ── Meeting types & bookings ──
     MeetingType:

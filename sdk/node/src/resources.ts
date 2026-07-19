@@ -11,6 +11,8 @@ import type {
   CampaignExecuteResult,
   CampaignUpdateParams,
   Contact,
+  ContactDocumentsOptions,
+  ContactDocumentsResult,
   ContactGroup,
   ContactGroupCreateParams,
   ContactGroupUpdateParams,
@@ -43,6 +45,10 @@ import type {
   PaymentEntryStatus,
   PaymentListParams,
   PaymentRefundParams,
+  PaymentRequest,
+  PaymentRequestCreateParams,
+  PaymentRequestCreateResult,
+  PaymentRequestListParams,
   PaymentUpdateParams,
   Pipeline,
   SlotsParams,
@@ -146,6 +152,30 @@ export class ContactsApi {
    */
   update(id: string, params: ContactUpsertParams): Promise<Contact> {
     return this.http.request("PATCH", `/v1/contacts/${id}`, { body: params });
+  }
+
+  // ── Documents ──
+
+  /**
+   * List the contact's financial documents (invoices, receipts, credit
+   * documents), aggregated from the stored document pointers on its
+   * payments, payment entries, and payment requests — sorted
+   * date-descending. Requires the Payments plan feature (403
+   * `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise); 404s exactly like
+   * `contacts.get` for an unknown contact.
+   *
+   * Pass `{ live: true }` to additionally query the connected payment
+   * provider and merge its live listing in (bounded ~2.5 s; failures
+   * degrade to the stored listing — check `result.live`). Default is
+   * stored-only. A document's `url` may be null — check before opening.
+   */
+  listDocuments(
+    contactId: string,
+    options: ContactDocumentsOptions = {},
+  ): Promise<ContactDocumentsResult> {
+    return this.http.request("GET", `/v1/contacts/${contactId}/documents`, {
+      query: { live: options.live },
+    });
   }
 
   // ── Notes ──
@@ -535,6 +565,87 @@ export class PaymentsApi {
     return this.http.request("POST", `/v1/payments/${id}/refund`, {
       body: params,
     });
+  }
+}
+
+// ─────────────────────────── Payment requests ───────────────────────────
+
+/**
+ * Hosted pay-by-link requests collected through the workspace's own
+ * connected payment provider (Cardcom / Sumit).
+ *
+ * Requires the Workspace payments feature (`workspace_payments`) on the
+ * workspace's plan — a DIFFERENT feature from the `payments` ledger gate on
+ * `otok.payments` — and every route throws 403
+ * `FEATURE_NOT_INCLUDED_IN_PLAN` without it. Minting additionally requires a
+ * connected provider (400 `NO_PAYMENT_PROVIDER` otherwise).
+ */
+export class PaymentRequestsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * List payment requests, newest first. Pages like deals/payments (default
+   * 25, cap 100; malformed paging 400s). Unlike deals/payments, an unknown
+   * `status` value 400s instead of being silently ignored. Rows include
+   * joined contact identity and a computed `refunded_total`.
+   */
+  list(params: PaymentRequestListParams = {}): Promise<Paginated<PaymentRequest>> {
+    return this.http.request("GET", "/v1/payment-requests", {
+      query: { ...params },
+    });
+  }
+
+  /**
+   * Iterate every matching payment request, auto-paginating GET
+   * /v1/payment-requests (`limit` cap 100 — the deals/payments family).
+   * Accepts the same params as `list`.
+   */
+  iter(
+    params: PaymentRequestListParams = {},
+  ): AsyncGenerator<PaymentRequest, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /** Get a payment request (with its `pay_url`, and `document` once paid). */
+  get(id: string): Promise<PaymentRequest> {
+    return this.http.request("GET", `/v1/payment-requests/${id}`);
+  }
+
+  /**
+   * Mint a hosted-checkout pay-link and return the row with its shareable
+   * `pay_url`.
+   *
+   * **NOT idempotent — there is no idempotency key on this resource.** A
+   * repeat POST mints a second, independently payable link, so the SDK
+   * NEVER auto-retries this call on transient network errors (unlike the
+   * keyed creates): a network failure surfaces for you to handle. If the
+   * outcome is uncertain, check `list()` for the link you may have already
+   * minted before minting again, and `cancel()` extras.
+   *
+   * The payer resolves like payments/deals: `contact_id` wins, else
+   * `phone`/`email` upsert a contact (409 `CONTACT_MERGE_REQUIRED` on
+   * identity conflict), else a `deal_id` alone (the deal's contact pays).
+   */
+  create(params: PaymentRequestCreateParams): Promise<PaymentRequestCreateResult> {
+    return this.http.request("POST", "/v1/payment-requests", { body: params });
+  }
+
+  /**
+   * Cancel a PENDING payment request — the hosted page stops accepting
+   * payment. The cancel is a compare-and-set on the status, so it is safe
+   * to repeat: already paid/expired/cancelled rows throw 409 ("Only pending
+   * payment requests can be cancelled"), and system-created saved-card
+   * charge rows throw 409 `TOKEN_REQUEST_NOT_CANCELLABLE`. A payer already
+   * on the hosted page can still complete after the cancel — such late
+   * completions are recorded and fire `payment_request.paid`.
+   */
+  cancel(id: string): Promise<PaymentRequest> {
+    return this.http.request("POST", `/v1/payment-requests/${id}/cancel`);
   }
 }
 

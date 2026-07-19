@@ -20,6 +20,7 @@ from .resources import (
     EmailsApi,
     MeetingTypesApi,
     OrdersApi,
+    PaymentRequestsApi,
     PaymentsApi,
     PipelinesApi,
     TagsApi,
@@ -86,6 +87,7 @@ class OtokClient:
         self.campaigns = CampaignsApi(self._http)
         self.templates = TemplatesApi(self._http)
         self.payments = PaymentsApi(self._http)
+        self.payment_requests = PaymentRequestsApi(self._http)
         self.orders = OrdersApi(self._http)
         self.meeting_types = MeetingTypesApi(self._http)
         self.bookings = BookingsApi(self._http)

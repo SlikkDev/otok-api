@@ -83,6 +83,14 @@ class TestPaginationIterators:
         list(client.payments.iter())
         assert page_shapes(transport) == [(100, 0)]
 
+    def test_payment_requests_iter_uses_the_deals_payments_cap_and_forwards_filters(self) -> None:
+        client, transport = make_client(120)
+        requests = list(client.payment_requests.iter({"status": "pending"}))
+        assert len(requests) == 120
+        assert page_shapes(transport) == [(100, 0), (100, 100)]
+        for page in transport.pages:
+            assert page["query"]["status"] == ["pending"]
+
     def test_orders_iter_uses_the_deals_payments_cap(self) -> None:
         client, transport = make_client(150)
         orders = list(client.orders.iter({"limit": 250}))
