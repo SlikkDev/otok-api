@@ -259,6 +259,24 @@ class TestNetworkErrorRetries:
             client.request("POST", "/v1/contacts", body={"email": "a@b.co"})
         assert transport.calls == 1
 
+    def test_does_not_retry_a_payment_request_create(self) -> None:
+        # POST /v1/payment-requests has NO idempotency key of any kind — a
+        # replay would mint a second, independently payable link — so the
+        # network error must surface after exactly one attempt (the same
+        # posture as bookings.create, whose idempotency is server-derived).
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"id": "pr-1"})],
+        )
+        client = self._client(transport)
+        with pytest.raises(ConnectionResetError):
+            client.request(
+                "POST",
+                "/v1/payment-requests",
+                body={"contact_id": "c-1", "amount": 250, "title": "Session"},
+            )
+        assert transport.calls == 1
+
     def test_does_not_retry_patch_or_delete(self) -> None:
         transport = _FlakyTransport(
             [ConnectionResetError("reset"), ConnectionResetError("reset")],

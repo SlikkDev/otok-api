@@ -2,7 +2,7 @@
 
 Official Node.js SDK for the [oToK](https://github.com/SlikkDev/otok-api) marketing platform public API (`/v1`).
 
-Gives bespoke websites and e-commerce stores out-of-the-box integration with oToK: contact upserts, sales deals, e-commerce orders, transactional email, WhatsApp templates, campaigns, payments, bookings — plus signed-webhook verification and a high-level e-commerce layer that is safe to retry by design.
+Gives bespoke websites and e-commerce stores out-of-the-box integration with oToK: contact upserts, sales deals, e-commerce orders, transactional email, WhatsApp templates, campaigns, payments, hosted pay-links, bookings — plus signed-webhook verification and a high-level e-commerce layer that is safe to retry by design.
 
 - **Node 18+**, zero runtime dependencies (native `fetch`)
 - Full TypeScript types derived from the real API contract
@@ -59,7 +59,7 @@ for await (const contact of otok.contacts.iter({ filter: { lifecycle_stage: "cus
 }
 ```
 
-Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, and orders, which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
+Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, payment requests, and orders, which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
 
 ```ts
 for await (const deal of otok.deals.iter({ status: "open", limit: 50 })) {
@@ -199,6 +199,8 @@ console.log(endpoint.secret); // whsec_… — shown only now
 
 Order lifecycle events — `order.created`, `order.paid`, `order.refunded`, `order.cancelled`, `order.fulfilled` — ride the same signed deliveries. They are **opt-in by listing** (an endpoint registered without `events` still defaults to the three email delivery events) and fire for **every** order write source (API, in-app, automations), not just API-created orders. `order.refunded` events additionally carry a `refund` block (`amount`, `external_refund_id`, `reason`, `refunded_at`).
 
+Payment-request lifecycle events — `payment_request.created`, `payment_request.paid`, `payment_request.expired`, `payment_request.cancelled` — are opt-in by listing too (`PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES`). They fire for hosted pay-links from every mint source (API and in-app), never for direct saved-card charges or internal dunning-recovery links. Payloads follow the order-event conventions (full field set, explicit `null`s); `data.test_mode` is always present — check it before recording revenue, and treat a late `payment_request.paid` after a cancel as authoritative.
+
 Events are POSTed with an `X-Otok-Signature: t=<unix>,v1=<hex>` header (HMAC-SHA256 of `"{t}.{body}"` with your secret). Failed deliveries retry for ≈16 hours. **Always verify against the raw request body** — parsing and re-stringifying changes the bytes.
 
 #### Express
@@ -283,7 +285,7 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 | Namespace | Endpoints |
 |---|---|
-| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
+| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
 | `otok.tags` | `GET/POST /v1/tags`, `GET/PATCH /v1/tags/:id` |
 | `otok.contactGroups` | `GET/POST /v1/contact-groups`, `GET/PATCH /v1/contact-groups/:id` |
 | `otok.pipelines` | `GET /v1/pipelines` (with ordered stages) |
@@ -292,6 +294,7 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 | `otok.campaigns` | `GET/POST /v1/campaigns`, `GET/PATCH /v1/campaigns/:id`, `POST /v1/campaigns/:id/execute` |
 | `otok.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
 | `otok.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
+| `otok.paymentRequests` | `GET/POST /v1/payment-requests`, `GET /v1/payment-requests/:id`, `POST …/cancel` — hosted pay-links (`workspace_payments` feature; create is **not** idempotent) |
 | `otok.orders` | `GET/POST /v1/orders`, `GET /v1/orders/:id`, `POST …/refunds`, `POST …/mark-paid`, `POST …/cancel` |
 | `otok.meetingTypes` | `GET /v1/meeting-types`, `GET /v1/meeting-types/:id`, `GET /v1/meeting-types/:id/slots` |
 | `otok.bookings` | `GET/POST /v1/bookings`, `GET /v1/bookings/:id`, `POST …/cancel`, `POST …/reschedule`, `POST …/reassign` |
@@ -300,12 +303,12 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier camelCase objects and maps them for you.
 
-Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, campaigns, templates, payments, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
 
 ## Errors, timeouts, retries
 
 - Non-2xx responses throw **`OtokApiError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{ error: { code, message } }` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
-- **403 `FEATURE_NOT_INCLUDED_IN_PLAN`** — deals/pipelines, payments, orders, campaigns, and bookings/meeting-types each require the matching feature on the workspace's plan. When the plan lacks it, **every** route in that group (reads and writes alike) throws this.
+- **403 `FEATURE_NOT_INCLUDED_IN_PLAN`** — deals/pipelines, payments (`otok.payments` + `otok.contacts.listDocuments`), payment requests (`otok.paymentRequests`, gated by the separate `workspace_payments` feature), orders, campaigns, and bookings/meeting-types each require the matching feature on the workspace's plan. When the plan lacks it, **every** route in that group (reads and writes alike) throws this.
 - **409 `CONTACT_MERGE_REQUIRED`** — `otok.contacts.update` that would set a `phone`/`email` belonging to another contact (now or historically) is **not applied**; a merge request is parked for review in oToK instead. Its id is on the body — `(err.body as { merge_request_id?: string }).merge_request_id` — and non-identity fields from the same call are applied when the request is resolved.
 - **409 on duplicate names** — creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) throws `409 Conflict`.
 - **400 on invalid `filter` values** — list-endpoint `filter` values are type-checked against the target field (dates, UUIDs, enums, numbers, booleans); a mistyped value throws a 400 naming the field and expected kind.
@@ -316,7 +319,7 @@ Every namespace with a paginated `list()` (contacts, tags, contact groups, deals
   - a **safe method** (`GET`/`HEAD`), or
   - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`otok.emails.send`), `external_reference` (`otok.deals.create`, `otok.payments.create`, `otok.orders.create`), or `external_refund_id` (`otok.orders.createRefund`).
 
-  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, …) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is thrown for you to handle. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `otok.commerce.trackOrder`) or retry at the call site.
+  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, …) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is thrown for you to handle. In particular, **`otok.paymentRequests.create` is never auto-retried**: the endpoint has no idempotency key at all, and a replay would mint a second, independently payable link — check `otok.paymentRequests.list()` before minting again after a failure. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `otok.commerce.trackOrder`) or retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
 
 ```ts
@@ -350,9 +353,16 @@ npm test
 npm run build
 ```
 
-## Versioning & scope (v0.3)
+## Versioning & scope (v0.4)
 
-Covered: the e-commerce path end to end (contacts + notes, tags/groups, pipelines/deals, orders with refunds, transactional email + webhooks, payments), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+Covered: the e-commerce path end to end (contacts + notes + financial documents, tags/groups, pipelines/deals, orders with refunds, transactional email + webhooks, payments, payment requests), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+
+New in v0.4.0:
+
+- `otok.paymentRequests` — the Payment Requests API (`/v1/payment-requests`): `list`/`iter` (pages of 100, like deals/payments; unknown `status` filters 400), `get`, `create` (mints a hosted pay-link through the workspace's own connected provider — **no idempotency key exists on this resource**, so create is never auto-retried on network errors; a repeat POST mints a second payable link), and `cancel` (CAS on pending; 409 on final rows and `TOKEN_REQUEST_NOT_CANCELLABLE` on saved-card charge rows). Requires the `workspace_payments` plan feature — distinct from the `payments` ledger gate
+- The four `payment_request.*` webhook event types (`payment_request.created`, `payment_request.paid`, `payment_request.expired`, `payment_request.cancelled`) — registrable on webhook endpoints (opt-in by listing; `PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES`) and typed as inbound events for `constructEvent`
+- `otok.contacts.listDocuments(contactId, { live? })` — `GET /v1/contacts/:id/documents`: a contact's invoices/receipts/credit documents aggregated from stored pointers, with an opt-in live provider lookup (requires the Payments feature)
+- Payments: `create`/`update` accept the recurring-plan `vat_mode` + `vat_rate` pair and a `metadata` object (≤2048 bytes serialized; replace-on-write, `null` clears on update); response typings document the full payment/entry field set (dunning state, stored VAT pair, refund/credit-document fields)
 
 New in v0.3.0:
 

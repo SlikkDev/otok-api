@@ -10,6 +10,7 @@ All endpoints require [authentication](getting-started.md#authentication). There
 | GET | `/api/v1/contacts/:id` | Get one contact |
 | POST | `/api/v1/contacts` | **Upsert** a contact by phone/email |
 | PATCH | `/api/v1/contacts/:id` | Update a contact by id |
+| GET | `/api/v1/contacts/:id/documents` | List a contact's financial documents (requires the **Payments** feature) |
 | GET | `/api/v1/contacts/:id/notes` | List a contact's notes |
 | POST | `/api/v1/contacts/:id/notes` | Add a note |
 | PATCH | `/api/v1/notes/:id` | Edit / pin a note |
@@ -234,6 +235,74 @@ Response `200` — the updated contact object.
 | 400 | `error_code: "PHONE_BLACKLISTED"` | Only when the patch *changes* the phone to a blacklisted number |
 | 404 | `"Contact <id> not found"` | Unknown in this workspace |
 | 409 | `error_code: "CONTACT_MERGE_REQUIRED"` | The new phone/email belongs (or previously belonged) to another contact — see above |
+
+---
+
+## GET /api/v1/contacts/:id/documents
+
+Read-only listing of a contact's **financial documents** — invoices, receipts, and credit documents — aggregated from every stored document pointer on the contact's [payments](payments.md), payment entries, and [payment requests](payment-requests.md), deduplicated, merged, and sorted date-descending (nulls last).
+
+> **Plan feature required:** unlike the rest of the contacts routes, this endpoint requires the **Payments** feature on the workspace's plan (the same gate as `/v1/payments*`). Without it, calls return `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups).
+
+| Param | Type | Notes |
+|---|---|---|
+| `id` | UUID (path) | Non-UUID → 400 |
+| `live` | `true` \| `false` (query) | Default `false` (stored pointers only). `true` additionally queries the connected payment provider for a live document listing and merges it in — bounded to ~2.5 s; a timeout or provider failure degrades to the stored listing (reported in `live.error`), and a missing/not-entitled provider degrades to an empty live listing. Any other value → 400 `"Invalid live: must be true or false"` |
+
+```bash
+curl "https://app.otok.io/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c/documents?live=true" \
+  -H "Authorization: Bearer otok_live_abc123..."
+```
+
+Response `200`:
+
+```json
+{
+  "documents": [
+    {
+      "key": "sumit:123456",
+      "kind": "tax_invoice_receipt",
+      "rawType": null,
+      "isCredit": false,
+      "provider": "sumit",
+      "documentId": "123456",
+      "number": "2043",
+      "url": "https://app.sumit.co.il/…/document.pdf",
+      "date": "2026-07-14T10:00:00.000Z",
+      "amount": 350,
+      "currency": "ILS",
+      "origin": "merged",
+      "sources": [
+        { "type": "contact_payment", "id": "7b6a5c4d-…" },
+        { "type": "provider", "provider": "sumit" }
+      ]
+    }
+  ],
+  "live": { "attempted": true, "ok": true, "complete": true, "error": null }
+}
+```
+
+Document fields:
+
+| Field | Meaning |
+|---|---|
+| `key` | Aggregator-computed stable render key — carries no semantics |
+| `kind` | Canonical document kind (`tax_invoice`, `tax_invoice_receipt`, `receipt`, `receipt_for_invoice`, `proforma_invoice`, `donation_receipt`, `credit_invoice`, `credit_invoice_receipt`, `credit_receipt`, `credit_donation_receipt`, `order`, `price_quote`, `delivery_note`, `payment_demand`) — or `null` with the provider's original label in `rawType` |
+| `isCredit` | Credit/refund document |
+| `provider` | `cardcom` / `sumit` / `null` |
+| `documentId` / `number` | Provider durable id; human-facing document number |
+| `url` | **May be `null`** (legacy number-only rows) — always check before opening, and only open http(s) URLs |
+| `date` / `amount` / `currency` | Stored documents carry the host row's instant/amount; live documents carry the provider document's own values |
+| `origin` | `stored`, `live`, or `merged` (found in both) |
+| `sources` | The records the document was aggregated from: `{type: "contact_payment", id}`, `{type: "payment_entry", id, paymentId}`, `{type: "payment_request", id}`, `{type: "provider", provider}` |
+
+The `live` object reports the provider lookup: `attempted` (a live lookup ran), `ok` (`false` = it failed or timed out), `complete` (`false` = the live listing may be missing documents), `error` (`"timeout"`, `"provider_error"`, or `null`). With the default `live=false`, `attempted` is `false` and the listing is stored-only.
+
+| Status | Meaning |
+|---|---|
+| 400 | Non-UUID contact id, or a malformed `live` value |
+| 403 | `FEATURE_NOT_INCLUDED_IN_PLAN` — plan lacks the Payments feature |
+| 404 | `"contacts with ID <id> not found"` — same lookup and wording as `GET /v1/contacts/:id`, so an unknown or cross-workspace contact answers identically instead of an empty-but-plausible list |
 
 ---
 

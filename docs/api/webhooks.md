@@ -1,8 +1,8 @@
 # Webhooks
 
-Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)) and **order events** (lifecycle events for [orders](orders.md)). Events are signed, retried, and deduplicable by event id.
+Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), and **payment-request events** (lifecycle events for [pay-links](payment-requests.md)). Events are signed, retried, and deduplicable by event id.
 
-**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion).
+**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links.
 
 All management endpoints require [authentication](getting-started.md#authentication). Errors use the structured envelope `{"error": {"code", "message"}}`.
 
@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — the engagement events `email.opened`/`email.clicked` **and all `order.*` events** are received only when explicitly listed. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
+| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — the engagement events `email.opened`/`email.clicked`, **all `order.*` events, and all `payment_request.*` events** are received only when explicitly listed. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -105,6 +105,19 @@ Five [order](orders.md) lifecycle events. All are **opt-in**: they are delivered
 | `order.fulfilled` | opt-in | The order was fulfilled. Fulfillment is recorded in-app — there is no `/v1` fulfillment route |
 
 Order events fire for **every** order write source, not just API-created orders. They are never fired for historical import ingestion.
+
+### Payment-request events
+
+Four [payment-request](payment-requests.md) (pay-link) lifecycle events, mirroring the request's status vocabulary. All are **opt-in**: they are delivered only to endpoints that list them explicitly in `events` — an endpoint registered without an `events` list receives none of them.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `payment_request.created` | opt-in | A hosted pay-link was minted — by the API or in the app |
+| `payment_request.paid` | opt-in | The payment was verified with the provider — including a **late completion** of an already-cancelled link (a payer who was on the hosted page can still finish). `data.contact_payment_id` links the settled [payment](payments.md) ledger row. **Test-mode completions fire too** — check `data.test_mode` before recording revenue |
+| `payment_request.expired` | opt-in | A pending link passed `expires_at` unpaid (from the expiry sweep, or lazily when the expired link is opened) |
+| `payment_request.cancelled` | opt-in | The link was withdrawn — `POST /v1/payment-requests/:id/cancel` or an in-app cancel. A later `payment_request.paid` for the same request supersedes this event (late completion) |
+
+**Hosted pay-links only:** direct saved-card charges (`charge_kind: "token"`) and internal dunning-recovery links never emit `payment_request.*` events — the event stream is exactly the payer-facing links.
 
 ## Delivery payload
 
@@ -204,6 +217,53 @@ All five order events carry the same `data` fields (a snapshot of the order at e
 | `data.refund` | **`order.refunded` only** — `{ amount, external_refund_id, reason, refunded_at }` for the refund that fired this event |
 
 Unlike email events, order event `data` always carries the full field set — absent values are explicit `null`s, not omitted keys.
+
+### Payment-request event `data`
+
+```json
+{
+  "id": "c3d4e5f6-0718-2930-4a5b-6c7d8e9f0a1b",
+  "type": "payment_request.paid",
+  "created_at": "2026-07-15T11:20:00.000Z",
+  "data": {
+    "payment_request_id": "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0",
+    "status": "paid",
+    "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+    "deal_id": null,
+    "provider": "sumit",
+    "amount": 250,
+    "currency": "ILS",
+    "title": "Onboarding session",
+    "vat_mode": "inclusive",
+    "vat_rate": 18,
+    "test_mode": false,
+    "pay_url": "https://app.otok.io/pay/pr_k3J9…",
+    "contact_payment_id": "7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d",
+    "expires_at": "2026-07-18T09:00:00.000Z",
+    "paid_at": "2026-07-15T11:20:00.000Z",
+    "cancelled_at": null,
+    "created_at": "2026-07-15T09:00:00.000Z"
+  }
+}
+```
+
+All four payment-request events carry the same `data` fields (a snapshot of the request at event time), following the order-event conventions — the full field set with explicit `null`s:
+
+| Field | Meaning |
+|---|---|
+| `data.payment_request_id` | The payment request's `id` |
+| `data.status` | Status at event time — `pending` on `payment_request.created`; `paid` / `expired` / `cancelled` on the terminal events |
+| `data.contact_id` / `data.deal_id` | The payer contact; the bound deal (or `null`) |
+| `data.provider` | `cardcom` / `sumit` |
+| `data.amount` / `data.currency` | **JSON number** in the request's currency |
+| `data.title` | Payer-facing charge title, or `null` |
+| `data.vat_mode` / `data.vat_rate` | The request's stamped VAT posture, or `null`s on pre-VAT rows |
+| `data.test_mode` | **Always present.** `true` = authorise-only test request — never real money |
+| `data.pay_url` | The same hosted pay-link URL the API/app expose |
+| `data.contact_payment_id` | The settled [payment](payments.md) ledger row — set once paid, else `null` |
+| `data.expires_at` / `data.paid_at` / `data.cancelled_at` / `data.created_at` | ISO 8601 UTC, or `null` |
+
+Provider correlation references and internal row metadata are deliberately excluded from the payload — read `GET /v1/payment-requests/:id` when you need them.
 
 ## Request headers
 

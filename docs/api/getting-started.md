@@ -43,10 +43,13 @@ Endpoint groups that mirror a plan-gated product area additionally require that 
 | Endpoints | Required plan feature |
 |---|---|
 | `/v1/deals*` (all routes) and `/v1/pipelines` | Deals |
-| `/v1/payments*` (all routes, including `/refund`) | Payments |
+| `/v1/payments*` (all routes, including `/refund`) and `GET /v1/contacts/:id/documents` | Payments (`payments`) |
+| `/v1/payment-requests*` (all routes) | Workspace payments (`workspace_payments`) |
 | `/v1/orders*` (all routes, including the action routes) | Orders |
 | `/v1/campaigns*` (all routes, including `/execute`) | Campaigns |
 | `/v1/bookings*` and `/v1/meeting-types*` (all routes) | Booking |
+
+Note the **two distinct payment gates**: `payments` covers the payments ledger (`/v1/payments*`) and the contact documents read, while `workspace_payments` covers pay-links collected through the workspace's own connected payment provider (`/v1/payment-requests*`). A workspace can hold either feature without the other — the 403 message embeds whichever feature id is missing.
 
 A workspace whose plan lacks the feature receives `403 Forbidden` on every call in the group, with this body (note: unlike the standard shape, there is **no `statusCode` field**):
 
@@ -57,9 +60,9 @@ A workspace whose plan lacks the feature receives `403 Forbidden` on every call 
 }
 ```
 
-The identifier after `feature:` is the lowercase plan-feature id — `deals`, `payments`, `orders`, `campaigns`, or `booking` — not the product display name. Key on `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"`, not on the message text.
+The identifier after `feature:` is the lowercase plan-feature id — `deals`, `payments`, `workspace_payments`, `orders`, `campaigns`, or `booking` — not the product display name. Key on `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"`, not on the message text.
 
-All other resources — contacts, notes, tags, contact groups, templates, transactional emails, and webhook endpoints — require only plan-wide API access.
+All other resources — contacts (except the documents sub-route above), notes, tags, contact groups, templates, transactional emails, and webhook endpoints — require only plan-wide API access.
 
 ## Authentication
 
@@ -239,12 +242,12 @@ curl -G "https://app.otok.io/api/v1/contacts" \
 
 ### Where deals and payments differ
 
-`GET /v1/deals` and `GET /v1/payments` use dedicated query parameters instead of `filter`, and paginate differently:
+`GET /v1/deals`, `GET /v1/payments`, and `GET /v1/payment-requests` use dedicated query parameters instead of `filter`, and paginate differently:
 
 - `limit` **default 25, cap 100**; `offset` min 0 (default 0).
 - Absent or empty `limit`/`offset` values default; a **malformed value returns 400** — `"Invalid limit: must be a non-negative integer"` (`Invalid offset: …` for `offset`).
-- UUID query parameters on `GET /v1/deals` (`pipeline_id`, `stage_id`, `contact_id`, `owner_user_id`) are validated — a malformed value returns 400 `"Invalid pipeline_id: must be a UUID"`; an empty value (`?pipeline_id=`) is treated as absent, not an error.
-- Unrecognized enum filter values (e.g. `status=bogus`) are silently ignored rather than returning 400.
+- UUID query parameters on `GET /v1/deals` (`pipeline_id`, `stage_id`, `contact_id`, `owner_user_id`) and `GET /v1/payment-requests` (`contact_id`, `deal_id`) are validated — a malformed value returns 400 `"Invalid pipeline_id: must be a UUID"`; an empty value (`?pipeline_id=`) is treated as absent, not an error.
+- Unrecognized enum filter values (e.g. `status=bogus`) are silently ignored on deals and payments; `GET /v1/payment-requests` instead rejects an unknown `status` with 400.
 
 `GET /v1/orders` belongs to the same family (dedicated query parameters, default 25 / cap 100, no `filter`), with three differences:
 
@@ -261,6 +264,7 @@ See [Deals](deals.md), [Payments](payments.md), and [Orders](orders.md).
 - `POST /v1/campaigns/:id/execute` → **200** on success; failures use real error statuses (404/409 — see [Campaigns](campaigns.md)).
 - `DELETE /v1/webhook-endpoints/:id` → **204** (no body); `DELETE /v1/notes/:id` → **200** with `{"success": true}`. These are the **only** DELETE endpoints: the API never deletes customer data — contacts, deals, payments, orders, campaigns, tags, and contact groups have no DELETE routes.
 - The idempotent create routes (`POST /v1/contacts`, `/v1/deals`, `/v1/payments`, `/v1/orders`, `/v1/bookings`) return **201 for both** a fresh create and an upsert/replay. All of them except orders carry a top-level boolean **`duplicate`** field (`false` on a fresh create, `true` when the call matched an existing record); **`POST /v1/orders` carries no `duplicate` field** — both outcomes return the same full-order body (see [Orders](orders.md#post-apiv1orders)). Order **refunds** (`POST /v1/orders/:id/refunds`) do return `{ duplicate, order }` on their `external_refund_id` idempotency.
+- **`POST /v1/payment-requests` is deliberately NOT idempotent** — there is no idempotency key on the resource, and a repeat POST mints a second, independently payable link (see [Payment Requests](payment-requests.md)).
 - `POST /v1/emails` is the one idempotent route whose status code also splits: **201** for a fresh send, **200** for an idempotent replay (its body carries the same `duplicate` field).
 
 ## CORS and calling context
@@ -279,7 +283,8 @@ Every authenticated `/v1` request that reaches an endpoint is recorded (method, 
 - [Templates](templates.md) — send WhatsApp template messages
 - [Deals & Pipelines](deals.md)
 - [Payments](payments.md)
+- [Payment Requests](payment-requests.md) — hosted pay-links through your own provider
 - [Orders](orders.md) — e-commerce orders, refunds, mark-paid/cancel
 - [Transactional Emails](emails.md)
-- [Webhooks](webhooks.md) — email delivery/engagement events + order lifecycle events
+- [Webhooks](webhooks.md) — email delivery/engagement events + order and payment-request lifecycle events
 - [Bookings & Meeting Types](bookings.md)

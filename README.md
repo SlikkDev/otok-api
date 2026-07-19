@@ -15,9 +15,10 @@ oToK is a multichannel marketing communication platform (WhatsApp, email, web). 
 Quick links:
 
 - [Getting Started](docs/api/getting-started.md) — API keys, authentication, base URL, errors, rate limits
-- [Contacts](docs/api/contacts.md) — upsert contacts, manage notes
+- [Contacts](docs/api/contacts.md) — upsert contacts, manage notes, list financial documents
 - [Campaigns](docs/api/campaigns.md) & [Templates](docs/api/templates.md) — WhatsApp messaging
 - [Deals & Pipelines](docs/api/deals.md) and [Payments](docs/api/payments.md)
+- [Payment Requests](docs/api/payment-requests.md) — hosted pay-links through your own provider
 - [Orders](docs/api/orders.md) — e-commerce orders: line items, refunds, mark-paid/cancel
 - [Transactional Emails](docs/api/emails.md) and [Webhooks](docs/api/webhooks.md)
 - [Bookings & Meeting Types](docs/api/bookings.md)

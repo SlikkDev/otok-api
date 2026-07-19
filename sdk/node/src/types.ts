@@ -454,14 +454,34 @@ export const ORDER_WEBHOOK_EVENT_TYPES = [
 ] as const;
 export type OrderWebhookEventType = (typeof ORDER_WEBHOOK_EVENT_TYPES)[number];
 
+/**
+ * The four payment-request (pay-link) lifecycle events. Opt-in by listing,
+ * like the order events: an endpoint registered without an explicit
+ * `events` list receives none of them. They fire for hosted pay-links from
+ * EVERY mint source (API and in-app) — never for direct saved-card charges
+ * or internal dunning-recovery links.
+ */
+export const PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES = [
+  "payment_request.created",
+  "payment_request.paid",
+  "payment_request.expired",
+  "payment_request.cancelled",
+] as const;
+export type PaymentRequestWebhookEventType =
+  (typeof PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES)[number];
+
 /** Any event type registrable on a webhook endpoint. */
-export type WebhookEventType = EmailWebhookEventType | OrderWebhookEventType;
+export type WebhookEventType =
+  | EmailWebhookEventType
+  | OrderWebhookEventType
+  | PaymentRequestWebhookEventType;
 
 /**
  * POST /v1/webhook-endpoints (max 3 per workspace).
  * `events` defaults to the three delivery events (`email.delivered`,
  * `email.bounced`, `email.complained`); the engagement types
- * (`email.opened`, `email.clicked`) and the `order.*` lifecycle events must
+ * (`email.opened`, `email.clicked`), the `order.*` lifecycle events, and
+ * the `payment_request.*` lifecycle events must
  * be listed explicitly. An empty array is rejected. `email.failed` is
  * deprecated — accepted when listed, never delivered.
  */
@@ -615,6 +635,62 @@ export interface OrderFulfilledEvent {
   data: OrderWebhookEventData;
 }
 
+/**
+ * Payload `data` of every `payment_request.*` event — a snapshot of the
+ * payment request at event time, following the order-event conventions:
+ * money is a JSON number in the request's currency, instants are ISO-8601
+ * UTC or `null`, and the full field set is always present (explicit nulls,
+ * never omitted keys). `test_mode: true` marks authorise-only test rows —
+ * their `paid` events never represent real money. `contact_payment_id`
+ * links the settled /v1/payments ledger row once paid. Provider correlation
+ * refs and row metadata are deliberately excluded — read
+ * GET /v1/payment-requests/:id when you need them.
+ */
+export interface PaymentRequestWebhookEventData {
+  payment_request_id: string;
+  status: PaymentRequestStatus;
+  contact_id: string | null;
+  deal_id: string | null;
+  provider: string;
+  amount: number;
+  currency: string;
+  title: string | null;
+  vat_mode: PaymentVatMode | null;
+  vat_rate: number | null;
+  test_mode: boolean;
+  pay_url: string | null;
+  contact_payment_id: string | null;
+  expires_at: string | null;
+  paid_at: string | null;
+  cancelled_at: string | null;
+  created_at: string | null;
+}
+
+export interface PaymentRequestCreatedEvent {
+  id: string;
+  type: "payment_request.created";
+  created_at: string;
+  data: PaymentRequestWebhookEventData;
+}
+export interface PaymentRequestPaidEvent {
+  id: string;
+  type: "payment_request.paid";
+  created_at: string;
+  data: PaymentRequestWebhookEventData;
+}
+export interface PaymentRequestExpiredEvent {
+  id: string;
+  type: "payment_request.expired";
+  created_at: string;
+  data: PaymentRequestWebhookEventData;
+}
+export interface PaymentRequestCancelledEvent {
+  id: string;
+  type: "payment_request.cancelled";
+  created_at: string;
+  data: PaymentRequestWebhookEventData;
+}
+
 export type OtokWebhookEvent =
   | EmailDeliveredEvent
   | EmailBouncedEvent
@@ -626,7 +702,11 @@ export type OtokWebhookEvent =
   | OrderPaidEvent
   | OrderRefundedEvent
   | OrderCancelledEvent
-  | OrderFulfilledEvent;
+  | OrderFulfilledEvent
+  | PaymentRequestCreatedEvent
+  | PaymentRequestPaidEvent
+  | PaymentRequestExpiredEvent
+  | PaymentRequestCancelledEvent;
 
 // ─────────────────────────── Campaigns ───────────────────────────
 
@@ -723,6 +803,12 @@ export type PaymentType = "one_time" | "recurring" | "installments";
 export type PaymentEntryStatus = "pending" | "completed" | "failed" | "refunded";
 export type PaymentInterval = "weekly" | "monthly" | "quarterly" | "yearly";
 export type PaymentMethod = "cash" | "card" | "bank_transfer" | "other";
+/**
+ * VAT posture of a recurring plan / payment request: "inclusive" (VAT is
+ * included in the amount) or "exclusive" (the amount is net; VAT is added on
+ * top — exclusive + rate 0 = VAT-exempt). Always paired with a `vat_rate`.
+ */
+export type PaymentVatMode = "inclusive" | "exclusive";
 
 /**
  * POST /v1/payments — idempotent upsert via `external_reference` (a repeat
@@ -759,9 +845,24 @@ export interface PaymentCreateParams {
   recurring_end_at?: string;
   /** recurring only: max charge cycles (min 1). */
   recurring_max_occurrences?: number;
+  /**
+   * Recurring only, always together with `vat_rate` (a full pair — a lone
+   * leg 400s, and on other types the pair 400s). Omitted → the attached
+   * product's pair, else the workspace default. On an `external_reference`
+   * match a provided pair re-prices the plan.
+   */
+  vat_mode?: PaymentVatMode;
+  /** Recurring only, with `vat_mode`: VAT percent (0–100, ≤2 decimals). */
+  vat_rate?: number;
   /** installments only: number of installments (min 2). */
   installment_count?: number;
   external_reference?: string;
+  /**
+   * Free-form JSON stored on the payment — max 2048 bytes serialized (400
+   * over the cap). On an `external_reference` match the provided object
+   * REPLACES the stored one (omit to keep it).
+   */
+  metadata?: Record<string, unknown>;
 }
 
 export interface PaymentUpdateParams {
@@ -777,6 +878,20 @@ export interface PaymentUpdateParams {
   auto_generate?: boolean;
   recurring_end_at?: string | null;
   recurring_max_occurrences?: number | null;
+  /**
+   * Recurring only: replace the plan's stored VAT pair — always together
+   * with `vat_rate`. Unlike the other type-restricted fields this is NOT
+   * silently ignored on other types (400), and lone legs / nulls are
+   * rejected. Omit both to keep the stored pair.
+   */
+  vat_mode?: PaymentVatMode;
+  /** Recurring only, with `vat_mode`: VAT percent (0–100, ≤2 decimals). */
+  vat_rate?: number;
+  /**
+   * Replace the payment's metadata object (max 2048 bytes serialized), or
+   * `null` to clear it. Omit to leave it as-is.
+   */
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface PaymentListParams {
@@ -817,6 +932,219 @@ export interface Payment {
  */
 export interface PaymentCreateResult extends Payment {
   duplicate: boolean;
+}
+
+// ─────────────────────────── Payment requests ───────────────────────────
+
+export type PaymentRequestStatus = "pending" | "paid" | "expired" | "cancelled";
+
+/** Currencies accepted by the workspace payment providers. */
+export type PaymentRequestCurrency = "ILS" | "USD" | "EUR" | "GBP";
+
+/** Canonical Israeli tax-document taxonomy (payment requests + contact documents). */
+export type PaymentDocumentKind =
+  | "tax_invoice"
+  | "tax_invoice_receipt"
+  | "receipt"
+  | "receipt_for_invoice"
+  | "proforma_invoice"
+  | "donation_receipt"
+  | "credit_invoice"
+  | "credit_invoice_receipt"
+  | "credit_receipt"
+  | "credit_donation_receipt"
+  | "order"
+  | "price_quote"
+  | "delivery_note"
+  | "payment_demand";
+
+/**
+ * POST /v1/payment-requests — mint a hosted pay-link through the workspace's
+ * own connected payment provider (Cardcom / Sumit).
+ *
+ * The payer resolves like payments/deals: provide `contact_id`, OR
+ * `phone`/`email` (a matching contact is used, or created), OR a `deal_id`
+ * alone (the deal's contact pays).
+ *
+ * **There is NO idempotency key on this resource** — a repeat POST mints a
+ * second, independently payable link (cancel extras via
+ * `paymentRequests.cancel`). Because of that, the SDK never auto-retries
+ * this call on transient network errors.
+ */
+export interface PaymentRequestCreateParams {
+  contact_id?: string;
+  phone?: string;
+  email?: string;
+  /** Used only when a NEW contact is created. */
+  name?: string;
+  /** Deal to bind the request to; alone, the deal's contact is the payer. */
+  deal_id?: string;
+  /** Amount to collect, in major units (≤2 decimals, min 0.01). */
+  amount: number;
+  /** Omitted → the workspace payment currency. */
+  currency?: PaymentRequestCurrency;
+  /** Payer-facing charge title (≤200 chars). */
+  title?: string;
+  /** ≤2000 chars. */
+  note?: string;
+  /** Max card installments offered on the hosted page (1–36). */
+  max_installments?: number;
+  /** Tax-document kind to auto-issue; omitted → the provider/account default. */
+  document_kind?: PaymentDocumentKind;
+  /** Auto-issue an Israeli tax document on successful charge (default true). */
+  auto_issue_document?: boolean;
+  /**
+   * Link expiry (ISO 8601). Clamped server-side to at most 72 hours from
+   * now (1 hour for test-mode requests); omitted → the maximum.
+   */
+  expires_at?: string;
+  /**
+   * Authorise-only test run — 400 when the connected provider has no test
+   * mode. Test requests never record real money.
+   */
+  test_mode?: boolean;
+  /** Pre-expiry reminder emails; omitted → the workspace default. */
+  reminders_enabled?: boolean;
+  /**
+   * Offer the payer a save-my-card checkbox on the pay page — honored only
+   * when the connected provider supports card capture at checkout.
+   */
+  offer_card_save?: boolean;
+  /**
+   * Per-request VAT override — always together with `vat_rate` (a lone leg
+   * 400s). Omitted → the workspace payments default.
+   */
+  vat_mode?: PaymentVatMode;
+  /** With `vat_mode`: VAT percent (0–100, ≤2 decimals). */
+  vat_rate?: number;
+}
+
+/**
+ * GET /v1/payment-requests query params. Pages like deals/payments (default
+ * 25, cap 100; malformed paging 400s). Unlike deals/payments, an unknown
+ * `status` value 400s instead of being silently ignored.
+ */
+export interface PaymentRequestListParams {
+  status?: PaymentRequestStatus;
+  contact_id?: string;
+  deal_id?: string;
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Payment request (pay-link) as returned by the API. Lifecycle:
+ * pending → paid | expired | cancelled. `pay_url` is the shareable hosted
+ * pay-page URL (computed on create/get/list; the cancel response is the bare
+ * row without computed fields; null on system-created `charge_kind: "token"`
+ * saved-card rows, which also can never be cancelled). Once paid,
+ * `contact_payment_id` links the settled /v1/payments ledger row and
+ * `document` (get/list) carries the issued tax-document pointer. List rows
+ * additionally join `contact_name`/`contact_phone`/`contact_email` and a
+ * computed `refunded_total`.
+ */
+export interface PaymentRequest {
+  id: string;
+  workspace_id: string;
+  contact_id: string | null;
+  deal_id: string | null;
+  provider: string;
+  status: PaymentRequestStatus;
+  /** "checkout" = hosted pay-link; "token" = internal saved-card charge row. */
+  charge_kind: string;
+  amount: number;
+  currency: string;
+  title: string | null;
+  note: string | null;
+  test_mode: boolean;
+  vat_mode: PaymentVatMode | null;
+  vat_rate: number | null;
+  public_token: string;
+  expires_at: string | null;
+  paid_at: string | null;
+  cancelled_at: string | null;
+  /** The /v1/payments ledger row a verified payment landed on (once paid). */
+  contact_payment_id: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Computed on create/get/list — absent on the cancel response. */
+  pay_url?: string | null;
+  /** Computed on get/list: `{provider, id, number, type, url}` once paid. */
+  document?: Record<string, unknown> | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Response of POST /v1/payment-requests — the minted row plus checkout
+ * diagnostics. On a provider failure at mint time the row is still created
+ * (`pending`) with `checkout_error` set, and the link still works — the
+ * hosted page lazily re-creates the provider session when opened. The URL to
+ * share is always `pay_url`.
+ */
+export interface PaymentRequestCreateResult extends PaymentRequest {
+  checkout_url: string | null;
+  checkout_error: string | null;
+}
+
+// ─────────────────────────── Contact documents ───────────────────────────
+
+/** GET /v1/contacts/:id/documents options. */
+export interface ContactDocumentsOptions {
+  /**
+   * Default false (stored pointers only). True additionally queries the
+   * connected payment provider for a live document listing and merges it in
+   * (bounded ~2.5 s; failures degrade to the stored listing — see
+   * `live.error` on the result).
+   */
+  live?: boolean;
+}
+
+export type ContactDocumentOrigin = "stored" | "live" | "merged";
+
+/** One record a contact document was aggregated from. */
+export type ContactDocumentSource =
+  | { type: "contact_payment"; id: string }
+  | { type: "payment_entry"; id: string; paymentId: string }
+  | { type: "payment_request"; id: string }
+  | { type: "provider"; provider: string };
+
+/** One aggregated financial document (invoice / receipt / credit document). */
+export interface ContactDocument {
+  /** Aggregator-computed stable render key; carries no semantics. */
+  key: string;
+  /** Canonical kind when resolvable; else null with `rawType` set. */
+  kind: PaymentDocumentKind | null;
+  rawType: string | null;
+  isCredit: boolean;
+  provider: string | null;
+  documentId: string | null;
+  /** Human-facing document number. */
+  number: string | null;
+  /** MAY be null (legacy number-only rows) — check before opening. */
+  url: string | null;
+  /** ISO 8601 UTC. Stored: host-row instant; live: provider document date. */
+  date: string | null;
+  amount: number | null;
+  currency: string | null;
+  origin: ContactDocumentOrigin;
+  sources: ContactDocumentSource[];
+}
+
+/**
+ * Response of GET /v1/contacts/:id/documents. `documents` is sorted
+ * date-descending (nulls last). `live` reports the opt-in provider lookup:
+ * `attempted` (a lookup ran), `ok` (false = it failed/timed out), `complete`
+ * (false = the live listing may be missing documents), and `error`.
+ */
+export interface ContactDocumentsResult {
+  documents: ContactDocument[];
+  live: {
+    attempted: boolean;
+    ok: boolean;
+    complete: boolean;
+    error: "timeout" | "provider_error" | null;
+  };
 }
 
 // ─────────────────────────── Orders ───────────────────────────

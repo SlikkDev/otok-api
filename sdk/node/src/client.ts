@@ -9,6 +9,7 @@ import {
   EmailsApi,
   MeetingTypesApi,
   OrdersApi,
+  PaymentRequestsApi,
   PaymentsApi,
   PipelinesApi,
   TagsApi,
@@ -47,6 +48,7 @@ export class OtokClient {
   readonly campaigns: CampaignsApi;
   readonly templates: TemplatesApi;
   readonly payments: PaymentsApi;
+  readonly paymentRequests: PaymentRequestsApi;
   readonly orders: OrdersApi;
   readonly meetingTypes: MeetingTypesApi;
   readonly bookings: BookingsApi;
@@ -67,6 +69,7 @@ export class OtokClient {
     this.campaigns = new CampaignsApi(this.http);
     this.templates = new TemplatesApi(this.http);
     this.payments = new PaymentsApi(this.http);
+    this.paymentRequests = new PaymentRequestsApi(this.http);
     this.orders = new OrdersApi(this.http);
     this.meetingTypes = new MeetingTypesApi(this.http);
     this.bookings = new BookingsApi(this.http);
