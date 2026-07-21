@@ -1,5 +1,6 @@
 import type { HttpClient, QueryValue } from "./http";
 import type {
+  AudienceEstimate,
   Booking,
   BookingCreateParams,
   BookingCreateResult,
@@ -28,12 +29,27 @@ import type {
   DealMoveStageParams,
   DealSetStatusParams,
   DealUpdateParams,
+  EmailCampaign,
+  EmailCampaignCreateParams,
+  EmailCampaignCreateResult,
+  EmailCampaignListParams,
+  EmailCampaignUpdateParams,
+  EmailCampaignUpdateResult,
   EmailSendParams,
   EmailSendResult,
   ListParams,
   MeetingType,
   MeetingTypeEmbed,
   MessageTemplate,
+  Newsletter,
+  NewsletterCreateParams,
+  NewsletterIssue,
+  NewsletterIssueCreateParams,
+  NewsletterIssueCreateResult,
+  NewsletterIssueListParams,
+  NewsletterIssueUpdateParams,
+  NewsletterIssueUpdateResult,
+  NewsletterListParams,
   Note,
   NoteUpdateParams,
   Order,
@@ -613,6 +629,298 @@ export class CampaignsApi {
    */
   execute(id: string): Promise<CampaignExecuteResult> {
     return this.http.request("POST", `/v1/campaigns/${id}/execute`);
+  }
+}
+
+// ─────────────────────────── Email campaigns ───────────────────────────
+
+/**
+ * Broadcast one-off emails, authored through the shared `content` contract
+ * (markdown | typed blocks | raw design_json) and compiled at write time —
+ * write responses carry a `compile: {ok, errors, warnings}` envelope. A/B
+ * testing is deliberately not exposed on the public API.
+ *
+ * Requires the Email marketing feature (`email_marketing`) on the
+ * workspace's plan — every route throws 403 `FEATURE_NOT_INCLUDED_IN_PLAN`
+ * otherwise.
+ */
+export class EmailCampaignsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * List campaigns, newest first. Rows omit the content columns
+   * (design_json / compiled_html / plain_text) and include the delivery
+   * counters — use `get` for the content. Pages like deals/payments
+   * (default 25, cap 100); an unknown `status` value 400s.
+   */
+  list(params: EmailCampaignListParams = {}): Promise<Paginated<EmailCampaign>> {
+    return this.http.request("GET", "/v1/email-campaigns", {
+      query: { ...params },
+    });
+  }
+
+  /**
+   * Iterate every matching campaign, auto-paginating GET /v1/email-campaigns
+   * (`limit` cap 100 — the deals/payments family). Accepts the same params
+   * as `list`.
+   */
+  iter(
+    params: EmailCampaignListParams = {},
+  ): AsyncGenerator<EmailCampaign, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /** Get a campaign (full — including design_json and the delivery counters). */
+  get(id: string): Promise<EmailCampaign> {
+    return this.http.request("GET", `/v1/email-campaigns/${id}`);
+  }
+
+  /**
+   * Create a draft campaign (idempotent upsert via `external_reference`).
+   * `content` compiles immediately — check `result.compile` for errors and
+   * warnings. The campaign starts as `draft`; launch it with `send` or
+   * `schedule`. A repeat POST with the same reference updates the campaign's
+   * fields while it is still draft/scheduled (`duplicate: true` — never
+   * status or scheduled_at); once the launch claimed it, replays return the
+   * campaign verbatim without a `compile` envelope.
+   */
+  create(params: EmailCampaignCreateParams): Promise<EmailCampaignCreateResult> {
+    return this.http.request("POST", "/v1/email-campaigns", { body: params });
+  }
+
+  /**
+   * Update a draft/scheduled campaign — same field set as create minus
+   * `external_reference`. A content change recompiles (and detaches an
+   * in-app template — the patched content is what sends). Campaigns the
+   * launch already claimed throw 409 `campaign_not_editable`.
+   */
+  update(
+    id: string,
+    params: EmailCampaignUpdateParams,
+  ): Promise<EmailCampaignUpdateResult> {
+    return this.http.request("PATCH", `/v1/email-campaigns/${id}`, {
+      body: params,
+    });
+  }
+
+  /**
+   * Estimate the campaign's audience size — the campaign's STORED targeting
+   * run through the same resolver pipeline the send path uses (email
+   * consent + suppressions baseline, audience, groups, topic opt-outs).
+   */
+  estimate(id: string): Promise<AudienceEstimate> {
+    return this.http.request("GET", `/v1/email-campaigns/${id}/estimate`);
+  }
+
+  /**
+   * Launch the campaign now (draft/scheduled only — otherwise 409
+   * `campaign_not_sendable`). The launch gates (sender readiness, inline
+   * compile, content lint) run synchronously; success (HTTP 200) returns the
+   * campaign with its post-launch status. A gate failure throws 422
+   * `launch_failed` with the gate's message — the campaign's final status
+   * (the gate marks it `failed`) rides the error body as
+   * `error.campaign_status`.
+   */
+  send(id: string): Promise<EmailCampaign> {
+    return this.http.request("POST", `/v1/email-campaigns/${id}/send`);
+  }
+
+  /**
+   * Schedule (or reschedule) a future launch — draft/scheduled only
+   * (otherwise 409 `campaign_not_schedulable`). `scheduledAt` is an ISO 8601
+   * UTC instant in the future (otherwise 400 `invalid_scheduled_at`); the
+   * every-minute sweep launches the campaign when due.
+   */
+  schedule(id: string, scheduledAt: string): Promise<EmailCampaign> {
+    return this.http.request("POST", `/v1/email-campaigns/${id}/schedule`, {
+      body: { scheduled_at: scheduledAt },
+    });
+  }
+
+  /**
+   * Cancel a scheduled launch (back to draft). Conditional on status
+   * "scheduled" — when the send sweep already claimed the campaign the call
+   * throws 409 `already_sending`; any other status throws 409
+   * `campaign_not_scheduled`.
+   */
+  unschedule(id: string): Promise<EmailCampaign> {
+    return this.http.request("POST", `/v1/email-campaigns/${id}/unschedule`);
+  }
+}
+
+// ─────────────────────────── Newsletters ───────────────────────────
+
+/**
+ * Smart newsletters and their sequenced issues. Issue content is authored
+ * through the shared `content` contract (markdown | typed blocks | raw
+ * design_json) and compiles on save; publish assigns the issue number and
+ * wakes caught-up subscribers — the drip engine behaves exactly as an
+ * in-app publish.
+ *
+ * Requires the Newsletters feature (`newsletters`) on the workspace's plan —
+ * every route throws 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
+export class NewslettersApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * List newsletters, newest first, each with its computed
+   * `active_subscriber_count`. Pages like deals/payments (default 25,
+   * cap 100).
+   */
+  list(params: NewsletterListParams = {}): Promise<Paginated<Newsletter>> {
+    return this.http.request("GET", "/v1/newsletters", {
+      query: { ...params },
+    });
+  }
+
+  /**
+   * Iterate every newsletter, auto-paginating GET /v1/newsletters (`limit`
+   * cap 100 — the deals/payments family). Accepts the same params as `list`.
+   */
+  iter(
+    params: NewsletterListParams = {},
+  ): AsyncGenerator<Newsletter, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /**
+   * Create a newsletter — a `name` alone suffices (cadence, enrollment
+   * policy and archive settings take their defaults; configure them in-app).
+   * A duplicate name throws 409 `duplicate_name`; the plan's newsletter cap
+   * throws 403 `PLAN_LIMIT_EXCEEDED`.
+   */
+  create(params: NewsletterCreateParams): Promise<Newsletter> {
+    return this.http.request("POST", "/v1/newsletters", { body: params });
+  }
+
+  /** Get a newsletter (with its active subscriber count). */
+  get(id: string): Promise<Newsletter> {
+    return this.http.request("GET", `/v1/newsletters/${id}`);
+  }
+
+  // ── Issues ──
+
+  /**
+   * List a newsletter's issues, newest first. Rows omit the content columns
+   * (design_json / compiled_html / plain_text) — use `getIssue` for those.
+   * Pages like deals/payments (default 25, cap 100); an unknown `status`
+   * value 400s.
+   */
+  listIssues(
+    newsletterId: string,
+    params: NewsletterIssueListParams = {},
+  ): Promise<Paginated<NewsletterIssue>> {
+    return this.http.request("GET", `/v1/newsletters/${newsletterId}/issues`, {
+      query: { ...params },
+    });
+  }
+
+  /**
+   * Iterate every matching issue, auto-paginating GET
+   * /v1/newsletters/:id/issues (`limit` cap 100 — the deals/payments
+   * family). Accepts the same params as `listIssues`.
+   */
+  iterIssues(
+    newsletterId: string,
+    params: NewsletterIssueListParams = {},
+  ): AsyncGenerator<NewsletterIssue, void, undefined> {
+    return paginate(
+      (limit, offset) => this.listIssues(newsletterId, { ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /**
+   * Create a draft issue (idempotent upsert via `external_reference`).
+   * `content` compiles immediately — check `result.compile`. A repeat POST
+   * with the same reference updates the matched issue's content/fields
+   * (`duplicate: true`) and never touches status, scheduled_at or
+   * issue_number; a reference belonging to an issue of a DIFFERENT
+   * newsletter throws 409 `external_reference_in_use`.
+   */
+  createIssue(
+    newsletterId: string,
+    params: NewsletterIssueCreateParams = {},
+  ): Promise<NewsletterIssueCreateResult> {
+    return this.http.request("POST", `/v1/newsletters/${newsletterId}/issues`, {
+      body: params,
+    });
+  }
+
+  /** Get an issue (full — including design_json, compiled_html and plain_text). */
+  getIssue(issueId: string): Promise<NewsletterIssue> {
+    return this.http.request("GET", `/v1/newsletter-issues/${issueId}`);
+  }
+
+  /**
+   * Update an issue. Published issues stay editable (a content change
+   * recompiles); a scheduled issue's content cannot be cleared — unschedule
+   * first.
+   */
+  updateIssue(
+    issueId: string,
+    params: NewsletterIssueUpdateParams,
+  ): Promise<NewsletterIssueUpdateResult> {
+    return this.http.request("PATCH", `/v1/newsletter-issues/${issueId}`, {
+      body: params,
+    });
+  }
+
+  /**
+   * Delete a draft/scheduled issue. Published issues cannot be deleted (400
+   * `issue_published`) — exclude them from the archive instead. Returns
+   * `{ success: true }`.
+   */
+  deleteIssue(issueId: string): Promise<{ success: boolean }> {
+    return this.http.request("DELETE", `/v1/newsletter-issues/${issueId}`);
+  }
+
+  /**
+   * Publish an issue now — assigns the next issue number and wakes
+   * caught-up subscribers. Idempotent: an already-published issue is
+   * returned as-is. Requires a subject and compiled content (otherwise 409
+   * `issue_missing_content`).
+   */
+  publishIssue(issueId: string): Promise<NewsletterIssue> {
+    return this.http.request("POST", `/v1/newsletter-issues/${issueId}/publish`);
+  }
+
+  /**
+   * Schedule (or reschedule) a future publish. `scheduledAt` is an ISO 8601
+   * UTC instant in the future (otherwise 400 `invalid_scheduled_at`).
+   * Already-published issues throw 409 `issue_already_published`; missing
+   * subject/content throws 409 `issue_missing_content`.
+   */
+  scheduleIssue(issueId: string, scheduledAt: string): Promise<NewsletterIssue> {
+    return this.http.request(
+      "POST",
+      `/v1/newsletter-issues/${issueId}/schedule`,
+      { body: { scheduled_at: scheduledAt } },
+    );
+  }
+
+  /**
+   * Cancel a scheduled publish (back to draft). Issues not currently
+   * scheduled throw 409 `issue_not_scheduled`.
+   */
+  unscheduleIssue(issueId: string): Promise<NewsletterIssue> {
+    return this.http.request(
+      "POST",
+      `/v1/newsletter-issues/${issueId}/unschedule`,
+    );
   }
 }
 
