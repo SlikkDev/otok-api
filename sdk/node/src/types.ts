@@ -1358,6 +1358,88 @@ export interface CampaignExecuteResult {
   [key: string]: unknown;
 }
 
+// ─────────────────────────── Audiences ───────────────────────────
+
+export type AudienceKind = "dynamic" | "static";
+
+/**
+ * A saved workspace audience summary row, as returned by GET /v1/audiences —
+ * the reusable targeting selectors campaigns and email campaigns accept as
+ * `audience_id`. The stored `definition` (the `$where` condition tree behind
+ * a dynamic audience) is deliberately never exposed through the public API.
+ * `last_count` is an advisory size cache stamped when the audience was last
+ * counted or snapshotted in-app — never a live resolution (estimate a
+ * campaign's real reach with `emailCampaigns.estimate`).
+ */
+export interface AudienceSummary {
+  id: string;
+  name: string;
+  /** `dynamic` = re-evaluated live at every use; `static` = frozen membership. */
+  kind: AudienceKind;
+  /** Advisory size cache — may be stale or null (never counted). */
+  last_count: number | null;
+  /** When `last_count` was stamped. */
+  last_counted_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * GET /v1/audiences query params. Pages like deals/payments (default 25,
+ * cap 100). An unknown `kind` value 400s.
+ */
+export interface AudienceListParams {
+  kind?: AudienceKind;
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+// ─────────────────────────── Sender profiles ───────────────────────────
+
+/**
+ * An email from-identity, as returned by GET /v1/sender-profiles — the
+ * selectors email campaigns accept as `sender_profile_id`. `verified` is the
+ * send-readiness signal (`true` exactly when the linked sending domain's
+ * status is `verified` — the same gate in-app sends assert); DKIM/DNS
+ * verification material is never returned. Profiles are managed in-app
+ * (Settings → Email).
+ */
+export interface SenderProfile {
+  id: string;
+  /** Display name recipients see. */
+  from_name: string;
+  /** The composed sending address (`local-part@domain`). */
+  from_email: string;
+  /** Reply-to address, when it differs from `from_email`. */
+  reply_to: string | null;
+  /** Email delivery backend behind this profile. */
+  provider: "smtp" | "ses";
+  /** Whether this is the workspace's default sender profile. */
+  is_default: boolean;
+  sending_domain_id: string;
+  /** The sending domain (the part after `@` in `from_email`). */
+  domain: string;
+  /** The sending domain's verification state. */
+  domain_status: "pending" | "verifying" | "verified" | "failed" | "disabled";
+  /** `true` exactly when `domain_status` is `verified` — this profile can pass the launch gate. */
+  verified: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * GET /v1/sender-profiles query params. Pages like deals/payments (default
+ * 25, cap 100).
+ */
+export interface SenderProfileListParams {
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
 // ─────────────────── Email campaigns & newsletters ───────────────────
 
 export type ContentDirection = "ltr" | "rtl";

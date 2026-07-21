@@ -1,6 +1,8 @@
 import type { HttpClient, QueryValue } from "./http";
 import type {
   AudienceEstimate,
+  AudienceListParams,
+  AudienceSummary,
   Booking,
   BookingCreateParams,
   BookingCreateResult,
@@ -76,6 +78,8 @@ import type {
   ProductListParams,
   ProductUpdateParams,
   ProductUpsertResult,
+  SenderProfile,
+  SenderProfileListParams,
   SetConsentParams,
   SlotsParams,
   Suppression,
@@ -629,6 +633,87 @@ export class CampaignsApi {
    */
   execute(id: string): Promise<CampaignExecuteResult> {
     return this.http.request("POST", `/v1/campaigns/${id}/execute`);
+  }
+}
+
+// ─────────────────────────── Audiences ───────────────────────────
+
+/**
+ * Read-only discovery of the workspace's saved audiences — the reusable
+ * targeting selectors campaigns and email campaigns accept as `audience_id`.
+ * Rows never include the stored `definition` (the `$where` condition tree
+ * behind a dynamic audience); audiences are managed in-app and are not
+ * writable through the public API.
+ */
+export class AudiencesApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * List the workspace's audiences, newest first (default 25, cap 100).
+   * `last_count` is an advisory size cache, never a live resolution — use
+   * `emailCampaigns.estimate` for a campaign's real reach. An unknown `kind`
+   * value 400s.
+   */
+  list(params: AudienceListParams = {}): Promise<Paginated<AudienceSummary>> {
+    return this.http.request("GET", "/v1/audiences", { query: { ...params } });
+  }
+
+  /**
+   * Iterate every matching audience, auto-paginating GET /v1/audiences
+   * (`limit` cap 100 — the deals/payments family). Accepts the same params
+   * as `list`.
+   */
+  iter(
+    params: AudienceListParams = {},
+  ): AsyncGenerator<AudienceSummary, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+}
+
+// ─────────────────────────── Sender profiles ───────────────────────────
+
+/**
+ * Read-only discovery of the workspace's email from-identities — the
+ * selectors email campaigns accept as `sender_profile_id`. Each row carries
+ * the composed `from_email` plus the sending domain's verification status
+ * (`verified: true` = the profile can pass the launch gate); DKIM/DNS
+ * material is never returned. Profiles are managed in-app (Settings →
+ * Email) and are not writable through the public API.
+ *
+ * Requires the Email marketing feature (`email_marketing`) on the
+ * workspace's plan — throws 403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise.
+ */
+export class SenderProfilesApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /** List the workspace's sender profiles, newest first (default 25, cap 100). */
+  list(
+    params: SenderProfileListParams = {},
+  ): Promise<Paginated<SenderProfile>> {
+    return this.http.request("GET", "/v1/sender-profiles", {
+      query: { ...params },
+    });
+  }
+
+  /**
+   * Iterate every sender profile, auto-paginating GET /v1/sender-profiles
+   * (`limit` cap 100 — the deals/payments family). Accepts the same params
+   * as `list`.
+   */
+  iter(
+    params: SenderProfileListParams = {},
+  ): AsyncGenerator<SenderProfile, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
   }
 }
 

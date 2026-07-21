@@ -124,6 +124,26 @@ describe("pagination iterators", () => {
     for (const page of pages) expect(page.query.get("status")).toBe("sent");
   });
 
+  it("audiences.iter and senderProfiles.iter use the deals/payments cap (100)", async () => {
+    const { fetchMock, pages } = pagedFetch(120);
+    const otok = makeClient(fetchMock as any);
+    const audiences = await collect(otok.audiences.iter({ kind: "static" }));
+    expect(audiences).toHaveLength(120);
+    expect(pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+    for (const page of pages) expect(page.query.get("kind")).toBe("static");
+
+    const senders = pagedFetch(101);
+    const otok2 = makeClient(senders.fetchMock as any);
+    expect(await collect(otok2.senderProfiles.iter())).toHaveLength(101);
+    expect(senders.pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+  });
+
   it("newsletters.iter and iterIssues use the deals/payments cap (100)", async () => {
     const { fetchMock, pages } = pagedFetch(101);
     const otok = makeClient(fetchMock as any);

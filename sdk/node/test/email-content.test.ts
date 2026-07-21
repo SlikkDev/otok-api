@@ -690,3 +690,110 @@ describe("newsletters", () => {
     expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
   });
 });
+
+describe("targeting discovery", () => {
+  it("audiences.list serializes kind + paging on the documented route", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe("/api/v1/audiences");
+      expect(Object.fromEntries(parsed.searchParams)).toEqual({
+        kind: "dynamic",
+        limit: "10",
+        offset: "20",
+      });
+      return json(200, {
+        data: [
+          {
+            id: "aud-1",
+            name: "Active leads",
+            kind: "dynamic",
+            last_count: 812,
+            last_counted_at: "2026-07-01T09:00:00Z",
+          },
+        ],
+        total: 1,
+        limit: 10,
+        offset: 20,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const page = await otok.audiences.list({ kind: "dynamic", limit: 10, offset: 20 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Summary columns only — the stored definition is never exposed.
+    expect(page.data[0]!.kind).toBe("dynamic");
+    expect(page.data[0]!.last_count).toBe(812);
+    expect(page.data[0]!.definition).toBeUndefined();
+  });
+
+  it("audiences.list rejects an unknown kind with the API's 400", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(400, {
+        statusCode: 400,
+        message: "Invalid kind: must be one of dynamic, static",
+        error: "Bad Request",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.audiences.list({ kind: "fresh" as any }).catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(400);
+  });
+
+  it("senderProfiles.list hits the documented route and surfaces the verified signal", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe("/api/v1/sender-profiles");
+      expect(Object.fromEntries(parsed.searchParams)).toEqual({});
+      return json(200, {
+        data: [
+          {
+            id: "sp-1",
+            from_name: "Acme",
+            from_email: "news@mail.example.com",
+            reply_to: null,
+            provider: "ses",
+            is_default: true,
+            sending_domain_id: "dom-1",
+            domain: "mail.example.com",
+            domain_status: "verified",
+            verified: true,
+          },
+          {
+            id: "sp-2",
+            from_name: "Acme staging",
+            from_email: "hello@staging.example.com",
+            reply_to: null,
+            provider: "smtp",
+            is_default: false,
+            sending_domain_id: "dom-2",
+            domain: "staging.example.com",
+            domain_status: "pending",
+            verified: false,
+          },
+        ],
+        total: 2,
+        limit: 25,
+        offset: 0,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const page = await otok.senderProfiles.list();
+    expect(page.data.map((p) => p.verified)).toEqual([true, false]);
+    expect(page.data[0]!.from_email).toBe("news@mail.example.com");
+  });
+
+  it("senderProfiles feature-gate 403 embeds the email_marketing feature id", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(403, {
+        message:
+          "Your current plan does not include access to this feature: email_marketing. Please upgrade your plan.",
+        error_code: "FEATURE_NOT_INCLUDED_IN_PLAN",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.senderProfiles.list().catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
+  });
+});
