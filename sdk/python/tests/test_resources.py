@@ -1235,6 +1235,51 @@ class TestBookings:
             "to": ["2026-07-27T00:00:00Z"],
         }
 
+    def test_meeting_type_embed(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "workspace_ref": "acme",
+                    "slug": "intro-call",
+                    "embed_key": "bk_live_abc123",
+                    "page_url": "https://app.otok.io/book/acme/intro-call",
+                    "snippet_html": (
+                        '<div data-otok-booking="intro-call"></div>\n'
+                        '<script async src="https://app.otok.io/embed/booking.js"'
+                        ' data-key="bk_live_abc123"></script>'
+                    ),
+                },
+            )
+        )
+        embed = client.meeting_types.embed("mt-1")
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert transport.request_path() == "/api/v1/meeting-types/mt-1/embed"
+        assert embed["workspace_ref"] == "acme"
+        assert embed["slug"] == "intro-call"
+        assert embed["embed_key"] == "bk_live_abc123"
+        assert embed["page_url"] == "https://app.otok.io/book/acme/intro-call"
+        assert "bk_live_abc123" in embed["snippet_html"]
+
+    def test_embed_surfaces_the_booking_feature_gate_403(self) -> None:
+        client, _ = make_client(
+            json_response(
+                403,
+                {
+                    "message": (
+                        "Your current plan does not include access to this "
+                        "feature: booking. Please upgrade your plan."
+                    ),
+                    "error_code": "FEATURE_NOT_INCLUDED_IN_PLAN",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.meeting_types.embed("mt-1")
+        assert excinfo.value.status == 403
+        assert excinfo.value.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
+
     def test_bookings_surface(self) -> None:
         client, transport = make_client()
         client.bookings.list({"status": "confirmed", "from": "2026-07-01T00:00:00Z"})

@@ -36,6 +36,7 @@ from .types import (
     EmailSendResult,
     ListParams,
     MeetingType,
+    MeetingTypeEmbed,
     MessageTemplate,
     Note,
     Order,
@@ -1031,6 +1032,19 @@ class MeetingTypesApi:
                 f"/v1/meeting-types/{meeting_type_id}/slots",
                 query={"from": params["from"], "to": params["to"]},
             ),
+        )
+
+    def embed(self, meeting_type_id: str) -> MeetingTypeEmbed:
+        """Website-embed material for the meeting type: the hosted booking
+        ``page_url``, the publishable ``embed_key`` (``bk_…`` — NOT the
+        secret API key; rotation, the origin allowlist, and the embed
+        on/off switch live in the app under Settings → Booking), and a
+        ready-to-paste ``snippet_html``. Bookings made through the embed
+        carry ``source: "embed"``.
+        """
+        return cast(
+            MeetingTypeEmbed,
+            self._http.request("GET", f"/v1/meeting-types/{meeting_type_id}/embed"),
         )
 
 

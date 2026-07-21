@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.4.0"
+  version: "1.5.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
@@ -3455,6 +3455,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/meeting-types/{id}/embed:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getMeetingTypeEmbed
+      tags: [Meeting types]
+      summary: Get website-embed material
+      description: |
+        Everything needed to put the booking calendar on your own website: the hosted
+        booking page URL, the workspace's publishable embed key, and a ready-to-paste
+        snippet. `embed_key` (`bk_…`) is safe in page HTML by design and is NOT the
+        secret API key — rotation, the origin allowlist, and the embed on/off switch
+        live in the oToK app under Settings → Booking. Bookings made through the embed
+        carry `source: "embed"`.
+      responses:
+        "200":
+          description: Embed material for the meeting type.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MeetingTypeEmbed"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -9045,6 +9076,31 @@ components:
               end:
                 type: string
                 format: date-time
+    MeetingTypeEmbed:
+      type: object
+      title: Meeting type embed material
+      description: |
+        `embed_key` is the workspace's **publishable** embed key (`bk_…`) — safe to
+        ship in page HTML by design, and NOT the secret API key. Rotation, the origin
+        allowlist, and the embed on/off switch live in the oToK app under
+        Settings → Booking.
+      properties:
+        workspace_ref:
+          type: string
+          description: The workspace's public ref used in hosted booking URLs.
+        slug:
+          type: string
+          description: The meeting type's slug.
+        embed_key:
+          type: string
+          description: Publishable workspace embed key (`bk_…`) — NOT the secret API key.
+        page_url:
+          type: string
+          format: uri
+          description: The hosted booking page URL for this meeting type.
+        snippet_html:
+          type: string
+          description: Ready-to-paste two-line HTML embed snippet.
     Booking:
       type: object
       title: Booking

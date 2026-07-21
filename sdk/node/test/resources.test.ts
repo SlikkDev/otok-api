@@ -311,6 +311,61 @@ describe("duplicate marker on idempotent creates", () => {
   });
 });
 
+describe("meeting type embed", () => {
+  it("embed hits the documented route and passes the payload through typed", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, {
+        workspace_ref: "acme",
+        slug: "intro-call",
+        embed_key: "bk_live_abc123",
+        page_url: "https://app.otok.io/book/acme/intro-call",
+        snippet_html: '<div data-otok-booking="intro-call"></div>\n<script async src="https://app.otok.io/embed/booking.js" data-key="bk_live_abc123"></script>',
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const embed = await otok.meetingTypes.embed("mt-1");
+    const [url, init] = fetchMock.mock.calls[0] as [any, any];
+    expect(String(url)).toBe(
+      "https://example.test/api/v1/meeting-types/mt-1/embed",
+    );
+    expect(init.method).toBe("GET");
+    expect(embed.workspace_ref).toBe("acme");
+    expect(embed.slug).toBe("intro-call");
+    expect(embed.embed_key).toBe("bk_live_abc123");
+    expect(embed.page_url).toBe("https://app.otok.io/book/acme/intro-call");
+    expect(embed.snippet_html).toContain("bk_live_abc123");
+  });
+
+  it("surfaces 403 FEATURE_NOT_INCLUDED_IN_PLAN when the plan lacks booking", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(403, {
+        message:
+          "Your current plan does not include access to this feature: booking. Please upgrade your plan.",
+        error_code: "FEATURE_NOT_INCLUDED_IN_PLAN",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.meetingTypes.embed("mt-1").catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
+  });
+
+  it("throws OtokApiError 404 for an unknown meeting type", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(404, {
+        statusCode: 404,
+        error: "Not Found",
+        message: "Meeting type not found",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.meetingTypes.embed("nope").catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(404);
+  });
+});
+
 describe("products", () => {
   it("list serializes every documented filter", async () => {
     const fetchMock = vi.fn(async () =>
