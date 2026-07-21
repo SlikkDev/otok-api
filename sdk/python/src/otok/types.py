@@ -1305,6 +1305,259 @@ class CampaignUpdateParams(TypedDict, total=False):
 
 Campaign = dict[str, Any]
 
+# ─────────────── Email campaigns & newsletters ───────────────
+
+EmailCampaignStatus = Literal[
+    "draft",
+    "scheduled",
+    "sending",
+    "paused",
+    "sent",
+    "failed",
+    "cancelled",
+]
+
+NewsletterIssueStatus = Literal["draft", "scheduled", "published"]
+
+#: Text direction of authored email content. Default "ltr".
+ContentDirection = Literal["ltr", "rtl"]
+
+
+class _ContentBlockRequired(TypedDict):
+    kind: Literal[
+        "heading",
+        "paragraph",
+        "button",
+        "bullets",
+        "spacer",
+        "image",
+        "divider",
+        "snippet",
+    ]
+
+
+class ContentBlock(_ContentBlockRequired, total=False):
+    """One typed block in ``ContentInput.blocks``. Field use per ``kind``:
+    heading (``text`` + ``level`` 1–3), paragraph (``text``), button
+    (``label`` + ``url``), bullets (``items``), spacer (no fields), image
+    (``url`` — absolute https — + ``alt``), divider (no fields), snippet
+    (``id`` or ``name``). Mistyped fields or an unknown ``kind`` raise a
+    400 ``invalid_content``.
+    """
+
+    #: heading | paragraph text (may embed ``[[variable : fallback]]`` tokens).
+    text: Optional[str]
+    #: heading only — 1–3.
+    level: Optional[int]
+    #: button only.
+    label: Optional[str]
+    #: button | image target (image URLs must be absolute https).
+    url: Optional[str]
+    #: bullets only.
+    items: Optional[list[str]]
+    #: image only.
+    alt: Optional[str]
+    #: snippet only — resolve by snippet id.
+    id: Optional[str]
+    #: snippet only — resolve by case-insensitive exact name.
+    name: Optional[str]
+
+
+class ContentInput(TypedDict, total=False):
+    """The shared authoring contract for email-campaign and newsletter-issue
+    bodies: ``{direction?}`` plus EXACTLY ONE of ``markdown`` | ``blocks`` |
+    ``design_json`` (zero or two-plus sources raise a 400
+    ``invalid_content``). Content compiles immediately at write time — the
+    response's ``compile`` envelope reports the result. Max source size
+    512,000 chars.
+    """
+
+    #: "ltr" (default) or "rtl".
+    direction: ContentDirection
+    #: CommonMark subset (headings 1–3, bold/italic, links, lists, ``---``,
+    #: blockquote, https images) plus the directive lines
+    #: ``::button[Label](https://url)`` / ``::snippet[name-or-uuid]`` and
+    #: ``[[variable : fallback]]`` tokens. Unsupported constructs degrade
+    #: with ``compile.warnings``; raw HTML is stripped to its text.
+    markdown: str
+    #: Typed block array (see :class:`ContentBlock`).
+    blocks: list[ContentBlock]
+    #: A raw Maily document (as the in-app editor submits), passed through
+    #: with a structural sanity check only — snippets resolve by id, not
+    #: name, in this form.
+    design_json: dict[str, Any]
+
+
+class CompileResult(TypedDict):
+    """Write-time compile report on campaign/issue write responses (omitted
+    only on a post-launch verbatim replay of a campaign create).
+    ``ok: False`` means the stored content will not send as-is.
+    """
+
+    ok: bool
+    errors: list[str]
+    warnings: list[str]
+
+
+class AudienceEstimate(TypedDict):
+    """Response of ``GET /v1/email-campaigns/:id/estimate``."""
+
+    estimated_recipients: int
+
+
+class _EmailCampaignCreateRequired(TypedDict):
+    #: Internal campaign name (≤200 chars).
+    name: str
+    #: Subject line (≤400 chars; may embed ``[[variable : fallback]]`` tokens).
+    subject: str
+    #: Sender profile id; must belong to the workspace (400
+    #: ``sender_profile_not_found``). Send-readiness is asserted at launch.
+    sender_profile_id: str
+    content: ContentInput
+
+
+class EmailCampaignCreateParams(_EmailCampaignCreateRequired, total=False):
+    """``POST /v1/email-campaigns`` — create a draft campaign (idempotent
+    upsert via ``external_reference``; 201 both outcomes). With no targeting
+    fields the campaign goes to every send-eligible contact — check
+    ``estimate`` before sending.
+    """
+
+    #: Preview snippet (≤400 chars).
+    preheader: str
+    #: Idempotency key (≤255 chars) — one reference maps to one campaign per
+    #: workspace. A repeat POST updates the campaign while it is still
+    #: draft/scheduled (never status or scheduled_at) and returns it
+    #: verbatim once the launch claimed it; ``duplicate: True`` either way.
+    external_reference: str
+    #: Saved audience id; wins over ``audience_filters``.
+    audience_id: str
+    #: Ad-hoc audience definition — a ``$where`` condition tree (validated
+    #: on write). Ignored when ``audience_id`` is set.
+    audience_filters: dict[str, Any]
+    #: Narrow to members of ANY of these contact groups.
+    contact_group_ids: list[str]
+    #: Preference-center topic key — contacts opted out of the topic are
+    #: excluded from the audience.
+    topic_key: str
+
+
+class EmailCampaignUpdateParams(TypedDict, total=False):
+    """``PATCH /v1/email-campaigns/:id`` — draft/scheduled campaigns only
+    (409 ``campaign_not_editable`` otherwise). Same field set as create
+    minus ``external_reference``; a ``content`` change recompiles (and
+    detaches an in-app template — the patched content is what sends).
+    ``None`` clears the nullable fields.
+    """
+
+    name: str
+    subject: Optional[str]
+    preheader: Optional[str]
+    sender_profile_id: str
+    content: ContentInput
+    audience_id: Optional[str]
+    audience_filters: Optional[dict[str, Any]]
+    contact_group_ids: Optional[list[str]]
+    topic_key: Optional[str]
+
+
+class EmailCampaignListParams(TypedDict, total=False):
+    #: Exact status filter; an unknown value raises a 400.
+    status: EmailCampaignStatus
+    #: Page size (max 100, default 25).
+    limit: int
+    offset: int
+
+
+#: Email-campaign record as returned by the API (open — servers may add
+#: fields). The stored subject/preheader answer under the request field
+#: names ``subject``/``preheader``. Write responses carry a ``compile``
+#: envelope (see :class:`CompileResult`) and POST responses a top-level
+#: ``duplicate: bool``; list rows omit the content columns
+#: (design_json/compiled_html/plain_text) and the in-app-only A/B fields.
+EmailCampaign = dict[str, Any]
+
+
+class _NewsletterCreateRequired(TypedDict):
+    #: ≤120 chars; unique per workspace (409 ``duplicate_name``).
+    name: str
+
+
+class NewsletterCreateParams(_NewsletterCreateRequired, total=False):
+    """``POST /v1/newsletters`` — a name alone suffices; cadence, enrollment
+    policy and archive settings take their defaults (tune them in-app).
+    Enforces the plan's ``max_newsletters`` limit (403
+    ``PLAN_LIMIT_EXCEEDED``).
+    """
+
+    #: ≤2000 chars.
+    description: str
+    #: Omit to fall back to the workspace default sender at send time (400
+    #: ``sender_profile_not_found`` when unknown).
+    sender_profile_id: str
+
+
+class NewsletterListParams(TypedDict, total=False):
+    #: Page size (max 100, default 25).
+    limit: int
+    offset: int
+
+
+#: Newsletter record as returned by the API (open — servers may add
+#: fields); reads include a computed ``active_subscriber_count``. List rows
+#: are a slim column subset.
+Newsletter = dict[str, Any]
+
+
+class NewsletterIssueCreateParams(TypedDict, total=False):
+    """``POST /v1/newsletters/:id/issues`` — create a draft issue
+    (idempotent upsert via ``external_reference``; 201 both outcomes).
+    Everything is optional — an empty draft is fine; publish/schedule
+    require a subject and content (409 ``issue_missing_content``).
+    """
+
+    #: ≤400 chars.
+    subject: str
+    #: ≤400 chars.
+    preheader: str
+    #: Default True.
+    include_in_archive: bool
+    #: Idempotency key (≤255 chars) — one reference maps to one issue per
+    #: workspace. A repeat POST updates that issue's content/fields — never
+    #: its status, scheduled_at or issue_number — with ``duplicate: True``;
+    #: a reference held by an issue of a DIFFERENT newsletter raises a 409
+    #: ``external_reference_in_use``.
+    external_reference: str
+    content: ContentInput
+
+
+class NewsletterIssueUpdateParams(TypedDict, total=False):
+    """``PATCH /v1/newsletter-issues/:id``. Published issues stay editable
+    (a content change recompiles); a scheduled issue's content cannot be
+    cleared — unschedule first. ``None`` clears subject/preheader.
+    """
+
+    subject: Optional[str]
+    preheader: Optional[str]
+    include_in_archive: bool
+    content: ContentInput
+
+
+class NewsletterIssueListParams(TypedDict, total=False):
+    #: Exact status filter; an unknown value raises a 400.
+    status: NewsletterIssueStatus
+    #: Page size (max 100, default 25).
+    limit: int
+    offset: int
+
+
+#: Newsletter-issue record as returned by the API (open — servers may add
+#: fields). ``issue_number`` is null until publish assigns it. Write
+#: responses carry a ``compile`` envelope (see :class:`CompileResult`) and
+#: POST responses a top-level ``duplicate: bool``; list rows omit the
+#: content columns.
+NewsletterIssue = dict[str, Any]
+
 # ─────────────────────────── Templates (WhatsApp) ───────────────────────────
 
 MessageTemplate = dict[str, Any]

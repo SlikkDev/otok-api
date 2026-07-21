@@ -775,6 +775,711 @@ class TestCampaignsAndTemplates:
         assert transport.request_body()["to"] == "+972501234567"
 
 
+class TestEmailCampaigns:
+    def test_list_serializes_the_status_filter_and_paging(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 25, "offset": 0})
+        )
+        client.email_campaigns.list({"status": "draft", "limit": 10, "offset": 5})
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/email-campaigns"
+        assert query_of(request) == {"status": ["draft"], "limit": ["10"], "offset": ["5"]}
+
+    def test_get_reads_the_full_campaign(self) -> None:
+        client, transport = make_client()
+        client.email_campaigns.get("ec-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/email-campaigns/ec-1",
+        )
+
+    def test_create_posts_the_content_contract_and_surfaces_the_compile_envelope(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "ec-1",
+                    "status": "draft",
+                    "subject": "Big news, [[first_name : there]]!",
+                    "preheader": None,
+                    "duplicate": False,
+                    "compile": {"ok": True, "errors": [], "warnings": []},
+                },
+            )
+        )
+        campaign = client.email_campaigns.create(
+            {
+                "name": "July product launch",
+                "subject": "Big news, [[first_name : there]]!",
+                "sender_profile_id": "sp-1",
+                "external_reference": "launch-2026-07",
+                "content": {
+                    "direction": "ltr",
+                    "markdown": "# Hello\n\n::button[Read more](https://example.com)",
+                },
+            }
+        )
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/email-campaigns",
+        )
+        assert transport.request_body()["content"]["markdown"].startswith("# Hello")
+        assert transport.request_body()["external_reference"] == "launch-2026-07"
+        # The campaign row answers under the request field names (subject,
+        # not subject_override) with the write-time compile report attached.
+        assert campaign["subject"] == "Big news, [[first_name : there]]!"
+        assert campaign["compile"]["ok"] is True
+        assert campaign["duplicate"] is False
+
+    def test_create_replay_surfaces_the_duplicate_marker(self) -> None:
+        # 201 either way; a post-launch verbatim replay carries no compile
+        # envelope at all.
+        client, _ = make_client(
+            json_response(
+                201,
+                {"id": "ec-1", "status": "sent", "duplicate": True},
+            )
+        )
+        campaign = client.email_campaigns.create(
+            {
+                "name": "July product launch",
+                "subject": "Big news!",
+                "sender_profile_id": "sp-1",
+                "external_reference": "launch-2026-07",
+                "content": {"markdown": "# Hello"},
+            }
+        )
+        assert campaign["duplicate"] is True
+        assert "compile" not in campaign
+
+    def test_content_contract_violations_raise_coded_400s(self) -> None:
+        client, _ = make_client(
+            json_response(
+                400,
+                {
+                    "error": {
+                        "code": "invalid_content",
+                        "message": (
+                            'content must include exactly one of "markdown", '
+                            '"blocks", or "design_json"'
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.create(
+                {
+                    "name": "Broken",
+                    "subject": "s",
+                    "sender_profile_id": "sp-1",
+                    "content": {},
+                }
+            )
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "invalid_content"
+
+        client, _ = make_client(
+            json_response(
+                400,
+                {
+                    "error": {
+                        "code": "unknown_snippet",
+                        "message": 'Unknown snippet "footer". Available snippets: Header, Legal',
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.create(
+                {
+                    "name": "Broken",
+                    "subject": "s",
+                    "sender_profile_id": "sp-1",
+                    "content": {"markdown": "::snippet[footer]"},
+                }
+            )
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "unknown_snippet"
+
+    def test_update_patches_the_campaign(self) -> None:
+        client, transport = make_client()
+        client.email_campaigns.update(
+            "ec-1", {"subject": "New subject", "topic_key": None}
+        )
+        assert (last_request(transport).method, transport.request_path()) == (
+            "PATCH",
+            "/api/v1/email-campaigns/ec-1",
+        )
+        assert transport.request_body() == {"subject": "New subject", "topic_key": None}
+
+    def test_updating_a_launched_campaign_raises_campaign_not_editable(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "campaign_not_editable",
+                        "message": (
+                            "Campaign status is 'sent' — only draft or scheduled "
+                            "campaigns can be edited"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.update("ec-1", {"name": "Too late"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "campaign_not_editable"
+
+    def test_estimate_returns_estimated_recipients(self) -> None:
+        client, transport = make_client(json_response(200, {"estimated_recipients": 1234}))
+        estimate = client.email_campaigns.estimate("ec-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/email-campaigns/ec-1/estimate",
+        )
+        assert estimate == {"estimated_recipients": 1234}
+
+    def test_send_posts_without_a_body_and_returns_the_campaign(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"id": "ec-1", "status": "sending"})
+        )
+        campaign = client.email_campaigns.send("ec-1")
+        request = last_request(transport)
+        assert (request.method, transport.request_path()) == (
+            "POST",
+            "/api/v1/email-campaigns/ec-1/send",
+        )
+        assert request.body is None
+        assert campaign["status"] == "sending"
+
+    def test_send_gate_failure_raises_the_422_launch_failed(self) -> None:
+        # A launch-gate failure marks the campaign failed; the 422 body
+        # carries the final status under error.campaign_status.
+        client, _ = make_client(
+            json_response(
+                422,
+                {
+                    "error": {
+                        "code": "launch_failed",
+                        "message": "Sender profile domain is not verified",
+                        "campaign_status": "failed",
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.send("ec-1")
+        assert exc_info.value.status == 422
+        assert exc_info.value.code == "launch_failed"
+        assert exc_info.value.body["error"]["campaign_status"] == "failed"
+
+    def test_send_wrong_status_raises_campaign_not_sendable(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "campaign_not_sendable",
+                        "message": (
+                            "Campaign status is 'sending' — only draft or scheduled "
+                            "campaigns can be sent"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.send("ec-1")
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "campaign_not_sendable"
+
+    def test_schedule_posts_the_instant(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"id": "ec-1", "status": "scheduled"})
+        )
+        client.email_campaigns.schedule("ec-1", "2026-08-01T09:00:00Z")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/email-campaigns/ec-1/schedule",
+        )
+        assert transport.request_body() == {"scheduled_at": "2026-08-01T09:00:00Z"}
+
+    def test_schedule_failures_carry_machine_readable_codes(self) -> None:
+        client, _ = make_client(
+            json_response(
+                400,
+                {
+                    "error": {
+                        "code": "invalid_scheduled_at",
+                        "message": "scheduled_at must be a future instant",
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.schedule("ec-1", "2020-01-01T00:00:00Z")
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "invalid_scheduled_at"
+
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "campaign_not_schedulable",
+                        "message": (
+                            "Campaign status is 'sent' — only draft or scheduled "
+                            "campaigns can be scheduled"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.schedule("ec-1", "2026-08-01T09:00:00Z")
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "campaign_not_schedulable"
+
+    def test_unschedule_conflicts_carry_machine_readable_codes(self) -> None:
+        client, transport = make_client(json_response(200, {"id": "ec-1", "status": "draft"}))
+        client.email_campaigns.unschedule("ec-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/email-campaigns/ec-1/unschedule",
+        )
+
+        # The minute sweep CAS-claims scheduled→sending; a lost race is a 409,
+        # not a silent no-op.
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "already_sending",
+                        "message": (
+                            "The send sweep already claimed this campaign — it is sending"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.unschedule("ec-1")
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "already_sending"
+
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "campaign_not_scheduled",
+                        "message": (
+                            "Campaign status is 'draft' — only scheduled campaigns "
+                            "can be unscheduled"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.unschedule("ec-1")
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "campaign_not_scheduled"
+
+    def test_unknown_campaign_raises_campaign_not_found(self) -> None:
+        client, _ = make_client(
+            json_response(
+                404,
+                {"error": {"code": "campaign_not_found", "message": "Email campaign not found"}},
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.get("ec-missing")
+        assert exc_info.value.status == 404
+        assert exc_info.value.code == "campaign_not_found"
+
+    def test_missing_email_marketing_feature_raises_a_coded_403(self) -> None:
+        client, _ = make_client(
+            json_response(
+                403,
+                {
+                    "message": (
+                        "Your current plan does not include access to this feature: "
+                        "email_marketing. Please upgrade your plan."
+                    ),
+                    "error_code": "FEATURE_NOT_INCLUDED_IN_PLAN",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.email_campaigns.list()
+        assert exc_info.value.status == 403
+        assert exc_info.value.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
+
+
+class TestNewsletters:
+    def test_list_serializes_paging(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 25, "offset": 0})
+        )
+        client.newsletters.list({"limit": 10, "offset": 5})
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/newsletters"
+        assert query_of(request) == {"limit": ["10"], "offset": ["5"]}
+
+    def test_get_includes_the_active_subscriber_count(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {"id": "nl-1", "name": "Product updates", "active_subscriber_count": 42},
+            )
+        )
+        newsletter = client.newsletters.get("nl-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/newsletters/nl-1",
+        )
+        assert newsletter["active_subscriber_count"] == 42
+
+    def test_create_posts_the_newsletter(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {"id": "nl-1", "name": "Product updates", "active_subscriber_count": 0},
+            )
+        )
+        client.newsletters.create({"name": "Product updates", "description": "Monthly"})
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/newsletters",
+        )
+        assert transport.request_body() == {
+            "name": "Product updates",
+            "description": "Monthly",
+        }
+
+    def test_create_failures_carry_machine_readable_codes(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "duplicate_name",
+                        "message": "A newsletter with this name already exists",
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.create({"name": "Product updates"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "duplicate_name"
+
+        # The plan's max_newsletters cap answers the framework limit shape.
+        client, _ = make_client(
+            json_response(
+                403,
+                {
+                    "message": (
+                        "Plan limit reached for max_newsletters (3). Please upgrade "
+                        "your plan to continue."
+                    ),
+                    "error_code": "PLAN_LIMIT_EXCEEDED",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.create({"name": "One too many"})
+        assert exc_info.value.status == 403
+        assert exc_info.value.code == "PLAN_LIMIT_EXCEEDED"
+
+        client, _ = make_client(
+            json_response(
+                400,
+                {
+                    "error": {
+                        "code": "sender_profile_not_found",
+                        "message": "Sender profile not found in this workspace",
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.create({"name": "Updates", "sender_profile_id": "sp-x"})
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "sender_profile_not_found"
+
+    def test_list_issues_serializes_the_status_filter_and_paging(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 25, "offset": 0})
+        )
+        client.newsletters.list_issues("nl-1", {"status": "published", "limit": 10})
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/newsletters/nl-1/issues"
+        assert query_of(request) == {"status": ["published"], "limit": ["10"]}
+
+    def test_create_issue_posts_the_content_contract(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "is-1",
+                    "newsletter_id": "nl-1",
+                    "issue_number": None,
+                    "status": "draft",
+                    "duplicate": False,
+                    "compile": {"ok": True, "errors": [], "warnings": []},
+                },
+            )
+        )
+        issue = client.newsletters.create_issue(
+            "nl-1",
+            {
+                "subject": "Issue one",
+                "external_reference": "issue-1",
+                "content": {
+                    "direction": "rtl",
+                    "blocks": [{"kind": "paragraph", "text": "Hi [[first_name : there]]"}],
+                },
+            },
+        )
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/newsletters/nl-1/issues",
+        )
+        assert transport.request_body()["content"]["blocks"][0]["kind"] == "paragraph"
+        assert issue["compile"]["ok"] is True
+        assert issue["duplicate"] is False
+        # The number is assigned at publish, not at create.
+        assert issue["issue_number"] is None
+
+    def test_create_issue_without_params_posts_an_empty_draft(self) -> None:
+        client, transport = make_client(json_response(201, {"id": "is-1", "status": "draft"}))
+        client.newsletters.create_issue("nl-1")
+        assert transport.request_body() == {}
+
+    def test_create_issue_replay_surfaces_the_duplicate_marker(self) -> None:
+        client, _ = make_client(
+            json_response(
+                201,
+                {
+                    "id": "is-1",
+                    "status": "published",
+                    "issue_number": 4,
+                    "duplicate": True,
+                    "compile": {"ok": True, "errors": [], "warnings": []},
+                },
+            )
+        )
+        issue = client.newsletters.create_issue(
+            "nl-1", {"external_reference": "issue-1", "content": {"markdown": "New body"}}
+        )
+        assert issue["duplicate"] is True
+        assert issue["issue_number"] == 4  # replays never touch the number
+
+    def test_cross_newsletter_reference_raises_external_reference_in_use(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "external_reference_in_use",
+                        "message": (
+                            "external_reference already belongs to an issue of a "
+                            "different newsletter"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.create_issue("nl-2", {"external_reference": "issue-1"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "external_reference_in_use"
+
+    def test_issue_reads_and_writes_issue_the_documented_verbs(self) -> None:
+        client, transport = make_client()
+        client.newsletters.get_issue("is-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/newsletter-issues/is-1",
+        )
+        client.newsletters.update_issue("is-1", {"subject": "Edited", "preheader": None})
+        assert (last_request(transport).method, transport.request_path()) == (
+            "PATCH",
+            "/api/v1/newsletter-issues/is-1",
+        )
+        assert transport.request_body() == {"subject": "Edited", "preheader": None}
+        client.newsletters.publish_issue("is-1")
+        request = last_request(transport)
+        assert (request.method, transport.request_path()) == (
+            "POST",
+            "/api/v1/newsletter-issues/is-1/publish",
+        )
+        assert request.body is None
+        client.newsletters.schedule_issue("is-1", "2026-08-01T09:00:00Z")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/newsletter-issues/is-1/schedule",
+        )
+        assert transport.request_body() == {"scheduled_at": "2026-08-01T09:00:00Z"}
+        client.newsletters.unschedule_issue("is-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/newsletter-issues/is-1/unschedule",
+        )
+
+    def test_delete_issue_returns_the_success_body(self) -> None:
+        client, transport = make_client(json_response(200, {"success": True}))
+        result = client.newsletters.delete_issue("is-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "DELETE",
+            "/api/v1/newsletter-issues/is-1",
+        )
+        assert result == {"success": True}
+
+    def test_deleting_a_published_issue_raises_issue_published(self) -> None:
+        client, _ = make_client(
+            json_response(
+                400,
+                {
+                    "error": {
+                        "code": "issue_published",
+                        "message": "Published issues cannot be deleted",
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.delete_issue("is-1")
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "issue_published"
+
+    def test_publish_without_content_raises_issue_missing_content(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "issue_missing_content",
+                        "message": (
+                            "An issue needs a subject and content before it can be "
+                            "published"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.publish_issue("is-1")
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "issue_missing_content"
+
+    def test_schedule_issue_failures_carry_machine_readable_codes(self) -> None:
+        client, _ = make_client(
+            json_response(
+                400,
+                {
+                    "error": {
+                        "code": "invalid_scheduled_at",
+                        "message": "scheduled_at must be a future instant",
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.schedule_issue("is-1", "2020-01-01T00:00:00Z")
+        assert exc_info.value.status == 400
+        assert exc_info.value.code == "invalid_scheduled_at"
+
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "issue_already_published",
+                        "message": (
+                            "Issue is already published — published issues cannot be "
+                            "scheduled"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.schedule_issue("is-1", "2026-08-01T09:00:00Z")
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "issue_already_published"
+
+    def test_unschedule_wrong_state_raises_issue_not_scheduled(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "issue_not_scheduled",
+                        "message": (
+                            "Issue status is 'draft' — only scheduled issues can be "
+                            "unscheduled"
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.unschedule_issue("is-1")
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "issue_not_scheduled"
+
+    def test_unknown_rows_raise_coded_404s(self) -> None:
+        client, _ = make_client(
+            json_response(
+                404,
+                {"error": {"code": "newsletter_not_found", "message": "Newsletter not found"}},
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.get("nl-missing")
+        assert exc_info.value.status == 404
+        assert exc_info.value.code == "newsletter_not_found"
+
+        client, _ = make_client(
+            json_response(
+                404,
+                {"error": {"code": "issue_not_found", "message": "Issue not found"}},
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.get_issue("is-missing")
+        assert exc_info.value.status == 404
+        assert exc_info.value.code == "issue_not_found"
+
+    def test_missing_newsletters_feature_raises_a_coded_403(self) -> None:
+        client, _ = make_client(
+            json_response(
+                403,
+                {
+                    "message": (
+                        "Your current plan does not include access to this feature: "
+                        "newsletters. Please upgrade your plan."
+                    ),
+                    "error_code": "FEATURE_NOT_INCLUDED_IN_PLAN",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.newsletters.list()
+        assert exc_info.value.status == 403
+        assert exc_info.value.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
+
+
 class TestPayments:
     def test_payments_surface(self) -> None:
         client, transport = make_client()

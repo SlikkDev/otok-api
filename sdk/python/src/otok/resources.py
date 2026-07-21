@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional, cast
 
 from ._http import HttpClient, QueryValue
 from .types import (
+    AudienceEstimate,
     Booking,
     BookingCreateParams,
     BookingListParams,
@@ -32,12 +33,23 @@ from .types import (
     DealMoveStageParams,
     DealSetStatusParams,
     DealUpdateParams,
+    EmailCampaign,
+    EmailCampaignCreateParams,
+    EmailCampaignListParams,
+    EmailCampaignUpdateParams,
     EmailSendParams,
     EmailSendResult,
     ListParams,
     MeetingType,
     MeetingTypeEmbed,
     MessageTemplate,
+    Newsletter,
+    NewsletterCreateParams,
+    NewsletterIssue,
+    NewsletterIssueCreateParams,
+    NewsletterIssueListParams,
+    NewsletterIssueUpdateParams,
+    NewsletterListParams,
     Note,
     Order,
     OrderCreateParams,
@@ -672,6 +684,329 @@ class CampaignsApi:
         return cast(
             dict[str, Any],
             self._http.request("POST", f"/v1/campaigns/{campaign_id}/execute"),
+        )
+
+
+# ─────────────────────────── Email campaigns ───────────────────────────
+
+
+class EmailCampaignsApi:
+    """Broadcast email campaigns authored via the shared ``content`` contract
+    (``markdown`` | ``blocks`` | ``design_json`` — see ``ContentInput``).
+
+    Requires the Email marketing feature (``email_marketing``) on the
+    workspace's plan — without it every call raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"``. A/B testing is deliberately not exposed
+    on the public API — create A/B campaigns in-app.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[EmailCampaignListParams] = None) -> Paginated:
+        """List email campaigns, newest first (default 25, cap 100). Rows
+        omit the content columns (design_json / compiled_html / plain_text)
+        and the in-app-only A/B fields but include the delivery counters —
+        use ``get`` for the content. An unknown ``status`` raises a 400.
+        """
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/email-campaigns", query=_params_query(params)),
+        )
+
+    def iter(
+        self, params: Optional[EmailCampaignListParams] = None
+    ) -> Iterator[dict[str, Any]]:
+        """Iterate every matching campaign, auto-paginating ``GET
+        /v1/email-campaigns`` (``limit`` cap 100 — the deals/payments
+        family). Accepts the same params as ``list``.
+        """
+        p: EmailCampaignListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(EmailCampaignListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, campaign_id: str) -> EmailCampaign:
+        """Get a campaign — the full row, including ``design_json`` and the
+        delivery counters.
+        """
+        return cast(
+            EmailCampaign,
+            self._http.request("GET", f"/v1/email-campaigns/{campaign_id}"),
+        )
+
+    def create(self, params: EmailCampaignCreateParams) -> EmailCampaign:
+        """Create a draft campaign (idempotent upsert via
+        ``external_reference`` — 201 both outcomes). ``content`` compiles
+        immediately: the response carries ``compile: {ok, errors, warnings}``
+        plus ``duplicate: True`` on a reference match. While the matched
+        campaign is still draft/scheduled a replay updates its fields (never
+        status or scheduled_at); once the launch claimed it the campaign
+        returns verbatim without a ``compile`` envelope. The campaign does
+        not send until ``send``/``schedule``.
+        """
+        return cast(
+            EmailCampaign,
+            self._http.request("POST", "/v1/email-campaigns", body=params),
+        )
+
+    def update(
+        self, campaign_id: str, params: EmailCampaignUpdateParams
+    ) -> EmailCampaign:
+        """Update a draft/scheduled campaign (409 ``campaign_not_editable``
+        otherwise). A ``content`` change recompiles — and detaches an in-app
+        template, so the patched content is what sends.
+        """
+        return cast(
+            EmailCampaign,
+            self._http.request(
+                "PATCH", f"/v1/email-campaigns/{campaign_id}", body=params
+            ),
+        )
+
+    def estimate(self, campaign_id: str) -> AudienceEstimate:
+        """Audience size for the campaign's STORED targeting — the same
+        resolver pipeline the send path uses (email consent + suppressions
+        baseline, audience, groups, topic opt-outs) →
+        ``{"estimated_recipients": n}``.
+        """
+        return cast(
+            AudienceEstimate,
+            self._http.request("GET", f"/v1/email-campaigns/{campaign_id}/estimate"),
+        )
+
+    def send(self, campaign_id: str) -> EmailCampaign:
+        """Launch the campaign now (draft/scheduled only — 409
+        ``campaign_not_sendable`` otherwise). The launch gates (sender
+        readiness, inline compile, content lint) run synchronously: success
+        returns the campaign with its post-launch status; a gate failure
+        raises a 422 ``launch_failed`` whose body carries the campaign's
+        final status under ``error.campaign_status`` (the gate marks it
+        ``failed``).
+        """
+        return cast(
+            EmailCampaign,
+            self._http.request("POST", f"/v1/email-campaigns/{campaign_id}/send"),
+        )
+
+    def schedule(self, campaign_id: str, scheduled_at: str) -> EmailCampaign:
+        """Schedule (or reschedule) a future launch (draft/scheduled only —
+        409 ``campaign_not_schedulable`` otherwise). ``scheduled_at`` is an
+        ISO 8601 UTC instant in the future (400 ``invalid_scheduled_at``);
+        the every-minute sweep launches the campaign when due.
+        """
+        return cast(
+            EmailCampaign,
+            self._http.request(
+                "POST",
+                f"/v1/email-campaigns/{campaign_id}/schedule",
+                body={"scheduled_at": scheduled_at},
+            ),
+        )
+
+    def unschedule(self, campaign_id: str) -> EmailCampaign:
+        """Cancel a scheduled launch (back to draft). Conditional on status
+        'scheduled': when the send sweep already claimed the campaign the
+        call raises a 409 ``already_sending``; any other status raises a 409
+        ``campaign_not_scheduled``.
+        """
+        return cast(
+            EmailCampaign,
+            self._http.request("POST", f"/v1/email-campaigns/{campaign_id}/unschedule"),
+        )
+
+
+# ─────────────────────────── Newsletters ───────────────────────────
+
+
+class NewslettersApi:
+    """Smart newsletters and their sequenced issues. Issue content is
+    authored via the shared ``content`` contract (``markdown`` | ``blocks`` |
+    ``design_json`` — see ``ContentInput``); publish assigns the issue number
+    and the drip engine behaves exactly as an in-app publish.
+
+    Requires the Newsletters feature (``newsletters``) on the workspace's
+    plan — without it every call raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"``.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[NewsletterListParams] = None) -> Paginated:
+        """List newsletters, newest first (default 25, cap 100). Rows are a
+        slim column subset plus a computed ``active_subscriber_count``.
+        """
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/newsletters", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[NewsletterListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every newsletter, auto-paginating ``GET /v1/newsletters``
+        (``limit`` cap 100 — the deals/payments family). Accepts the same
+        params as ``list``.
+        """
+        p: NewsletterListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(NewsletterListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, newsletter_id: str) -> Newsletter:
+        """Get a newsletter (with its ``active_subscriber_count``)."""
+        return cast(
+            Newsletter,
+            self._http.request("GET", f"/v1/newsletters/{newsletter_id}"),
+        )
+
+    def create(self, params: NewsletterCreateParams) -> Newsletter:
+        """Create a newsletter — a name alone suffices; cadence, enrollment
+        policy and archive settings take their defaults. A duplicate name
+        raises a 409 ``duplicate_name``; the plan's ``max_newsletters`` limit
+        raises a 403 ``PLAN_LIMIT_EXCEEDED``.
+        """
+        return cast(
+            Newsletter,
+            self._http.request("POST", "/v1/newsletters", body=params),
+        )
+
+    # ── Issues ──
+
+    def list_issues(
+        self,
+        newsletter_id: str,
+        params: Optional[NewsletterIssueListParams] = None,
+    ) -> Paginated:
+        """List a newsletter's issues, newest first (default 25, cap 100).
+        Rows omit the content columns (design_json / compiled_html /
+        plain_text) — use ``get_issue`` for those. An unknown ``status``
+        raises a 400.
+        """
+        return cast(
+            Paginated,
+            self._http.request(
+                "GET",
+                f"/v1/newsletters/{newsletter_id}/issues",
+                query=_params_query(params),
+            ),
+        )
+
+    def iter_issues(
+        self,
+        newsletter_id: str,
+        params: Optional[NewsletterIssueListParams] = None,
+    ) -> Iterator[dict[str, Any]]:
+        """Iterate every matching issue, auto-paginating ``GET
+        /v1/newsletters/:id/issues`` (``limit`` cap 100 — the deals/payments
+        family). Accepts the same params as ``list_issues``.
+        """
+        p: NewsletterIssueListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list_issues(
+                newsletter_id,
+                cast(NewsletterIssueListParams, {**p, "limit": limit, "offset": offset}),
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def create_issue(
+        self,
+        newsletter_id: str,
+        params: Optional[NewsletterIssueCreateParams] = None,
+    ) -> NewsletterIssue:
+        """Create a draft issue (idempotent upsert via ``external_reference``
+        — 201 both outcomes). ``content`` compiles immediately: the response
+        carries ``compile: {ok, errors, warnings}`` plus ``duplicate: True``
+        on a reference match — a replay updates the issue's content/fields
+        but never its status, scheduled_at or issue_number. A reference held
+        by an issue of a DIFFERENT newsletter raises a 409
+        ``external_reference_in_use``.
+        """
+        return cast(
+            NewsletterIssue,
+            self._http.request(
+                "POST",
+                f"/v1/newsletters/{newsletter_id}/issues",
+                body=dict(params or {}),
+            ),
+        )
+
+    def get_issue(self, issue_id: str) -> NewsletterIssue:
+        """Get an issue — the full row, including ``design_json``,
+        ``compiled_html`` and ``plain_text``.
+        """
+        return cast(
+            NewsletterIssue,
+            self._http.request("GET", f"/v1/newsletter-issues/{issue_id}"),
+        )
+
+    def update_issue(
+        self, issue_id: str, params: NewsletterIssueUpdateParams
+    ) -> NewsletterIssue:
+        """Update an issue. Published issues stay editable (a content change
+        recompiles); a scheduled issue's content cannot be cleared —
+        unschedule first.
+        """
+        return cast(
+            NewsletterIssue,
+            self._http.request("PATCH", f"/v1/newsletter-issues/{issue_id}", body=params),
+        )
+
+    def delete_issue(self, issue_id: str) -> dict[str, Any]:
+        """Delete a draft/scheduled issue. Returns ``{"success": True}``.
+        Published issues cannot be deleted (400 ``issue_published``) —
+        exclude them from the archive instead.
+        """
+        return cast(
+            dict[str, Any],
+            self._http.request("DELETE", f"/v1/newsletter-issues/{issue_id}"),
+        )
+
+    def publish_issue(self, issue_id: str) -> NewsletterIssue:
+        """Publish an issue now — assigns the next ``issue_number`` and wakes
+        caught-up subscribers. Idempotent: an already-published issue returns
+        as-is. Requires a subject and compiled content (409
+        ``issue_missing_content``).
+        """
+        return cast(
+            NewsletterIssue,
+            self._http.request("POST", f"/v1/newsletter-issues/{issue_id}/publish"),
+        )
+
+    def schedule_issue(self, issue_id: str, scheduled_at: str) -> NewsletterIssue:
+        """Schedule (or reschedule) a future publish. ``scheduled_at`` is an
+        ISO 8601 UTC instant in the future (400 ``invalid_scheduled_at``).
+        Already published raises a 409 ``issue_already_published``; a missing
+        subject/content raises a 409 ``issue_missing_content``.
+        """
+        return cast(
+            NewsletterIssue,
+            self._http.request(
+                "POST",
+                f"/v1/newsletter-issues/{issue_id}/schedule",
+                body={"scheduled_at": scheduled_at},
+            ),
+        )
+
+    def unschedule_issue(self, issue_id: str) -> NewsletterIssue:
+        """Cancel a scheduled publish (back to draft). An issue that is not
+        currently scheduled raises a 409 ``issue_not_scheduled``.
+        """
+        return cast(
+            NewsletterIssue,
+            self._http.request("POST", f"/v1/newsletter-issues/{issue_id}/unschedule"),
         )
 
 
