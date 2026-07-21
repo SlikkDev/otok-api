@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.4.0"
+  version: "1.5.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
