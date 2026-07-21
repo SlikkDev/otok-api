@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // sdk/node uses module/moduleResolution "CommonJS"/"Node" (node10);
+    // node10 resolution cannot see the MCP SDK's exports-map-only subpaths
+    // (@modelcontextprotocol/sdk/server/mcp.js), so this package uses the
+    // Node16 pair instead. Output is still CommonJS (no "type": "module"),
+    // matching the SDK house posture.
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022"],
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

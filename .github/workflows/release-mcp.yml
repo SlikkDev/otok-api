@@ -1,0 +1,87 @@
+name: Release @otok/mcp
+
+on:
+  push:
+    tags:
+      - "mcp-v*"
+  # Manual fallback for environments that cannot push tags directly:
+  # publishes the version currently in mcp/package.json and then pushes
+  # the matching mcp-v<version> tag from the runner.
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm trusted publishing (OIDC) + provenance
+      contents: write # push the release tag on workflow_dispatch runs
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # npm trusted publishing requires Node >= 22.14.0 (and npm >= 11.5.1)
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1 (the runner's bundled npm is older).
+      - run: npm install -g npm@latest
+      - name: Check tag matches package.json version
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#mcp-v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)" >&2
+            exit 1
+          fi
+      # The published package depends on "@otok/node": "^0.6.0" from the
+      # registry — refuse to publish before that range is installable, or
+      # every consumer's install would fail. Publish @otok/node first
+      # (the sdk-node-v* release workflow).
+      - name: Check @otok/node ^0.6.0 is on the registry
+        run: |
+          if ! npm view "@otok/node@^0.6.0" version >/dev/null 2>&1; then
+            echo "@otok/node ^0.6.0 is not on npm yet — release @otok/node first (sdk-node-v* tag)" >&2
+            exit 1
+          fi
+      # Build @otok/node from this checkout and install it via tarball: keeps
+      # the install hermetic to the tagged commit without changing the
+      # published ^0.6.0 dependency range (mcp/ has no lockfile until the
+      # registry serves ^0.6.0 — see mcp/README.md).
+      - name: Build + pack the local @otok/node
+        working-directory: sdk/node
+        run: |
+          npm ci
+          npm run build
+          npm pack --pack-destination ../../mcp/.local
+      - name: Install (tarball satisfies @otok/node ^0.6.0)
+        run: npm install --no-save ./.local/otok-node-*.tgz
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      # Auth: prefers npm trusted publishing (OIDC) — configure the trusted
+      # publisher on npmjs.com (package settings -> Trusted Publisher: GitHub,
+      # repo SlikkDev/otok-api, workflow release-mcp.yml) and no token is
+      # needed. npm cannot configure a trusted publisher for a package that
+      # does not exist yet, so the FIRST publish must use a granular automation
+      # token stored as the NPM_TOKEN repo secret; the env line below is
+      # harmless when the secret is unset (OIDC wins when configured).
+      - name: Check tag does not already exist (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if git ls-remote --exit-code origin "refs/tags/mcp-v${PKG_VERSION}" >/dev/null 2>&1; then
+            echo "Tag mcp-v${PKG_VERSION} already exists" >&2
+            exit 1
+          fi
+      - run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Push release tag (manual dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          git tag "mcp-v${PKG_VERSION}" "${GITHUB_SHA}"
+          git push origin "mcp-v${PKG_VERSION}"
