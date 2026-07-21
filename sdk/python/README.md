@@ -296,12 +296,14 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 | Namespace | Endpoints |
 |---|---|
-| `client.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
+| `client.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
 | `client.tags` | `GET/POST /v1/tags`, `GET/PATCH /v1/tags/:id` |
 | `client.contact_groups` | `GET/POST /v1/contact-groups`, `GET/PATCH /v1/contact-groups/:id` |
 | `client.pipelines` | `GET /v1/pipelines` (with ordered stages) |
 | `client.deals` | `GET/POST /v1/deals`, `GET/PATCH /v1/deals/:id`, `POST /v1/deals/:id/stage`, `POST /v1/deals/:id/status` |
+| `client.products` | `GET/POST /v1/products`, `GET/PATCH /v1/products/:id` — the product catalog shared by deals and payments (POST = idempotent upsert by `external_id`; no delete — deactivate with `is_active: False`) |
 | `client.emails` | `POST /v1/emails` (transactional, idempotent) |
+| `client.suppressions` | `GET/POST /v1/suppressions`, `DELETE /v1/suppressions/:id` — the email suppression list (`email_marketing` feature; add is idempotent, and deliberately independent of consent) |
 | `client.campaigns` | `GET/POST /v1/campaigns`, `GET/PATCH /v1/campaigns/:id`, `POST /v1/campaigns/:id/execute` |
 | `client.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
 | `client.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
@@ -314,12 +316,12 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier flat dicts and maps them for you.
 
-Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
 
 ## Errors, timeouts, retries
 
 - Non-2xx responses raise **`OtokAPIError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{"error": {"code", "message"}}` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
-- **Plan-feature gating (403):** the endpoint groups that mirror plan-gated product areas — deals + pipelines (Deals), payments (`client.payments` + `client.contacts.list_documents`), payment requests (`client.payment_requests`, gated by the separate `workspace_payments` feature), orders (Orders), campaigns (Campaigns), bookings + meeting types (Booking) — answer every call with a `403` with `err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"` when the workspace's plan lacks the feature. Contacts (except the documents sub-route), tags, contact groups, templates, notes, emails, and webhook endpoints are not feature-gated.
+- **Plan-feature gating (403):** the endpoint groups that mirror plan-gated product areas — deals + pipelines (Deals), payments (`client.payments` + `client.contacts.list_documents`), payment requests (`client.payment_requests`, gated by the separate `workspace_payments` feature), orders (Orders), campaigns (Campaigns), bookings + meeting types (Booking), suppressions (`client.suppressions`, gated by `email_marketing`) — answer every call with a `403` with `err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"` when the workspace's plan lacks the feature. Contacts (including consent, except the documents sub-route), tags, contact groups, templates, products, notes, emails, and webhook endpoints are not feature-gated.
 - **Invalid `filter` values (400):** list-endpoint `filter` values are type-checked against the target field — a mistyped date/UUID/enum/number/boolean returns a `400` with a descriptive message (e.g. `Invalid filter value for "created_at": "not-a-date" is not a date`) instead of a server error.
 - **Duplicate names (409):** creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) returns a `409` (`A tag with this name already exists`).
 - **Contact identity conflicts (409):** `PATCH /v1/contacts/:id` now behaves like `POST /v1/contacts` when a `phone`/`email` change collides with an identifier another contact holds (or previously held): the write is **not** applied — a merge request is parked for review in oToK and the `409` raises with `err.code == "CONTACT_MERGE_REQUIRED"`; its `merge_request_id` is on `err.body`. Non-identity fields sent in the same PATCH are held on the merge request and applied when it is resolved.
@@ -367,9 +369,16 @@ ruff check .
 mypy
 ```
 
-## Versioning & scope (v0.4)
+## Versioning & scope (v0.5)
 
-Covered: the e-commerce path end to end (contacts + notes + financial documents, tags/groups, pipelines/deals, orders with refunds, transactional email + webhooks, payments, payment requests), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
+Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
+
+New in v0.5.0:
+
+- `client.contacts.get_consent(contact_id)` / `client.contacts.set_consent(contact_id, channel, params)` — per-channel marketing consent (`whatsapp`/`email`): read the stored decision + provider-owned deliverability (email adds the composed send-time `suppressed` verdict), and record subscribed/unsubscribed decisions with provenance. Subscribing a channel with a spam complaint on record raises a 409 with `err.code == "consent_sticky_complained"`
+- `client.products` — the Products API (`/v1/products`): `list`/`iter` (standard pages of 500), `get`, `create` (idempotent upsert via `external_id` — the response carries `duplicate: True` on a match; 409 `product_conflict` on a `sku`/`external_id` clash), and `update` (no delete — deactivate with `is_active: False`)
+- `client.suppressions` — the Suppressions API (`/v1/suppressions`, requires the `email_marketing` plan feature): `list`/`iter`, `create` (idempotent add — `duplicate: True` when the address was already suppressed), and `delete`. Suppression is deliberately independent of consent: adding never unsubscribes a contact, removing never resubscribes one
+- Fifteen new webhook event types across six opt-in families — contact lifecycle + consent (`contact.created`, `contact.updated`, `contact.deleted`, `contact.consent_changed`), inbound messages (`message.received` — real WhatsApp inbound only; media as metadata, never URLs), deals (`deal.created`, `deal.stage_changed`, `deal.won`, `deal.lost`), bookings (`booking.created`, `booking.rescheduled`, `booking.cancelled`, `booking.reassigned`), event attendance (`event.attendance.changed`), and form submissions (`form.submitted`) — registrable on webhook endpoints (opt-in by listing; `CONTACT_WEBHOOK_EVENT_TYPES`, `MESSAGE_WEBHOOK_EVENT_TYPES`, `DEAL_WEBHOOK_EVENT_TYPES`, `BOOKING_WEBHOOK_EVENT_TYPES`, `EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES`, `FORM_WEBHOOK_EVENT_TYPES`) and typed as inbound events for `construct_event`. The default subscription is unchanged
 
 New in v0.4.0:
 

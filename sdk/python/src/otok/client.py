@@ -23,6 +23,8 @@ from .resources import (
     PaymentRequestsApi,
     PaymentsApi,
     PipelinesApi,
+    ProductsApi,
+    SuppressionsApi,
     TagsApi,
     TemplatesApi,
     WebhookEndpointsApi,
@@ -83,6 +85,8 @@ class OtokClient:
         self.contact_groups = ContactGroupsApi(self._http)
         self.pipelines = PipelinesApi(self._http)
         self.deals = DealsApi(self._http)
+        self.products = ProductsApi(self._http)
+        self.suppressions = SuppressionsApi(self._http)
         self.emails = EmailsApi(self._http)
         self.campaigns = CampaignsApi(self._http)
         self.templates = TemplatesApi(self._http)

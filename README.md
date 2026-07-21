@@ -18,9 +18,11 @@ Quick links:
 - [Contacts](docs/api/contacts.md) — upsert contacts, manage notes, list financial documents
 - [Campaigns](docs/api/campaigns.md) & [Templates](docs/api/templates.md) — WhatsApp messaging
 - [Deals & Pipelines](docs/api/deals.md) and [Payments](docs/api/payments.md)
+- [Products](docs/api/products.md) — the product catalog shared by deals and payments
 - [Payment Requests](docs/api/payment-requests.md) — hosted pay-links through your own provider
 - [Orders](docs/api/orders.md) — e-commerce orders: line items, refunds, mark-paid/cancel
 - [Transactional Emails](docs/api/emails.md) and [Webhooks](docs/api/webhooks.md)
+- [Consent & Suppressions](docs/api/consent-and-suppressions.md) — per-channel consent + the email suppression list
 - [Bookings & Meeting Types](docs/api/bookings.md)
 
 ## At a glance

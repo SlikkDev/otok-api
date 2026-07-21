@@ -2,10 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { OtokClient } from "../src/client";
 import { OtokApiError } from "../src/errors";
 import {
+  BOOKING_WEBHOOK_EVENT_TYPES,
+  CONTACT_WEBHOOK_EVENT_TYPES,
+  DEAL_WEBHOOK_EVENT_TYPES,
   DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES,
   EMAIL_WEBHOOK_EVENT_TYPES,
+  EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES,
+  FORM_WEBHOOK_EVENT_TYPES,
+  MESSAGE_WEBHOOK_EVENT_TYPES,
   ORDER_WEBHOOK_EVENT_TYPES,
   PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+  type WebhookEventType,
 } from "../src/types";
 
 function json(status: number, body: unknown): Response {
@@ -66,6 +73,68 @@ describe("webhook event type constants", () => {
     for (const eventType of PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES) {
       expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
     }
+  });
+
+  it("contact, message, deal, booking, attendance, and form families are registrable but never defaulted", () => {
+    expect(CONTACT_WEBHOOK_EVENT_TYPES).toEqual([
+      "contact.created",
+      "contact.updated",
+      "contact.deleted",
+      "contact.consent_changed",
+    ]);
+    expect(MESSAGE_WEBHOOK_EVENT_TYPES).toEqual(["message.received"]);
+    expect(DEAL_WEBHOOK_EVENT_TYPES).toEqual([
+      "deal.created",
+      "deal.stage_changed",
+      "deal.won",
+      "deal.lost",
+    ]);
+    expect(BOOKING_WEBHOOK_EVENT_TYPES).toEqual([
+      "booking.created",
+      "booking.rescheduled",
+      "booking.cancelled",
+      "booking.reassigned",
+    ]);
+    expect(EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES).toEqual([
+      "event.attendance.changed",
+    ]);
+    expect(FORM_WEBHOOK_EVENT_TYPES).toEqual(["form.submitted"]);
+    // Every new family is opt-in by listing: an endpoint registered without
+    // an explicit `events` list gets only the email delivery defaults.
+    for (const eventType of [
+      ...CONTACT_WEBHOOK_EVENT_TYPES,
+      ...MESSAGE_WEBHOOK_EVENT_TYPES,
+      ...DEAL_WEBHOOK_EVENT_TYPES,
+      ...BOOKING_WEBHOOK_EVENT_TYPES,
+      ...EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES,
+      ...FORM_WEBHOOK_EVENT_TYPES,
+    ]) {
+      expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
+    }
+  });
+
+  it("new-family events are listed verbatim at registration", async () => {
+    const events: WebhookEventType[] = [
+      "contact.created",
+      "message.received",
+      "deal.won",
+      "booking.created",
+      "event.attendance.changed",
+      "form.submitted",
+    ];
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({
+        url: "https://hooks.example.com/otok",
+        events,
+      });
+      return json(201, { id: "we-2", secret: "whsec_y" });
+    });
+    const otok = makeClient(fetchMock as any);
+    await otok.webhookEndpoints.create({
+      url: "https://hooks.example.com/otok",
+      events,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("order events are listed verbatim at registration", async () => {
@@ -239,6 +308,232 @@ describe("duplicate marker on idempotent creates", () => {
       contact_id: "contact-1",
     });
     expect(booking.duplicate).toBe(true);
+  });
+});
+
+describe("products", () => {
+  it("list serializes every documented filter", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { data: [], total: 0, limit: 50, offset: 0 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    await otok.products.list({
+      q: "onboarding",
+      sku: "SKU-1",
+      external_id: "prod-9",
+      is_active: true,
+      limit: 10,
+      offset: 20,
+    });
+    const [url] = fetchMock.mock.calls[0] as [any];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/api/v1/products");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      q: "onboarding",
+      sku: "SKU-1",
+      external_id: "prod-9",
+      is_active: "true",
+      limit: "10",
+      offset: "20",
+    });
+  });
+
+  it("create passes the upsert duplicate flag through (external_id matched)", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        name: "Onboarding package",
+        external_id: "prod-9",
+        price: 249.9,
+      });
+      return json(201, {
+        id: "product-1",
+        name: "Onboarding package",
+        external_id: "prod-9",
+        duplicate: true,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const product = await otok.products.create({
+      name: "Onboarding package",
+      external_id: "prod-9",
+      price: 249.9,
+    });
+    expect(product.duplicate).toBe(true);
+    const [url] = fetchMock.mock.calls[0] as [any];
+    expect(String(url)).toBe("https://example.test/api/v1/products");
+  });
+
+  it("get and update hit the documented routes", async () => {
+    const fetchMock = vi.fn(async () => json(200, { id: "product-1" }));
+    const otok = makeClient(fetchMock as any);
+    await otok.products.get("product-1");
+    await otok.products.update("product-1", { is_active: false });
+    const [getUrl, getInit] = fetchMock.mock.calls[0] as [any, any];
+    expect(String(getUrl)).toBe("https://example.test/api/v1/products/product-1");
+    expect(getInit.method).toBe("GET");
+    const [patchUrl, patchInit] = fetchMock.mock.calls[1] as [any, any];
+    expect(String(patchUrl)).toBe("https://example.test/api/v1/products/product-1");
+    expect(patchInit.method).toBe("PATCH");
+    expect(JSON.parse(patchInit.body)).toEqual({ is_active: false });
+  });
+
+  it("throws OtokApiError 409 product_conflict on a sku/external_id clash", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(409, {
+        error: {
+          code: "product_conflict",
+          message: "A product with this sku or external_id already exists",
+        },
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.products
+      .create({ name: "P", sku: "SKU-1" })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("product_conflict");
+  });
+});
+
+describe("suppressions", () => {
+  it("list serializes the email filter and paging", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { data: [], total: 0, limit: 50, offset: 0 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    await otok.suppressions.list({ email: "jane@example.com", limit: 5 });
+    const [url] = fetchMock.mock.calls[0] as [any];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/api/v1/suppressions");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      email: "jane@example.com",
+      limit: "5",
+    });
+  });
+
+  it("create is an idempotent add — duplicate: true on an existing row", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({
+        email: "jane@example.com",
+        reason: "manual",
+        note: "asked by phone",
+      });
+      return json(201, {
+        id: "sup-1",
+        email: "jane@example.com",
+        reason: "manual",
+        duplicate: true,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const row = await otok.suppressions.create({
+      email: "jane@example.com",
+      reason: "manual",
+      note: "asked by phone",
+    });
+    expect(row.duplicate).toBe(true);
+  });
+
+  it("delete resolves void on 204", async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(null, { status: 204 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    await expect(otok.suppressions.delete("sup-1")).resolves.toBeUndefined();
+    const [url, init] = fetchMock.mock.calls[0] as [any, any];
+    expect(String(url)).toBe("https://example.test/api/v1/suppressions/sup-1");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("surfaces 403 FEATURE_NOT_INCLUDED_IN_PLAN when the plan lacks email_marketing", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(403, {
+        message:
+          "Your current plan does not include access to this feature: email_marketing. Please upgrade your plan.",
+        error_code: "FEATURE_NOT_INCLUDED_IN_PLAN",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.suppressions.list().catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
+  });
+});
+
+describe("contact consent", () => {
+  it("getConsent reads both channels from the documented route", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, {
+        contact_id: "contact-1",
+        block_state: "none",
+        channels: {
+          whatsapp: { consent_state: "unknown", deliverability: "unknown" },
+          email: {
+            consent_state: "subscribed",
+            deliverability: "deliverable",
+            suppressed: false,
+            suppression_reason: null,
+          },
+        },
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const consent = await otok.contacts.getConsent("contact-1");
+    const [url, init] = fetchMock.mock.calls[0] as [any, any];
+    expect(String(url)).toBe(
+      "https://example.test/api/v1/contacts/contact-1/consent",
+    );
+    expect(init.method).toBe("GET");
+    expect(consent.channels.email.suppressed).toBe(false);
+  });
+
+  it("setConsent PUTs the decision to the channel route and returns the channel object", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({
+        state: "subscribed",
+        basis: "express_opt_in",
+        source: "crm-sync",
+      });
+      return json(200, {
+        consent_state: "subscribed",
+        consent_source: "api:crm-sync",
+        deliverability: "deliverable",
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const channel = await otok.contacts.setConsent("contact-1", "email", {
+      state: "subscribed",
+      basis: "express_opt_in",
+      source: "crm-sync",
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [any, any];
+    expect(String(url)).toBe(
+      "https://example.test/api/v1/contacts/contact-1/consent/email",
+    );
+    expect(init.method).toBe("PUT");
+    expect(channel.consent_state).toBe("subscribed");
+  });
+
+  it("throws OtokApiError 409 consent_sticky_complained on a complained channel", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(409, {
+        error: {
+          code: "consent_sticky_complained",
+          message:
+            "This channel has a spam complaint on record; consent cannot be re-subscribed via the API.",
+        },
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.contacts
+      .setConsent("contact-1", "email", { state: "subscribed" })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("consent_sticky_complained");
   });
 });
 

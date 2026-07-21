@@ -17,7 +17,10 @@ from .types import (
     Campaign,
     CampaignCreateParams,
     CampaignUpdateParams,
+    ConsentChannel,
     Contact,
+    ContactConsent,
+    ContactConsentChannel,
     ContactDocumentsResult,
     ContactGroup,
     ContactGroupCreateParams,
@@ -52,7 +55,15 @@ from .types import (
     PaymentRequestListParams,
     PaymentUpdateParams,
     Pipeline,
+    Product,
+    ProductCreateParams,
+    ProductListParams,
+    ProductUpdateParams,
+    SetConsentParams,
     SlotsParams,
+    Suppression,
+    SuppressionCreateParams,
+    SuppressionListParams,
     Tag,
     TagCreateParams,
     TagUpdateParams,
@@ -167,6 +178,46 @@ class ContactsApi:
         return cast(
             Contact,
             self._http.request("PATCH", f"/v1/contacts/{contact_id}", body=params),
+        )
+
+    # ── Consent ──
+
+    def get_consent(self, contact_id: str) -> ContactConsent:
+        """Get the contact's per-channel marketing consent — both channels
+        at once. A channel without a stored decision reads
+        ``consent_state``/``deliverability`` ``"unknown"`` — treat unknown
+        as not sendable. The email channel additionally carries the
+        composed send-time ``suppressed`` verdict (suppression list +
+        blacklist + deliverability), which is independent of the consent
+        decision.
+        """
+        return cast(
+            ContactConsent,
+            self._http.request("GET", f"/v1/contacts/{contact_id}/consent"),
+        )
+
+    def set_consent(
+        self,
+        contact_id: str,
+        channel: ConsentChannel,
+        params: SetConsentParams,
+    ) -> ContactConsentChannel:
+        """Record a subscribed/unsubscribed decision on one channel, with
+        its provenance (evidence trail included) — the same path every
+        in-app consent change takes. ``"unknown"`` is a system state and
+        cannot be set; ``deliverability`` is provider-owned and not
+        writable. Subscribing a channel with a spam complaint on record
+        raises a 409 with ``err.code == "consent_sticky_complained"``.
+        Returns the resulting channel object in the same shape
+        ``get_consent`` uses.
+        """
+        return cast(
+            ContactConsentChannel,
+            self._http.request(
+                "PUT",
+                f"/v1/contacts/{contact_id}/consent/{channel}",
+                body=params,
+            ),
         )
 
     # ── Documents ──
@@ -397,6 +448,128 @@ class DealsApi:
     def set_status(self, deal_id: str, params: DealSetStatusParams) -> Deal:
         """Mark a deal won/lost, or reopen it with status "open"."""
         return cast(Deal, self._http.request("POST", f"/v1/deals/{deal_id}/status", body=params))
+
+
+# ─────────────────────────── Products ───────────────────────────
+
+
+class ProductsApi:
+    """The workspace product catalog shared by deals and customer payments.
+
+    Ungated (plan-wide API access only). There is deliberately no delete —
+    deactivate with ``update(product_id, {"is_active": False})`` so existing
+    deals/payments keep resolving their attached product.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[ProductListParams] = None) -> Paginated:
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/products", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[ProductListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching product, auto-paginating ``GET
+        /v1/products`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: ProductListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ProductListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, product_id: str) -> Product:
+        return cast(Product, self._http.request("GET", f"/v1/products/{product_id}"))
+
+    def create(self, params: ProductCreateParams) -> Product:
+        """Create a product. Idempotent when ``external_id`` is set: a
+        repeat POST with the same value updates that product instead of
+        creating a duplicate — the response then carries
+        ``duplicate: True``. A ``sku``/``external_id`` clash with a
+        DIFFERENT product raises a 409 with
+        ``err.code == "product_conflict"``; ``vat_mode`` + ``vat_rate``
+        travel as one both-or-neither pair (400 when only one leg is sent).
+        """
+        return cast(Product, self._http.request("POST", "/v1/products", body=params))
+
+    def update(self, product_id: str, params: ProductUpdateParams) -> Product:
+        """Partial update — only the fields you send change. Deactivate with
+        ``{"is_active": False}`` (there is no DELETE).
+        """
+        return cast(
+            Product,
+            self._http.request("PATCH", f"/v1/products/{product_id}", body=params),
+        )
+
+
+# ─────────────────────────── Suppressions ───────────────────────────
+
+
+class SuppressionsApi:
+    """The workspace's email suppression list — a send-time overlay
+    deliberately separate from consent: adding a row does NOT change any
+    contact's consent state, and removing one resubscribes no one; every
+    email send checks both.
+
+    Requires the Email marketing feature (``email_marketing``) on the
+    workspace's plan — every route raises a 403 with
+    ``err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"`` otherwise.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[SuppressionListParams] = None) -> Paginated:
+        """List the workspace's suppression rows, newest first.
+        Workspace-scoped rows only — the HQ-managed global list is enforced
+        at send time but is never returned here.
+        """
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/suppressions", query=_params_query(params)),
+        )
+
+    def iter(
+        self, params: Optional[SuppressionListParams] = None
+    ) -> Iterator[dict[str, Any]]:
+        """Iterate every matching suppression, auto-paginating ``GET
+        /v1/suppressions`` (``limit`` cap 500). Accepts the same params as
+        ``list``.
+        """
+        p: SuppressionListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(SuppressionListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def create(self, params: SuppressionCreateParams) -> Suppression:
+        """Suppress an email address (idempotent): re-adding an
+        already-suppressed address returns the existing row with
+        ``duplicate: True`` — 201 either way. Adding a suppression does NOT
+        change the contact's consent state.
+        """
+        return cast(
+            Suppression,
+            self._http.request("POST", "/v1/suppressions", body=params),
+        )
+
+    def delete(self, suppression_id: str) -> None:
+        """Remove a suppression (204). Lifts this workspace's suppression
+        only — it does NOT resubscribe anyone, and HQ-managed global rows
+        cannot be removed (404 ``suppression_not_found``).
+        """
+        self._http.request("DELETE", f"/v1/suppressions/{suppression_id}")
 
 
 # ─────────────────────────── Transactional email ───────────────────────────

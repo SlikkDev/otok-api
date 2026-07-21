@@ -1,12 +1,13 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.3.0"
+  version: "1.4.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
-    The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts, tags and
-    groups, WhatsApp campaigns and templates, deals and pipelines, payments, payment
-    requests (pay-links), orders, transactional email, outbound webhooks, and bookings.
+    The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
+    per-channel marketing consent), tags and groups, WhatsApp campaigns and templates, deals
+    and pipelines, the product catalog, payments, payment requests (pay-links), orders,
+    transactional email, email suppressions, outbound webhooks, and bookings.
 
     ## Authentication
 
@@ -30,14 +31,16 @@ info:
     (the payments ledger), while `/v1/payment-requests*` requires **`workspace_payments`**
     (collecting money through the workspace's own connected payment provider) — a workspace
     can hold either feature without the other, and the 403 message embeds whichever feature
-    id is missing. Contacts, notes, tags, contact groups, templates,
-    emails, and webhook endpoints require only plan-wide API access.
+    id is missing. The suppression list (`/v1/suppressions*`) requires the
+    **`email_marketing`** feature. Contacts (including consent), notes, tags, contact groups,
+    templates, products, emails, and webhook endpoints require only plan-wide API access.
 
     ## Error shapes
 
     The API uses **two error body shapes**:
 
-    1. **Domain errors** (email and webhook-endpoint APIs, and `POST /v1/campaigns/{id}/execute`
+    1. **Domain errors** (email, webhook-endpoint, consent, suppression, and product APIs, and
+       `POST /v1/campaigns/{id}/execute`
        failures) use a structured envelope: `{"error": {"code", "message"}}` — key on `error.code`.
     2. **Framework errors** (validation, auth, rate limiting, most resource errors) use
        `{"statusCode", "message", "error"}`, where `message` is a string or an array of
@@ -50,9 +53,12 @@ info:
 
     ## Deletion
 
-    The API never deletes customer data — contacts, deals, payments, orders, campaigns,
-    tags, and contact groups have no DELETE routes. The only DELETE endpoints are for resources the API
-    owns: `DELETE /v1/notes/{id}` and `DELETE /v1/webhook-endpoints/{id}`.
+    The API never deletes customer data — contacts, deals, products, payments, orders,
+    campaigns, tags, and contact groups have no DELETE routes (deactivate a product with
+    `is_active: false` instead). The only DELETE endpoints are for resources the API
+    owns: `DELETE /v1/notes/{id}`, `DELETE /v1/webhook-endpoints/{id}`, and
+    `DELETE /v1/suppressions/{id}` (which lifts a send-time block — it deletes no
+    contact data and resubscribes no one).
 
     ## Rate limits
 
@@ -81,7 +87,9 @@ info:
     ## Idempotency
 
     - Contacts upsert by `phone`/`email`.
-    - Deals, payments, and orders upsert by `external_reference`.
+    - Deals, payments, and orders upsert by `external_reference`; products upsert by
+      `external_id`.
+    - Suppression adds are idempotent per address (re-adding answers `duplicate: true`).
     - Order refunds are idempotent per `external_refund_id` — only when you supply one.
     - Emails require an explicit `idempotency_key`.
     - Booking creation is idempotent per slot + meeting type + contact (server-derived, no key).
@@ -96,6 +104,31 @@ info:
     `GET /v1/orders?external_reference=...`); the order **refund** endpoint does return
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
     `POST /v1/emails`, which answers 201 fresh / 200 replay.
+
+    ## Changes in 1.4.0
+
+    - New **consent** endpoints on contacts: `GET /v1/contacts/{id}/consent` reads both
+      channels' stored consent decision + provider-owned deliverability (email adds the
+      composed send-time `suppressed` verdict), and `PUT /v1/contacts/{id}/consent/{channel}`
+      records a subscribed/unsubscribed decision with its provenance (evidence trail
+      included; a channel with a spam complaint on record answers 409
+      `consent_sticky_complained`).
+    - New **Suppressions** resource group (`/v1/suppressions*`) — list, idempotently add,
+      and remove workspace email-suppression rows. Requires the `email_marketing` plan
+      feature. Suppression and consent deliberately compose at send time: adding a
+      suppression does not change consent, and removing one resubscribes no one.
+    - New **Products** resource group (`/v1/products*`) — the workspace product catalog
+      shared by deals and payments: list/get/create/update with an **idempotent POST
+      upsert via `external_id`** and no DELETE (deactivate with `is_active: false`).
+    - **Fifteen new webhook event types** across six opt-in families, riding the existing
+      endpoint registry, signing, and retry policy: contact lifecycle + consent
+      (`contact.created`, `contact.updated`, `contact.deleted`, `contact.consent_changed`),
+      inbound messages (`message.received`), deal lifecycle (`deal.created`,
+      `deal.stage_changed`, `deal.won`, `deal.lost`), booking lifecycle (`booking.created`,
+      `booking.rescheduled`, `booking.cancelled`, `booking.reassigned`), event attendance
+      (`event.attendance.changed`), and form submissions (`form.submitted`). All are
+      opt-in by listing — the default subscription is unchanged, and a pre-existing
+      endpoint never starts receiving a new family unasked.
 
     ## Changes in 1.3.0
 
@@ -155,6 +188,8 @@ tags:
     description: Read pipelines and their stages.
   - name: Deals
     description: Deal CRUD-minus-delete, stage moves, win/lose, idempotent upsert via `external_reference`.
+  - name: Products
+    description: "The workspace product catalog shared by deals and payments — list, get, create (idempotent upsert via `external_id`), update. No DELETE; deactivate with `is_active: false`."
   - name: Payments
     description: One-time / recurring / installment payments, entries, refunds.
   - name: Payment requests
@@ -165,8 +200,10 @@ tags:
     description: E-commerce-grade orders on contacts — idempotent create via `external_reference`, refund ledger, mark-paid, cancel. No update or delete routes.
   - name: Emails
     description: "`POST /v1/emails` — idempotent raw transactional sends with opt-in tracking."
+  - name: Suppressions
+    description: The workspace's email suppression list — a send-time overlay deliberately separate from consent. List, idempotent add, remove. Requires the `email_marketing` feature.
   - name: Webhook endpoints
-    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, `order.*` lifecycle events from every order source, and `payment_request.*` pay-link lifecycle events.
+    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, plus the opt-in `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` families.
   - name: Meeting types
     description: Read meeting types and query open slots.
   - name: Bookings
@@ -354,6 +391,109 @@ paths:
                 error_code: CONTACT_MERGE_REQUIRED
                 merge_request_id: 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
                 message: "This change would give the contact a phone or email that already belongs to another contact. A merge request was opened — resolve it (merge or dismiss) to apply the change."
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/contacts/{id}/consent:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getContactConsent
+      tags: [Contacts]
+      summary: Get a contact's per-channel consent
+      description: |
+        Returns both channels (`whatsapp` + `email`) at once. A channel without a stored
+        decision reads `consent_state`/`deliverability` `"unknown"` — treat unknown as not
+        sendable. The email channel additionally carries the composed send-time
+        `suppressed` verdict (suppression list + blacklist + deliverability), which is
+        independent of the consent decision.
+      responses:
+        "200":
+          description: The contact's consent picture.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ContactConsent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`contact_not_found` — unknown contact, or another workspace's contact."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/contacts/{id}/consent/{channel}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+      - name: channel
+        in: path
+        required: true
+        description: "`whatsapp` or `email`. Any other value returns 400 `invalid_channel`."
+        schema:
+          type: string
+          enum: [whatsapp, email]
+    put:
+      operationId: setContactConsent
+      tags: [Contacts]
+      summary: Set a contact's consent on one channel
+      description: |
+        Records a subscribed/unsubscribed decision with its provenance — the same path
+        every in-app consent change takes, so the consent-evidence ledger and activity
+        timeline apply identically. `"unknown"` is a system state and cannot be set, and
+        `deliverability` is provider-owned (bounce/complaint feedback) and is not
+        writable. Subscribing a channel whose deliverability is `complained` is refused
+        with 409 `consent_sticky_complained` — a spam complaint can never be lifted
+        through the API.
+
+        Returns the resulting channel object in the same shape GET uses, so the caller
+        sees the applied state, stamped provenance, and deliverability (the email
+        channel includes the `suppressed` verdict).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetConsentRequest"
+      responses:
+        "200":
+          description: The resulting single-channel consent object.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConsentChannelState"
+        "400":
+          description: |
+            Validation failure (standard shape), or `invalid_channel` (domain envelope) —
+            the `{channel}` path segment must be `whatsapp` or `email`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`contact_not_found` — unknown contact, or another workspace's contact."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: |
+            `consent_sticky_complained` — this channel has a spam complaint on record;
+            consent cannot be re-subscribed via the API.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/contacts/{id}/documents:
@@ -1521,6 +1661,172 @@ paths:
           $ref: "#/components/responses/FeatureNotIncluded"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Products ─────────────────────────────
+  /v1/products:
+    get:
+      operationId: listProducts
+      tags: [Products]
+      summary: List products
+      description: |
+        Standard list envelope, newest first. Filters combine (AND). `q` is a literal
+        substring match on `name` or `description` (case-insensitive; `%`/`_` are not
+        wildcards); `sku` and `external_id` are exact-match lookups.
+      parameters:
+        - name: q
+          in: query
+          description: Substring match on `name` or `description`.
+          schema:
+            type: string
+        - name: sku
+          in: query
+          description: Exact-match lookup by SKU.
+          schema:
+            type: string
+        - name: external_id
+          in: query
+          description: Exact-match lookup by external id.
+          schema:
+            type: string
+        - name: is_active
+          in: query
+          description: "`true` | `false`; any other value returns 400."
+          schema:
+            type: boolean
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: Paginated product list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Product"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertProduct
+      tags: [Products]
+      summary: Create a product (idempotent upsert via external_id)
+      description: |
+        When `external_id` matches an existing product, that product's fields are
+        updated instead of a new one being created and the response carries
+        `duplicate: true` (201 for both outcomes). `sku` and `external_id` are each
+        per-workspace-unique — a clash with a **different** product answers 409
+        `product_conflict`. `vat_mode` + `vat_rate` travel as one both-or-neither pair
+        (400 when only one leg is sent).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ProductWrite"
+                - type: object
+                  required: [name]
+      responses:
+        "201":
+          description: The created (or `external_id`-matched and updated) product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductUpsertResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: "`product_conflict` — a different product already holds this `sku` or `external_id`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/products/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getProduct
+      tags: [Products]
+      summary: Get a product
+      responses:
+        "200":
+          description: The product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`product_not_found` — unknown product, or another workspace's product."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateProduct
+      tags: [Products]
+      summary: Update a product
+      description: |
+        Partial update — only the fields present in the body change (a field you don't
+        send is never nulled). There is no DELETE: deactivate with
+        `{"is_active": false}` so records that reference the product stay intact.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductWrite"
+      responses:
+        "200":
+          description: The updated product.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Product"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`product_not_found` — unknown product, or another workspace's product."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: "`product_conflict` — a different product already holds this `sku` or `external_id`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
@@ -2803,6 +3109,114 @@ paths:
               schema:
                 $ref: "#/components/schemas/DomainError"
 
+  # ───────────────────────────── Suppressions ─────────────────────────────
+  /v1/suppressions:
+    get:
+      operationId: listSuppressions
+      tags: [Suppressions]
+      summary: List suppressions
+      description: |
+        The workspace's email suppression rows, newest first. Workspace-scoped rows
+        only — the HQ-managed global list is enforced at send time but is never
+        returned here.
+      parameters:
+        - name: email
+          in: query
+          description: Exact-match filter (case-insensitive).
+          schema:
+            type: string
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/OffsetParam"
+      responses:
+        "200":
+          description: Paginated suppression list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Suppression"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: addSuppression
+      tags: [Suppressions]
+      summary: Suppress an email address (idempotent)
+      description: |
+        Blocks every future send to this address, independent of consent — **adding a
+        suppression does NOT change the contact's consent state**; the two compose at
+        send time. Re-adding an already-suppressed address returns the existing row
+        with `duplicate: true` (201 for both outcomes).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SuppressionCreate"
+      responses:
+        "201":
+          description: "The suppression row (existing when `duplicate: true`)."
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Suppression"
+                  - type: object
+                    required: [duplicate]
+                    properties:
+                      duplicate:
+                        type: boolean
+                        description: |
+                          `false` when this request created the row; `true` when the
+                          address was already suppressed (the existing row is returned).
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/suppressions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    delete:
+      operationId: deleteSuppression
+      tags: [Suppressions]
+      summary: Remove a suppression
+      description: |
+        Lifts this workspace's suppression only — **it does NOT resubscribe anyone**
+        (consent state is unchanged), and HQ-managed global rows cannot be removed
+        through the API.
+      responses:
+        "204":
+          description: Removed — no body.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`suppression_not_found` — unknown id, another workspace's row, or a global row."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
   # ───────────────────────────── Webhook endpoints ─────────────────────────────
   /v1/webhook-endpoints:
     get:
@@ -2866,10 +3280,17 @@ paths:
                   description: |
                     Event types to receive. Must be non-empty when present. **Omitted →
                     the three delivery events** (`email.delivered`, `email.bounced`,
-                    `email.complained`) — the engagement events
+                    `email.complained`) — every other family is opt-in and must be
+                    listed explicitly: the engagement events
                     `email.opened`/`email.clicked`, the five `order.*` lifecycle
-                    events, and the four `payment_request.*` lifecycle events are
-                    received only when explicitly listed. `email.failed` is
+                    events, the four `payment_request.*` lifecycle events, the four
+                    contact lifecycle + consent events (`contact.created`,
+                    `contact.updated`, `contact.deleted`, `contact.consent_changed`),
+                    the inbound message event (`message.received`), the four `deal.*`
+                    lifecycle events, the four `booking.*` lifecycle events, the
+                    event-attendance event (`event.attendance.changed`), and the form
+                    submission event (`form.submitted`). A pre-existing registration
+                    never starts receiving a new family unasked. `email.failed` is
                     **deprecated**: still accepted when listed explicitly (the
                     registration succeeds and echoes it in `events`), but it is never
                     delivered.
@@ -3769,6 +4190,395 @@ webhooks:
       responses:
         "200":
           description: Return any 2xx within 10 seconds to settle the delivery.
+  contact.created:
+    post:
+      operationId: contactCreatedEvent
+      tags: [Webhook endpoints]
+      summary: contact.created — a contact was created
+      description: |
+        Opt-in contact lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires post-commit at the intentional write seams (API
+        upserts that create, in-app creates, form/lead capture, integration syncs) —
+        CSV imports, bulk edits, and merge-internal writes are deliberately quiet.
+        `data.contact` is a fixed compact projection — fetch the full row with
+        `GET /v1/contacts/{id}`. The creation-time consent seed does **not** emit a
+        separate `contact.consent_changed` — this event covers the creation.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactCreatedEvent"
+      responses:
+        "200":
+          description: |
+            Return any 2xx within 10 seconds to settle the delivery. Non-2xx (including
+            3xx — redirects are not followed) counts as a failure and is retried.
+  contact.updated:
+    post:
+      operationId: contactUpdatedEvent
+      tags: [Webhook endpoints]
+      summary: contact.updated — a contact's fields changed
+      description: |
+        Opt-in contact lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires post-commit for intentional single-contact writes;
+        bulk edits, CSV-import updates, merge-internal writes, and engine/noise writers
+        (scoring, touch fields, tracking rollups) are deliberately quiet.
+        `data.changed_fields` names what changed — the same field list the in-app
+        Activity timeline records, including `tags`/`groups` junction keys and
+        `custom_fields.<key>` entries. `data.contact` stays the compact core — never
+        junction arrays; fetch the full row with `GET /v1/contacts/{id}`.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactUpdatedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  contact.deleted:
+    post:
+      operationId: contactDeletedEvent
+      tags: [Webhook endpoints]
+      summary: contact.deleted — a contact was deleted
+      description: |
+        Opt-in contact lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Carries last-known identifiers only (the row is gone) —
+        key your mirror off `data.contact_id`. Bulk deletes emit one event per contact;
+        **contact merges are fully silent** (a merge is not a deletion — the absorbed
+        contact emits nothing).
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactDeletedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  contact.consent_changed:
+    post:
+      operationId: contactConsentChangedEvent
+      tags: [Webhook endpoints]
+      summary: contact.consent_changed — a channel's consent state changed
+      description: |
+        Opt-in consent event — delivered only to endpoints that list it explicitly in
+        `events`. Fires on real consent-state transitions (opt-in, unsubscribe,
+        resubscribe) plus deliverability-driven suppress escalations, for every consent
+        surface (API, forms, unsubscribe pages, in-app edits). Quiet by design: the
+        contact-create consent seed (see `contact.created`), same-state re-assertions,
+        double-opt-in ceremony markers, and preference-center metadata updates do not
+        emit.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ContactConsentChangedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  message.received:
+    post:
+      operationId: messageReceivedEvent
+      tags: [Webhook endpoints]
+      summary: message.received — an inbound WhatsApp message arrived
+      description: |
+        Opt-in inbound-message event — delivered only to endpoints that list it
+        explicitly in `events`. Real WhatsApp inbound only, exactly once per WhatsApp
+        message (post-dedup): reactions, messages from blocked contacts, and WhatsApp
+        coexistence echoes/history imports are all silent. Media rides as **metadata
+        only** (`mime_type`, `filename`, `bytes`) — never presigned URLs or storage
+        keys.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageReceivedEvent"
+            examples:
+              imageWithCaption:
+                value:
+                  id: d4e5f607-1829-3a4b-5c6d-7e8f90123456
+                  type: message.received
+                  created_at: "2026-07-16T08:12:05.000Z"
+                  data:
+                    message_id: 1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809
+                    conversation_id: 2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a
+                    contact_id: 9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c
+                    channel: whatsapp_api
+                    type: image
+                    text: Here is the signed form
+                    media:
+                      mime_type: image/jpeg
+                      filename: signed-form.jpg
+                      bytes: 482113
+                    wa_message_id: wamid.HBgMOTcyNTA1NTU1NTU1FQIAEhg=
+                    timestamp: "2026-07-16T08:12:03.000Z"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  deal.created:
+    post:
+      operationId: dealCreatedEvent
+      tags: [Webhook endpoints]
+      summary: deal.created — a deal was created
+      description: |
+        Opt-in deal lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires for **every** write source — manual, API,
+        automations, and Salesforce sync — `data.source` says which.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DealCreatedEvent"
+      responses:
+        "200":
+          description: |
+            Return any 2xx within 10 seconds to settle the delivery. Non-2xx (including
+            3xx — redirects are not followed) counts as a failure and is retried.
+  deal.stage_changed:
+    post:
+      operationId: dealStageChangedEvent
+      tags: [Webhook endpoints]
+      summary: deal.stage_changed — a deal moved to another stage
+      description: |
+        Opt-in deal lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. `data.from_stage_id`/`data.from_stage_name` carry the
+        origin stage — they are `null` on every other deal event.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DealStageChangedEvent"
+            examples:
+              stageMove:
+                value:
+                  id: e5f60718-293a-4b5c-6d7e-8f9012345678
+                  type: deal.stage_changed
+                  created_at: "2026-07-16T09:00:00.000Z"
+                  data:
+                    deal_id: 3c4d5e6f-7081-92a3-b4c5-d6e7f8091a2b
+                    contact_id: 9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c
+                    pipeline_id: 4d5e6f70-8192-a3b4-c5d6-e7f8091a2b3c
+                    pipeline_name: Sales
+                    stage_id: 5e6f7081-92a3-b4c5-d6e7-f8091a2b3c4d
+                    stage_name: Negotiation
+                    from_stage_id: 6f708192-a3b4-c5d6-e7f8-091a2b3c4d5e
+                    from_stage_name: Qualified
+                    status: open
+                    title: Onboarding package
+                    amount: 3600
+                    currency: ILS
+                    owner_user_id: 708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f
+                    external_reference: crm-9912
+                    source: api
+                    expected_close_at: "2026-08-01T00:00:00.000Z"
+                    closed_at: null
+                    lost_reason: null
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  deal.won:
+    post:
+      operationId: dealWonEvent
+      tags: [Webhook endpoints]
+      summary: deal.won — a deal was marked won
+      description: |
+        Opt-in deal lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. `data.status` is `won` and `data.closed_at` is stamped;
+        the deal keeps its last stage.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DealWonEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  deal.lost:
+    post:
+      operationId: dealLostEvent
+      tags: [Webhook endpoints]
+      summary: deal.lost — a deal was marked lost
+      description: |
+        Opt-in deal lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. `data.status` is `lost`; `data.lost_reason` carries the
+        stored reason (or `null`).
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DealLostEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  booking.created:
+    post:
+      operationId: bookingCreatedEvent
+      tags: [Webhook endpoints]
+      summary: booking.created — a booking was made
+      description: |
+        Opt-in booking lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. Fires for every booking source — `data.source` says
+        which. `booking.completed` / `booking.no_show` deliberately do not exist as
+        webhooks: those statuses are sweep-derived, not user actions.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingCreatedEvent"
+      responses:
+        "200":
+          description: |
+            Return any 2xx within 10 seconds to settle the delivery. Non-2xx (including
+            3xx — redirects are not followed) counts as a failure and is retried.
+  booking.rescheduled:
+    post:
+      operationId: bookingRescheduledEvent
+      tags: [Webhook endpoints]
+      summary: booking.rescheduled — a booking moved to a new time
+      description: |
+        Opt-in booking lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. `data.start_at`/`data.end_at` are the NEW times.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingRescheduledEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  booking.cancelled:
+    post:
+      operationId: bookingCancelledEvent
+      tags: [Webhook endpoints]
+      summary: booking.cancelled — a booking was cancelled
+      description: |
+        Opt-in booking lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. `data.cancelled_by` and `data.cancel_reason` carry who
+        cancelled and why (when recorded).
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingCancelledEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  booking.reassigned:
+    post:
+      operationId: bookingReassignedEvent
+      tags: [Webhook endpoints]
+      summary: booking.reassigned — the booking's host changed
+      description: |
+        Opt-in booking lifecycle event — delivered only to endpoints that list it
+        explicitly in `events`. `data.previous_host_name` carries the outgoing host —
+        it is `null` on every other booking event.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BookingReassignedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  event.attendance.changed:
+    post:
+      operationId: eventAttendanceChangedEvent
+      tags: [Webhook endpoints]
+      summary: event.attendance.changed — an attendee's status changed
+      description: |
+        Opt-in event-attendance event — delivered only to endpoints that list it
+        explicitly in `events`. ONE event type for the whole family — filter on
+        `data.status`; `data.previous_status` carries the transition (`null` for fresh
+        registrations and for set-based bulk status updates, which have no per-row
+        prior state). Fires per attendance row at the writer seams (single edits, bulk
+        operations, automation actions).
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventAttendanceChangedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  form.submitted:
+    post:
+      operationId: formSubmittedEvent
+      tags: [Webhook endpoints]
+      summary: form.submitted — a form was submitted
+      description: |
+        Opt-in form event — delivered only to endpoints that list it explicitly in
+        `events`. ONE event type for every surface — `data.origin` distinguishes a
+        standalone form embed (`form`), a landing-page form (`landing_page`), and an
+        on-site popup (`popup`). Fires post-persist even when no contact was resolved
+        (`data.contact_id` is then `null`); `data.fields` carries the submitted answers
+        keyed by form field ids.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FormSubmittedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
 
 components:
   securitySchemes:
@@ -4467,6 +5277,143 @@ components:
             minLength: 1
             maxLength: 100
           description: Group **names**. Missing groups are auto-created.
+    ConsentChannelState:
+      type: object
+      title: Per-channel consent state
+      description: |
+        One channel of a contact's consent picture. A channel without a stored decision
+        reads `consent_state`/`deliverability` `"unknown"` — treat unknown as not
+        sendable. `deliverability` is provider-owned (bounce/complaint feedback) and is
+        never writable through the API. On the **email** channel the object additionally
+        carries the composed send-time suppression verdict (`suppressed` +
+        `suppression_reason`): suppression list + blacklist + deliverability — a verdict
+        deliberately independent of the consent decision.
+      required:
+        - consent_state
+        - consent_basis
+        - consent_source
+        - consent_at
+        - consent_expires_at
+        - deliverability
+        - unsubscribed_at
+        - complained_at
+        - last_bounce_at
+      properties:
+        consent_state:
+          type: string
+          enum: [subscribed, unsubscribed, unknown]
+          description: The stored consent decision — `unknown` = no decision recorded yet.
+        consent_basis:
+          type: [string, "null"]
+          enum: [express_opt_in, double_opt_in, soft_opt_in, implied, imported, null]
+          description: Legal basis of the stored decision.
+        consent_source:
+          type: [string, "null"]
+          description: |
+            Provenance of the stored decision — API writes read `api` or
+            `api:<your source>`; other surfaces stamp their own (form ids, `manual`, …).
+        consent_at:
+          type: [string, "null"]
+          format: date-time
+        consent_expires_at:
+          type: [string, "null"]
+          format: date-time
+        deliverability:
+          type: string
+          enum: [unknown, deliverable, temporarily_bounced, bounced, complained]
+          description: |
+            Provider-owned delivery health. `complained` is sticky — consent on that
+            channel can never be re-subscribed through the API.
+        unsubscribed_at:
+          type: [string, "null"]
+          format: date-time
+        complained_at:
+          type: [string, "null"]
+          format: date-time
+        last_bounce_at:
+          type: [string, "null"]
+          format: date-time
+        suppressed:
+          type: boolean
+          description: |
+            **Email channel only.** The composed send-time verdict — `true` when any of
+            the suppression list, the blacklist, or a `bounced`/`complained`
+            deliverability blocks sends to this address.
+        suppression_reason:
+          type: [string, "null"]
+          description: |
+            **Email channel only.** Why `suppressed` is `true`, prefixed by the layer —
+            e.g. `suppression:manual`, `suppression:unsubscribe`, `blacklist:global`,
+            `blacklist:workspace`, `deliverability:bounced`, `deliverability:complained`.
+            `null` when not suppressed.
+      additionalProperties: true
+    ContactConsent:
+      type: object
+      title: Contact consent (both channels)
+      description: |
+        `GET /v1/contacts/{id}/consent` — the contact's per-channel marketing-consent
+        picture. `block_state` is the contact-level block (independent of per-channel
+        consent); each channel composes the stored decision with the deliverability
+        axis, and the email channel adds the send-time suppression verdict.
+      required: [contact_id, block_state, channels]
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+        block_state:
+          type: string
+          enum: [none, workspace, global]
+          description: Contact-level block state — independent of per-channel consent.
+        channels:
+          type: object
+          required: [whatsapp, email]
+          properties:
+            whatsapp:
+              $ref: "#/components/schemas/ConsentChannelState"
+            email:
+              allOf:
+                - $ref: "#/components/schemas/ConsentChannelState"
+                - type: object
+                  required: [suppressed, suppression_reason]
+      additionalProperties: true
+    SetConsentRequest:
+      type: object
+      title: Set-consent payload
+      description: |
+        `PUT /v1/contacts/{id}/consent/{channel}` — record a consent decision with its
+        provenance (the evidence trail stores source, IP, and user agent).
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [subscribed, unsubscribed]
+          description: |
+            The consent decision to record. `"unknown"` is a system state and cannot
+            be set.
+        basis:
+          type: string
+          enum: [express_opt_in, double_opt_in, soft_opt_in, implied, imported]
+          description: |
+            Legal basis of the decision. Defaults to `express_opt_in` when subscribing.
+        source:
+          type: string
+          maxLength: 100
+          description: |
+            Where the decision came from in your system; recorded as `api:<source>` in
+            the consent evidence trail (plain `api` when omitted).
+        expires_at:
+          type: string
+          format: date-time
+          description: When this consent expires (ISO 8601).
+        ip:
+          type: string
+          maxLength: 64
+          description: End-user IP captured with the decision (evidence trail).
+        user_agent:
+          type: string
+          maxLength: 512
+          description: End-user user agent captured with the decision (evidence trail).
     Note:
       type: object
       title: Contact note
@@ -5173,6 +6120,128 @@ components:
           type: [string, "null"]
           maxLength: 4000
           description: Trimmed; empty becomes `null`.
+
+    # ── Products ──
+    Product:
+      type: object
+      title: Product
+      description: |
+        A row of the workspace product catalog, shared by deals and customer payments.
+        `price` `null` = dynamic pricing (a deal referencing the product needs an
+        explicit amount). `vat_mode`/`vat_rate` are one both-or-neither pair — `null`s
+        mean the workspace payments default applies at resolution time. Inactive
+        products stay attached to existing deals/payments but cannot be attached to new
+        ones.
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        sku:
+          type: [string, "null"]
+          description: Per-workspace-unique product code (human-facing).
+        external_id:
+          type: [string, "null"]
+          description: |
+            Per-workspace-unique id of this product in your system — the POST
+            idempotency key.
+        description:
+          type: [string, "null"]
+        price:
+          type: [number, "null"]
+          description: |
+            Default price in the workspace payment currency, as a JSON number. `null` =
+            dynamic pricing.
+        vat_mode:
+          type: [string, "null"]
+          enum: [inclusive, exclusive, null]
+        vat_rate:
+          type: [number, "null"]
+          description: VAT percent (0–100); paired with `vat_mode`.
+        is_active:
+          type: boolean
+        created_by:
+          type: [string, "null"]
+          format: uuid
+          description: "`null` for API creates."
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    ProductUpsertResult:
+      title: Product upsert result
+      description: |
+        `POST /v1/products` response — the product plus the top-level `duplicate`
+        marker. Both outcomes return 201.
+      allOf:
+        - $ref: "#/components/schemas/Product"
+        - type: object
+          required: [duplicate]
+          properties:
+            duplicate:
+              type: boolean
+              description: |
+                `false` when this request created the product; `true` when the
+                `external_id` matched an existing product, whose fields were updated
+                instead.
+    ProductWrite:
+      type: object
+      title: Product write payload
+      description: |
+        `POST /v1/products` (create/upsert — `name` required) and
+        `PATCH /v1/products/{id}` (partial update — every field optional; only the
+        fields present in the body change). `vat_mode` + `vat_rate` travel as one
+        both-or-neither pair — send both `null` to clear the override (400 when only
+        one leg is sent).
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        sku:
+          type: [string, "null"]
+          maxLength: 100
+          description: Per-workspace-unique product code (human-facing).
+        external_id:
+          type: [string, "null"]
+          maxLength: 200
+          description: |
+            Per-workspace-unique id of this product in your system — the POST
+            idempotency key (a repeat POST with the same value updates that product
+            instead of creating a duplicate).
+        description:
+          type: [string, "null"]
+          maxLength: 2000
+        price:
+          type: [number, "null"]
+          minimum: 0
+          description: |
+            Default price in the workspace payment currency. `null` = dynamic pricing
+            (deals fall back to an explicit amount).
+        vat_mode:
+          type: [string, "null"]
+          enum: [inclusive, exclusive, null]
+          description: |
+            Per-product VAT override. Travels with `vat_rate` as one both-or-neither
+            pair; send both `null` to clear the override.
+        vat_rate:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 100
+          description: VAT percent (0–100, max 2 decimals); paired with `vat_mode`.
+        is_active:
+          type: boolean
+          description: |
+            Inactive products stay on existing deals/payments but cannot be attached
+            to new ones.
 
     # ── Payments ──
     Payment:
@@ -6532,6 +7601,57 @@ components:
           type: string
           format: date-time
 
+    # ── Suppressions ──
+    Suppression:
+      type: object
+      title: Suppression
+      description: |
+        A workspace email-suppression row — a **send-time overlay, deliberately
+        separate from consent**: adding a row does not change any contact's consent
+        state, and removing one resubscribes no one; every email send checks both.
+        The API returns workspace-scoped rows only (the HQ-managed global list is
+        enforced at send time but never listed).
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        reason:
+          type: string
+          enum: [unsubscribe, bounce, complaint, manual, global]
+          description: |
+            Why the address is suppressed. API adds write one of
+            `unsubscribe`/`bounce`/`complaint`/`manual`; system-created rows may carry
+            other values.
+        source:
+          type: [string, "null"]
+          description: 'Which surface created the row — `api` for API adds.'
+        note:
+          type: [string, "null"]
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    SuppressionCreate:
+      type: object
+      title: Suppression create payload
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        reason:
+          type: string
+          enum: [unsubscribe, bounce, complaint, manual]
+          description: Why the address is suppressed. Defaults to `manual`.
+        note:
+          type: string
+          maxLength: 500
+          description: Free-form note stored with the row.
+
     # ── Webhook endpoints ──
     WebhookEventType:
       type: string
@@ -6552,16 +7672,36 @@ components:
         - payment_request.paid
         - payment_request.expired
         - payment_request.cancelled
+        - contact.created
+        - contact.updated
+        - contact.deleted
+        - contact.consent_changed
+        - message.received
+        - deal.created
+        - deal.stage_changed
+        - deal.won
+        - deal.lost
+        - booking.created
+        - booking.rescheduled
+        - booking.cancelled
+        - booking.reassigned
+        - event.attendance.changed
+        - form.submitted
       description: |
         The full registration vocabulary for webhook endpoints — the six email events
         (see `EmailEventType` for their semantics), the five `order.*` lifecycle
-        events (see `OrderEventType`), and the four `payment_request.*` pay-link
-        lifecycle events (see `PaymentRequestEventType`; payloads under this spec's
-        webhooks section).
-        Order and payment-request events ride the same signing, retry schedule, and
-        delivery behavior as the email events; they are received only when explicitly
-        listed at registration. Order events fire for **every** order write source
-        (API, in-app, automations) — never for historical imports.
+        events (see `OrderEventType`), the four `payment_request.*` pay-link
+        lifecycle events (see `PaymentRequestEventType`), the four contact lifecycle +
+        consent events (`contact.*`), the inbound message event (`message.received`),
+        the four `deal.*` lifecycle events (see `DealEventType`), the four `booking.*`
+        lifecycle events (see `BookingEventType`), the event-attendance event
+        (`event.attendance.changed`), and the form submission event
+        (`form.submitted`) — payloads under this spec's webhooks section.
+        Every non-email family rides the same signing, retry schedule, and delivery
+        behavior as the email events, and is received only when explicitly listed at
+        registration — a pre-existing endpoint never starts receiving a new family
+        unasked. Order and deal events fire for **every** write source (API, in-app,
+        automations, integrations) — order events never fire for historical imports.
     EmailEventType:
       type: string
       title: Email event type
@@ -6608,6 +7748,33 @@ components:
         (`charge_kind: "checkout"`): direct saved-card charges and internal
         dunning-recovery links never emit these events. Payload shape:
         `PaymentRequestEventBase`.
+    DealEventType:
+      type: string
+      title: Deal event type
+      enum:
+        - deal.created
+        - deal.stage_changed
+        - deal.won
+        - deal.lost
+      description: |
+        The four deal lifecycle events. All are **opt-in**: delivered only to endpoints
+        that list them explicitly in `events`. They fire for **every** deal write
+        source — manual, API, automations, and Salesforce sync — `data.source` says
+        which. Payload shape: `DealEventBase`.
+    BookingEventType:
+      type: string
+      title: Booking event type
+      enum:
+        - booking.created
+        - booking.rescheduled
+        - booking.cancelled
+        - booking.reassigned
+      description: |
+        The four booking lifecycle events. All are **opt-in**: delivered only to
+        endpoints that list them explicitly in `events`. `booking.completed` /
+        `booking.no_show` deliberately do not exist as webhooks — those statuses are
+        sweep-derived (a cron inferring the past), not user actions. Payload shape:
+        `BookingEventBase`.
     WebhookEndpoint:
       type: object
       title: Webhook endpoint
@@ -7085,6 +8252,722 @@ components:
           properties:
             type:
               const: payment_request.cancelled
+
+    # ── Contact webhook events ──
+    ContactEventSummary:
+      type: object
+      title: Contact summary (webhook payloads)
+      description: |
+        The compact `contact` block carried by `contact.created` / `contact.updated`
+        payloads — a FIXED scalar-core projection: never junction arrays (tags/groups),
+        custom fields, or engine-maintained columns. Fetch the full row with
+        `GET /v1/contacts/{id}`.
+      required:
+        - id
+        - phone
+        - email
+        - name
+        - first_name
+        - last_name
+        - lifecycle_stage
+        - source
+        - block_state
+        - lead_score
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone:
+          type: [string, "null"]
+        email:
+          type: [string, "null"]
+        name:
+          type: [string, "null"]
+        first_name:
+          type: [string, "null"]
+        last_name:
+          type: [string, "null"]
+        lifecycle_stage:
+          type: [string, "null"]
+        source:
+          type: [string, "null"]
+        block_state:
+          type: [string, "null"]
+          description: '`none` / `workspace` / `global`.'
+        lead_score:
+          type: [number, "null"]
+    ContactCreatedEvent:
+      type: object
+      title: contact.created event
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`). Like order events, `data` always carries the full field set
+        (explicit `null`s).
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          const: contact.created
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+          required: [contact_id, contact, source, duplicate]
+          properties:
+            contact_id:
+              type: string
+              format: uuid
+            contact:
+              $ref: "#/components/schemas/ContactEventSummary"
+            source:
+              type: string
+              description: |
+                Which surface created the contact — e.g. `manual`, `api`, `form`,
+                `automation`, an integration name. Tolerate unknown values.
+            duplicate:
+              type: boolean
+              description: |
+                Always `false` — the event fires only for fresh inserts (an upsert
+                that matched an existing contact emits `contact.updated`, when the
+                write is an intentional seam).
+    ContactUpdatedEvent:
+      type: object
+      title: contact.updated event
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`).
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          const: contact.updated
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+          required: [contact_id, changed_fields, contact, source]
+          properties:
+            contact_id:
+              type: string
+              format: uuid
+            changed_fields:
+              type: array
+              items:
+                type: string
+              description: |
+                The changed field names — the same list the in-app Activity timeline
+                records, including the `tags`/`groups` junction keys and
+                `custom_fields.<key>` entries.
+            contact:
+              $ref: "#/components/schemas/ContactEventSummary"
+            source:
+              type: string
+              description: Which surface performed the write. Tolerate unknown values.
+    ContactDeletedEvent:
+      type: object
+      title: contact.deleted event
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`). Carries last-known identifiers only — the row is gone; key
+        your mirror off `data.contact_id`.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          const: contact.deleted
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+          required: [contact_id, phone, email, name]
+          properties:
+            contact_id:
+              type: string
+              format: uuid
+            phone:
+              type: [string, "null"]
+            email:
+              type: [string, "null"]
+            name:
+              type: [string, "null"]
+    ContactConsentChangedEvent:
+      type: object
+      title: contact.consent_changed event
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`). Fires on real consent-state transitions plus
+        deliverability-driven suppress escalations (which keep their prior state —
+        compare `consent_state` with `previous_state` and key on `action`).
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          const: contact.consent_changed
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - contact_id
+            - channel
+            - action
+            - consent_state
+            - previous_state
+            - basis
+            - source
+            - consent_event_id
+          properties:
+            contact_id:
+              type: string
+              format: uuid
+            channel:
+              type: string
+              enum: [whatsapp, email]
+            action:
+              type: string
+              description: |
+                The consent-ledger action that fired the event — e.g. `opt_in`,
+                `double_opt_in_confirmed`, `unsubscribe`, `resubscribe`, `suppress`.
+                Tolerate unknown values.
+            consent_state:
+              type: string
+              enum: [subscribed, unsubscribed, unknown]
+            previous_state:
+              type: [string, "null"]
+              enum: [subscribed, unsubscribed, unknown, null]
+              description: "`null` when no prior decision was stored."
+            basis:
+              type: [string, "null"]
+              enum: [express_opt_in, double_opt_in, soft_opt_in, implied, imported, null]
+            source:
+              type: string
+              description: |
+                Provenance of the decision — API writes read `api` or `api:<source>`;
+                other surfaces stamp their own.
+            consent_event_id:
+              type: string
+              format: uuid
+              description: The consent-evidence ledger row this change wrote.
+
+    # ── Message webhook events ──
+    MessageReceivedEvent:
+      type: object
+      title: message.received event
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`). Real WhatsApp inbound only, exactly once per WhatsApp
+        message. `data.media` is present on media messages only (omitted otherwise)
+        and carries **metadata only** — never presigned URLs or storage keys.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          const: message.received
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - message_id
+            - conversation_id
+            - contact_id
+            - channel
+            - type
+            - text
+            - wa_message_id
+            - timestamp
+          properties:
+            message_id:
+              type: string
+              format: uuid
+            conversation_id:
+              type: [string, "null"]
+              format: uuid
+            contact_id:
+              type: [string, "null"]
+              format: uuid
+            channel:
+              const: whatsapp_api
+              description: "v1 fires for the WhatsApp channel only."
+            type:
+              type: [string, "null"]
+              description: |
+                The message type — e.g. `text`, `image`, `video`, `audio`, `document`,
+                `location`, `contacts`, `button`. Tolerate unknown values.
+            text:
+              type: [string, "null"]
+              description: |
+                The message's human text: body text for text/button messages, the
+                caption for captioned media, else `null`.
+            media:
+              type: object
+              description: |
+                Media messages only — omitted otherwise. Metadata only, never URLs.
+              required: [mime_type, filename, bytes]
+              properties:
+                mime_type:
+                  type: [string, "null"]
+                filename:
+                  type: [string, "null"]
+                bytes:
+                  type: [integer, "null"]
+            wa_message_id:
+              type: [string, "null"]
+              description: WhatsApp's own message id (`wamid.…`).
+            timestamp:
+              type: [string, "null"]
+              format: date-time
+              description: The Meta-provided message timestamp (ISO 8601 UTC).
+
+    # ── Deal webhook events ──
+    DealEventBase:
+      type: object
+      title: Deal event (base)
+      description: |
+        Every delivery is an HTTP POST with this JSON body — the same envelope
+        (`id`/`type`/`created_at`/`data`), headers, signing, and retry policy as the
+        email events (see `EmailEventBase`). Like order events, `data` always carries
+        the **full field set** — absent values are explicit `null`s, never omitted
+        keys. The `data` object is a snapshot of the deal at event time; money is a
+        JSON number in the deal's currency, instants are ISO-8601 UTC or `null`.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          $ref: "#/components/schemas/DealEventType"
+        created_at:
+          type: string
+          format: date-time
+          description: When the event occurred.
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - deal_id
+            - contact_id
+            - pipeline_id
+            - pipeline_name
+            - stage_id
+            - stage_name
+            - from_stage_id
+            - from_stage_name
+            - status
+            - title
+            - amount
+            - currency
+            - owner_user_id
+            - external_reference
+            - source
+            - expected_close_at
+            - closed_at
+            - lost_reason
+          properties:
+            deal_id:
+              type: string
+              format: uuid
+              description: The deal's `id`.
+            contact_id:
+              type: string
+              format: uuid
+            pipeline_id:
+              type: string
+              format: uuid
+            pipeline_name:
+              type: [string, "null"]
+            stage_id:
+              type: string
+              format: uuid
+              description: The deal's CURRENT stage (the destination, on a move).
+            stage_name:
+              type: [string, "null"]
+            from_stage_id:
+              type: [string, "null"]
+              format: uuid
+              description: "`deal.stage_changed` only — `null` on every other deal event."
+            from_stage_name:
+              type: [string, "null"]
+              description: "`deal.stage_changed` only — `null` on every other deal event."
+            status:
+              type: string
+              enum: [open, won, lost]
+            title:
+              type: [string, "null"]
+            amount:
+              type: [number, "null"]
+              description: JSON number in the deal's currency.
+            currency:
+              type: [string, "null"]
+            owner_user_id:
+              type: [string, "null"]
+              format: uuid
+            external_reference:
+              type: [string, "null"]
+              description: The `/v1/deals` idempotency reference, when set.
+            source:
+              type: string
+              description: |
+                Which surface performed the write — `manual`, `api`, `automation`, or
+                `salesforce`. Tolerate unknown values.
+            expected_close_at:
+              type: [string, "null"]
+              format: date-time
+              description: ISO 8601 UTC (instants below are ISO 8601 UTC or `null`).
+            closed_at:
+              type: [string, "null"]
+              format: date-time
+            lost_reason:
+              type: [string, "null"]
+    DealCreatedEvent:
+      title: deal.created event
+      allOf:
+        - $ref: "#/components/schemas/DealEventBase"
+        - type: object
+          properties:
+            type:
+              const: deal.created
+    DealStageChangedEvent:
+      title: deal.stage_changed event
+      allOf:
+        - $ref: "#/components/schemas/DealEventBase"
+        - type: object
+          properties:
+            type:
+              const: deal.stage_changed
+    DealWonEvent:
+      title: deal.won event
+      allOf:
+        - $ref: "#/components/schemas/DealEventBase"
+        - type: object
+          properties:
+            type:
+              const: deal.won
+    DealLostEvent:
+      title: deal.lost event
+      allOf:
+        - $ref: "#/components/schemas/DealEventBase"
+        - type: object
+          properties:
+            type:
+              const: deal.lost
+
+    # ── Booking webhook events ──
+    BookingEventBase:
+      type: object
+      title: Booking event (base)
+      description: |
+        Every delivery is an HTTP POST with this JSON body — the same envelope
+        (`id`/`type`/`created_at`/`data`), headers, signing, and retry policy as the
+        email events (see `EmailEventBase`). Like order events, `data` always carries
+        the **full field set** — explicit `null`s, never omitted keys. Instants are
+        ISO-8601 UTC; the booking module is deliberately multi-timezone, so BOTH the
+        host and invitee timezones ride the payload. There is deliberately **no
+        `manage_url`** — that is a capability token and never leaves through a
+        webhook body.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          $ref: "#/components/schemas/BookingEventType"
+        created_at:
+          type: string
+          format: date-time
+          description: When the event occurred.
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - booking_id
+            - contact_id
+            - meeting_type_id
+            - meeting_type_name
+            - host_user_id
+            - host_name
+            - previous_host_name
+            - start_at
+            - end_at
+            - host_timezone
+            - invitee_timezone
+            - status
+            - location_type
+            - cancelled_by
+            - cancel_reason
+            - source
+          properties:
+            booking_id:
+              type: string
+              format: uuid
+              description: The booking's `id`.
+            contact_id:
+              type: string
+              format: uuid
+            meeting_type_id:
+              type: [string, "null"]
+              format: uuid
+            meeting_type_name:
+              type: [string, "null"]
+            host_user_id:
+              type: [string, "null"]
+              format: uuid
+            host_name:
+              type: [string, "null"]
+            previous_host_name:
+              type: [string, "null"]
+              description: "`booking.reassigned` only — `null` on every other booking event."
+            start_at:
+              type: [string, "null"]
+              format: date-time
+              description: ISO 8601 UTC (instants here are ISO 8601 UTC or `null`).
+            end_at:
+              type: [string, "null"]
+              format: date-time
+            host_timezone:
+              type: [string, "null"]
+              description: IANA timezone of the host's schedule.
+            invitee_timezone:
+              type: [string, "null"]
+              description: IANA timezone the invitee booked in.
+            status:
+              type: [string, "null"]
+              description: |
+                Booking status at event time — e.g. `confirmed`, `cancelled`.
+                Tolerate unknown values.
+            location_type:
+              type: [string, "null"]
+              description: The meeting type's location kind. Tolerate unknown values.
+            cancelled_by:
+              type: [string, "null"]
+              description: |
+                Who cancelled (`booking.cancelled`) — e.g. `host`, `invitee` — `null`
+                elsewhere.
+            cancel_reason:
+              type: [string, "null"]
+            source:
+              type: [string, "null"]
+              description: |
+                How the booking was created — `public_page`, `manual`, `api`, or
+                `embed`. Passed through verbatim: **tolerate unknown values**, new
+                sources may appear without a spec bump.
+    BookingCreatedEvent:
+      title: booking.created event
+      allOf:
+        - $ref: "#/components/schemas/BookingEventBase"
+        - type: object
+          properties:
+            type:
+              const: booking.created
+    BookingRescheduledEvent:
+      title: booking.rescheduled event
+      allOf:
+        - $ref: "#/components/schemas/BookingEventBase"
+        - type: object
+          properties:
+            type:
+              const: booking.rescheduled
+    BookingCancelledEvent:
+      title: booking.cancelled event
+      allOf:
+        - $ref: "#/components/schemas/BookingEventBase"
+        - type: object
+          properties:
+            type:
+              const: booking.cancelled
+    BookingReassignedEvent:
+      title: booking.reassigned event
+      allOf:
+        - $ref: "#/components/schemas/BookingEventBase"
+        - type: object
+          properties:
+            type:
+              const: booking.reassigned
+
+    # ── Event-attendance webhook events ──
+    EventAttendanceChangedEvent:
+      type: object
+      title: event.attendance.changed event
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`). ONE event type for the whole family — `data.status` /
+        `data.previous_status` carry the transition. Instants are ISO-8601 UTC or
+        `null`.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          const: event.attendance.changed
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - attendance_id
+            - event_id
+            - contact_id
+            - status
+            - previous_status
+            - registered_at
+            - attended_at
+            - unregistered_at
+            - event
+          properties:
+            attendance_id:
+              type: string
+              format: uuid
+            event_id:
+              type: string
+              format: uuid
+            contact_id:
+              type: string
+              format: uuid
+            status:
+              type: [string, "null"]
+              description: |
+                `registered`, `attending`, `attended`, `no_show`, or `cancelled`.
+                Tolerate unknown values.
+            previous_status:
+              type: [string, "null"]
+              description: |
+                `null` for fresh registrations and for set-based bulk status updates
+                (whose single UPDATE has no per-row prior state).
+            registered_at:
+              type: [string, "null"]
+              format: date-time
+            attended_at:
+              type: [string, "null"]
+              format: date-time
+            unregistered_at:
+              type: [string, "null"]
+              format: date-time
+            event:
+              type: [object, "null"]
+              description: A compact snapshot of the event — `null` when unavailable.
+              required: [id, name, start_at]
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                name:
+                  type: [string, "null"]
+                start_at:
+                  type: [string, "null"]
+                  format: date-time
+
+    # ── Form webhook events ──
+    FormSubmittedEvent:
+      type: object
+      title: form.submitted event
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`). ONE event type for every submission surface — `data.origin`
+        is the discriminator. Fires even when no contact was resolved
+        (`data.contact_id` is then `null`).
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          const: form.submitted
+        created_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          additionalProperties: true
+          required:
+            - form_id
+            - form_name
+            - submission_id
+            - contact_id
+            - origin
+            - landing_page_id
+            - popup_id
+            - fields
+          properties:
+            form_id:
+              type: string
+              format: uuid
+            form_name:
+              type: string
+            submission_id:
+              type: string
+              description: Unique per submission — a secondary dedup key for your CRM.
+            contact_id:
+              type: [string, "null"]
+              format: uuid
+              description: "`null` when contact auto-creation is off and no contact matched."
+            origin:
+              type: string
+              enum: [form, landing_page, popup]
+              description: |
+                `form` = standalone embed, `landing_page` = a published landing page's
+                form block, `popup` = an on-site popup.
+            landing_page_id:
+              type: [string, "null"]
+              format: uuid
+              description: 'Set when `origin` is `landing_page`, else `null`.'
+            popup_id:
+              type: [string, "null"]
+              format: uuid
+              description: 'Set when `origin` is `popup`, else `null`.'
+            fields:
+              type: object
+              additionalProperties: true
+              description: The submitted answers, keyed by form field ids.
 
     # ── Meeting types & bookings ──
     MeetingType:

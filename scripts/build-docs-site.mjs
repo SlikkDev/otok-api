@@ -27,10 +27,12 @@ const GUIDES = [
   ["campaigns", "Campaigns (WhatsApp)"],
   ["templates", "Templates (WhatsApp)"],
   ["deals", "Deals & Pipelines"],
+  ["products", "Products"],
   ["payments", "Payments"],
   ["payment-requests", "Payment Requests"],
   ["orders", "Orders"],
   ["emails", "Transactional Emails"],
+  ["consent-and-suppressions", "Consent & Suppressions"],
   ["webhooks", "Webhooks"],
   ["bookings", "Bookings & Meeting Types"],
 ];

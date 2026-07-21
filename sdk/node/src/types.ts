@@ -178,6 +178,92 @@ export interface Note {
  * note unchanged. A `body` change bumps `updated_at` (shows as "edited"
  * in-app); a pin toggle alone does not.
  */
+export type ConsentChannel = "whatsapp" | "email";
+
+/** `unknown` = no decision recorded yet (and never settable via the API). */
+export type ConsentState = "subscribed" | "unsubscribed" | "unknown";
+
+export type ConsentBasis =
+  | "express_opt_in"
+  | "double_opt_in"
+  | "soft_opt_in"
+  | "implied"
+  | "imported";
+
+/**
+ * Provider-owned delivery health — never writable through the API.
+ * `complained` is sticky: consent on that channel can never be re-subscribed
+ * via the API.
+ */
+export type ConsentDeliverability =
+  | "unknown"
+  | "deliverable"
+  | "temporarily_bounced"
+  | "bounced"
+  | "complained";
+
+/**
+ * One channel of a contact's consent picture. A channel without a stored
+ * decision reads `consent_state`/`deliverability` "unknown" — treat unknown
+ * as not sendable. On the EMAIL channel the object additionally carries the
+ * composed send-time suppression verdict (`suppressed` +
+ * `suppression_reason`), which is independent of the consent decision.
+ */
+export interface ContactConsentChannel {
+  consent_state: ConsentState;
+  consent_basis: ConsentBasis | null;
+  /** Provenance — API writes read `api` or `api:<source>`. */
+  consent_source: string | null;
+  consent_at: string | null;
+  consent_expires_at: string | null;
+  deliverability: ConsentDeliverability;
+  unsubscribed_at: string | null;
+  complained_at: string | null;
+  last_bounce_at: string | null;
+  /** Email channel only: the composed send-time suppression verdict. */
+  suppressed?: boolean;
+  /**
+   * Email channel only — why `suppressed` is true, prefixed by the layer
+   * (e.g. `suppression:manual`, `blacklist:global`, `deliverability:bounced`).
+   */
+  suppression_reason?: string | null;
+  [key: string]: unknown;
+}
+
+/** GET /v1/contacts/:id/consent — both channels at once. */
+export interface ContactConsent {
+  contact_id: string;
+  /** Contact-level block state — independent of per-channel consent. */
+  block_state: "none" | "workspace" | "global";
+  channels: {
+    whatsapp: ContactConsentChannel;
+    email: ContactConsentChannel;
+  };
+  [key: string]: unknown;
+}
+
+/**
+ * PUT /v1/contacts/:id/consent/:channel — record a consent decision with
+ * its provenance (the evidence trail stores source, IP, and user agent).
+ */
+export interface SetConsentParams {
+  /** "unknown" is a system state and cannot be set. */
+  state: "subscribed" | "unsubscribed";
+  /** Defaults to express_opt_in when subscribing. */
+  basis?: ConsentBasis;
+  /**
+   * Where the decision came from in your system; recorded as `api:<source>`
+   * (plain `api` when omitted). Max 100 chars.
+   */
+  source?: string;
+  /** ISO 8601 — when this consent expires. */
+  expires_at?: string;
+  /** End-user IP captured with the decision (evidence trail). */
+  ip?: string;
+  /** End-user user agent captured with the decision (evidence trail). */
+  user_agent?: string;
+}
+
 export interface NoteUpdateParams {
   /** New body (≤5000 chars; empty after trim → 400). */
   body?: string;
@@ -351,6 +437,83 @@ export interface DealCreateResult extends Deal {
   duplicate: boolean;
 }
 
+// ─────────────────────────── Products ───────────────────────────
+
+/**
+ * A row of the workspace product catalog, shared by deals and customer
+ * payments. `price` null = dynamic pricing. `vat_mode`/`vat_rate` are one
+ * both-or-neither pair (`null`s = the workspace payments default applies).
+ */
+export interface Product {
+  id: string;
+  workspace_id: string;
+  name: string;
+  /** Per-workspace-unique product code (human-facing). */
+  sku: string | null;
+  /** Per-workspace-unique id in your system — the POST idempotency key. */
+  external_id: string | null;
+  description: string | null;
+  /** JSON number in the workspace payment currency; null = dynamic pricing. */
+  price: number | null;
+  vat_mode: PaymentVatMode | null;
+  vat_rate: number | null;
+  is_active: boolean;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+
+/**
+ * POST /v1/products — create a product (idempotent upsert via `external_id`).
+ * `name` is required on create; a repeat POST whose `external_id` matches an
+ * existing product updates that product instead of creating a duplicate.
+ */
+export interface ProductCreateParams {
+  name: string;
+  /** Per-workspace-unique (409 `product_conflict` on a clash). Max 100 chars. */
+  sku?: string | null;
+  /** Per-workspace-unique idempotency key. Max 200 chars. */
+  external_id?: string | null;
+  description?: string | null;
+  /** Default price; null = dynamic pricing (deals need an explicit amount). */
+  price?: number | null;
+  /** Both-or-neither with `vat_rate`; send both null to clear the override. */
+  vat_mode?: PaymentVatMode | null;
+  /** VAT percent (0–100, max 2 decimals); paired with `vat_mode`. */
+  vat_rate?: number | null;
+  /** Inactive products stay on existing records but can't attach to new ones. */
+  is_active?: boolean;
+}
+
+/**
+ * PATCH /v1/products/:id — partial update; only the fields present in the
+ * body change. There is no DELETE: deactivate with `{ is_active: false }`.
+ */
+export type ProductUpdateParams = Partial<ProductCreateParams>;
+
+export interface ProductListParams {
+  /** Literal substring match on name or description (case-insensitive). */
+  q?: string;
+  /** Exact-match lookup by SKU. */
+  sku?: string;
+  /** Exact-match lookup by external id. */
+  external_id?: string;
+  is_active?: boolean;
+  /** Page size (max 500, default 50). */
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Response of POST /v1/products. Both outcomes return HTTP 201; `duplicate:
+ * true` = `external_id` matched an existing product, whose fields were
+ * updated instead of a new product being created.
+ */
+export interface ProductUpsertResult extends Product {
+  duplicate: boolean;
+}
+
 // ─────────────────────────── Transactional email ───────────────────────────
 
 export interface EmailTracking {
@@ -404,6 +567,61 @@ export interface EmailSendResult {
   provider_message_id: string | null;
   reason: string | null;
   created_at: string;
+}
+
+// ─────────────────────────── Suppressions ───────────────────────────
+
+/**
+ * Why an address is suppressed. API adds write one of
+ * `unsubscribe`/`bounce`/`complaint`/`manual`; system-created rows may carry
+ * other values (e.g. `global`).
+ */
+export type SuppressionReason =
+  | "unsubscribe"
+  | "bounce"
+  | "complaint"
+  | "manual"
+  | "global";
+
+/**
+ * A workspace email-suppression row — a send-time overlay deliberately
+ * separate from consent: adding a row does NOT change any contact's consent
+ * state, and removing one resubscribes no one; every email send checks both.
+ */
+export interface Suppression {
+  id: string;
+  email: string;
+  reason: SuppressionReason;
+  /** Which surface created the row — `api` for API adds. */
+  source: string | null;
+  note: string | null;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+export interface SuppressionCreateParams {
+  email: string;
+  /** Defaults to `manual`. */
+  reason?: "unsubscribe" | "bounce" | "complaint" | "manual";
+  /** Free-form note stored with the row (max 500 chars). */
+  note?: string;
+}
+
+export interface SuppressionListParams {
+  /** Exact-match filter (case-insensitive). */
+  email?: string;
+  /** Page size (max 500, default 50). */
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Response of POST /v1/suppressions. Both outcomes return HTTP 201;
+ * `duplicate: true` = the address was already suppressed and the existing
+ * row is returned.
+ */
+export interface SuppressionCreateResult extends Suppression {
+  duplicate: boolean;
 }
 
 // ─────────────────────────── Webhook endpoints ───────────────────────────
@@ -470,20 +688,101 @@ export const PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES = [
 export type PaymentRequestWebhookEventType =
   (typeof PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES)[number];
 
+/**
+ * The four contact lifecycle + consent events. Opt-in by listing, like the
+ * order events. created/updated/deleted fire for intentional writes only —
+ * bulk edits, CSV-import updates, and contact merges are deliberately quiet
+ * (bulk DELETES do emit per contact); consent_changed fires on real
+ * consent-state transitions plus suppress escalations, never for the
+ * contact-create consent seed, same-state re-assertions, or double-opt-in
+ * ceremony markers.
+ */
+export const CONTACT_WEBHOOK_EVENT_TYPES = [
+  "contact.created",
+  "contact.updated",
+  "contact.deleted",
+  "contact.consent_changed",
+] as const;
+export type ContactWebhookEventType =
+  (typeof CONTACT_WEBHOOK_EVENT_TYPES)[number];
+
+/**
+ * The inbound message event. Opt-in by listing. v1 = real WhatsApp inbound
+ * only, exactly once per WhatsApp message: reactions, blocked contacts, and
+ * WhatsApp coexistence echoes/history imports are all silent. Media rides as
+ * metadata only — never presigned URLs or storage keys.
+ */
+export const MESSAGE_WEBHOOK_EVENT_TYPES = ["message.received"] as const;
+export type MessageWebhookEventType =
+  (typeof MESSAGE_WEBHOOK_EVENT_TYPES)[number];
+
+/**
+ * The four deal lifecycle events. Opt-in by listing, like the order events.
+ * They fire for EVERY deal write source — manual, API, automations, and
+ * Salesforce sync — `data.source` says which.
+ */
+export const DEAL_WEBHOOK_EVENT_TYPES = [
+  "deal.created",
+  "deal.stage_changed",
+  "deal.won",
+  "deal.lost",
+] as const;
+export type DealWebhookEventType = (typeof DEAL_WEBHOOK_EVENT_TYPES)[number];
+
+/**
+ * The four booking lifecycle events. Opt-in by listing, like the order
+ * events. `booking.completed`/`booking.no_show` deliberately do not exist as
+ * webhooks — those statuses are sweep-derived, not user actions.
+ */
+export const BOOKING_WEBHOOK_EVENT_TYPES = [
+  "booking.created",
+  "booking.rescheduled",
+  "booking.cancelled",
+  "booking.reassigned",
+] as const;
+export type BookingWebhookEventType =
+  (typeof BOOKING_WEBHOOK_EVENT_TYPES)[number];
+
+/**
+ * The event-attendance event — ONE type for the whole family; the payload's
+ * `status`/`previous_status` carry the transition. Opt-in by listing.
+ */
+export const EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES = [
+  "event.attendance.changed",
+] as const;
+export type EventAttendanceWebhookEventType =
+  (typeof EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES)[number];
+
+/**
+ * The form submission event — ONE type for every surface; the payload's
+ * `origin` distinguishes standalone form / landing page / popup. Opt-in by
+ * listing.
+ */
+export const FORM_WEBHOOK_EVENT_TYPES = ["form.submitted"] as const;
+export type FormWebhookEventType = (typeof FORM_WEBHOOK_EVENT_TYPES)[number];
+
 /** Any event type registrable on a webhook endpoint. */
 export type WebhookEventType =
   | EmailWebhookEventType
   | OrderWebhookEventType
-  | PaymentRequestWebhookEventType;
+  | PaymentRequestWebhookEventType
+  | ContactWebhookEventType
+  | MessageWebhookEventType
+  | DealWebhookEventType
+  | BookingWebhookEventType
+  | EventAttendanceWebhookEventType
+  | FormWebhookEventType;
 
 /**
  * POST /v1/webhook-endpoints (max 3 per workspace).
  * `events` defaults to the three delivery events (`email.delivered`,
- * `email.bounced`, `email.complained`); the engagement types
- * (`email.opened`, `email.clicked`), the `order.*` lifecycle events, and
- * the `payment_request.*` lifecycle events must
- * be listed explicitly. An empty array is rejected. `email.failed` is
- * deprecated — accepted when listed, never delivered.
+ * `email.bounced`, `email.complained`); every other family is opt-in and
+ * must be listed explicitly — the engagement types (`email.opened`,
+ * `email.clicked`) and the `order.*`, `payment_request.*`, `contact.*`,
+ * `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`,
+ * and `form.submitted` families. A pre-existing registration never starts
+ * receiving a new family unasked. An empty array is rejected.
+ * `email.failed` is deprecated — accepted when listed, never delivered.
  */
 export interface WebhookEndpointCreateParams {
   url: string;
@@ -691,6 +990,283 @@ export interface PaymentRequestCancelledEvent {
   data: PaymentRequestWebhookEventData;
 }
 
+/**
+ * The compact `contact` block carried by `contact.created`/`contact.updated`
+ * payloads — a FIXED scalar-core projection: never junction arrays
+ * (tags/groups), custom fields, or engine-maintained columns. Fetch the full
+ * row with `otok.contacts.get(contact_id)`.
+ */
+export interface ContactWebhookSummary {
+  id: string;
+  phone: string | null;
+  email: string | null;
+  name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  lifecycle_stage: string | null;
+  source: string | null;
+  block_state: string | null;
+  lead_score: number | null;
+}
+
+export interface ContactCreatedEvent {
+  id: string;
+  type: "contact.created";
+  created_at: string;
+  data: {
+    contact_id: string;
+    contact: ContactWebhookSummary;
+    /** Which surface created the contact (e.g. `manual`, `api`, `form`). */
+    source: string;
+    /** Always `false` — the event fires only for fresh inserts. */
+    duplicate: boolean;
+  };
+}
+export interface ContactUpdatedEvent {
+  id: string;
+  type: "contact.updated";
+  created_at: string;
+  data: {
+    contact_id: string;
+    /**
+     * The changed field names — the same list the in-app Activity timeline
+     * records, including the `tags`/`groups` junction keys and
+     * `custom_fields.<key>` entries.
+     */
+    changed_fields: string[];
+    contact: ContactWebhookSummary;
+    source: string;
+  };
+}
+/** Last-known identifiers only — the row is gone; key on `contact_id`. */
+export interface ContactDeletedEvent {
+  id: string;
+  type: "contact.deleted";
+  created_at: string;
+  data: {
+    contact_id: string;
+    phone: string | null;
+    email: string | null;
+    name: string | null;
+  };
+}
+export interface ContactConsentChangedEvent {
+  id: string;
+  type: "contact.consent_changed";
+  created_at: string;
+  data: {
+    contact_id: string;
+    channel: ConsentChannel;
+    /**
+     * The consent-ledger action — e.g. `opt_in`, `double_opt_in_confirmed`,
+     * `unsubscribe`, `resubscribe`, `suppress`. Tolerate unknown values.
+     */
+    action: string;
+    consent_state: ConsentState;
+    /** `null` when no prior decision was stored. */
+    previous_state: ConsentState | null;
+    basis: ConsentBasis | null;
+    /** Provenance — API writes read `api` or `api:<source>`. */
+    source: string;
+    /** The consent-evidence ledger row this change wrote. */
+    consent_event_id: string;
+  };
+}
+
+/** `message.received` media block — METADATA only, never fetchable URLs. */
+export interface MessageMediaBlock {
+  mime_type: string | null;
+  filename: string | null;
+  bytes: number | null;
+}
+
+/**
+ * Real WhatsApp inbound only, exactly once per WhatsApp message. `media` is
+ * present on media messages only (omitted otherwise).
+ */
+export interface MessageReceivedEvent {
+  id: string;
+  type: "message.received";
+  created_at: string;
+  data: {
+    message_id: string;
+    conversation_id: string | null;
+    contact_id: string | null;
+    channel: "whatsapp_api";
+    /** Message type (`text`, `image`, …). Tolerate unknown values. */
+    type: string | null;
+    /** Body text, or the media caption, else `null`. */
+    text: string | null;
+    media?: MessageMediaBlock;
+    wa_message_id: string | null;
+    /** The Meta-provided message timestamp (ISO 8601 UTC). */
+    timestamp: string | null;
+  };
+}
+
+/**
+ * Known booking sources. Passed through verbatim from the booking row —
+ * **tolerate unknown values**: new sources may appear without an SDK bump.
+ */
+export type BookingWebhookSource = "public_page" | "manual" | "api" | "embed";
+
+/**
+ * Payload `data` of every `deal.*` event — a snapshot of the deal at event
+ * time, following the order-event conventions: money is a JSON number in the
+ * deal's currency, instants are ISO-8601 UTC or `null`, and the full field
+ * set is always present (explicit nulls, never omitted keys).
+ * `from_stage_id`/`from_stage_name` are set on `deal.stage_changed` only.
+ */
+export interface DealWebhookEventData {
+  deal_id: string;
+  contact_id: string;
+  pipeline_id: string;
+  pipeline_name: string | null;
+  stage_id: string;
+  stage_name: string | null;
+  from_stage_id: string | null;
+  from_stage_name: string | null;
+  status: DealStatus;
+  title: string | null;
+  amount: number | null;
+  currency: string | null;
+  owner_user_id: string | null;
+  external_reference: string | null;
+  /** `manual` | `api` | `automation` | `salesforce`. Tolerate unknown values. */
+  source: string;
+  expected_close_at: string | null;
+  closed_at: string | null;
+  lost_reason: string | null;
+}
+
+export interface DealCreatedEvent {
+  id: string;
+  type: "deal.created";
+  created_at: string;
+  data: DealWebhookEventData;
+}
+export interface DealStageChangedEvent {
+  id: string;
+  type: "deal.stage_changed";
+  created_at: string;
+  data: DealWebhookEventData;
+}
+export interface DealWonEvent {
+  id: string;
+  type: "deal.won";
+  created_at: string;
+  data: DealWebhookEventData;
+}
+export interface DealLostEvent {
+  id: string;
+  type: "deal.lost";
+  created_at: string;
+  data: DealWebhookEventData;
+}
+
+/**
+ * Payload `data` of every `booking.*` event — a snapshot of the booking at
+ * event time (full field set, explicit nulls). The booking module is
+ * deliberately multi-timezone, so BOTH the host and invitee timezones ride
+ * the payload. There is deliberately NO `manage_url` (a capability token).
+ * `previous_host_name` is set on `booking.reassigned` only.
+ */
+export interface BookingWebhookEventData {
+  booking_id: string;
+  contact_id: string;
+  meeting_type_id: string | null;
+  meeting_type_name: string | null;
+  host_user_id: string | null;
+  host_name: string | null;
+  previous_host_name: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  host_timezone: string | null;
+  invitee_timezone: string | null;
+  status: string | null;
+  location_type: string | null;
+  cancelled_by: string | null;
+  cancel_reason: string | null;
+  source: BookingWebhookSource | null;
+}
+
+export interface BookingCreatedEvent {
+  id: string;
+  type: "booking.created";
+  created_at: string;
+  data: BookingWebhookEventData;
+}
+export interface BookingRescheduledEvent {
+  id: string;
+  type: "booking.rescheduled";
+  created_at: string;
+  data: BookingWebhookEventData;
+}
+export interface BookingCancelledEvent {
+  id: string;
+  type: "booking.cancelled";
+  created_at: string;
+  data: BookingWebhookEventData;
+}
+export interface BookingReassignedEvent {
+  id: string;
+  type: "booking.reassigned";
+  created_at: string;
+  data: BookingWebhookEventData;
+}
+
+/**
+ * ONE event type for the whole attendance family — filter on `data.status`;
+ * `data.previous_status` carries the transition (`null` for fresh
+ * registrations and set-based bulk status updates).
+ */
+export interface EventAttendanceChangedEvent {
+  id: string;
+  type: "event.attendance.changed";
+  created_at: string;
+  data: {
+    attendance_id: string;
+    event_id: string;
+    contact_id: string;
+    /** `registered` | `attending` | `attended` | `no_show` | `cancelled`. */
+    status: string | null;
+    previous_status: string | null;
+    registered_at: string | null;
+    attended_at: string | null;
+    unregistered_at: string | null;
+    /** Compact event snapshot — `null` when unavailable. */
+    event: { id: string; name: string | null; start_at: string | null } | null;
+  };
+}
+
+/** Known form-submission origins (the `data.origin` discriminator). */
+export type FormSubmissionOrigin = "form" | "landing_page" | "popup";
+
+/**
+ * ONE event type for every submission surface — `data.origin` distinguishes
+ * standalone form / landing page / popup. Fires even when no contact was
+ * resolved (`data.contact_id` is then `null`).
+ */
+export interface FormSubmittedEvent {
+  id: string;
+  type: "form.submitted";
+  created_at: string;
+  data: {
+    form_id: string;
+    form_name: string;
+    /** Unique per submission — a secondary dedup key for your CRM. */
+    submission_id: string;
+    contact_id: string | null;
+    origin: FormSubmissionOrigin;
+    /** Set when `origin` is `landing_page`, else `null`. */
+    landing_page_id: string | null;
+    /** Set when `origin` is `popup`, else `null`. */
+    popup_id: string | null;
+    /** The submitted answers, keyed by form field ids. */
+    fields: Record<string, unknown>;
+  };
+}
+
 export type OtokWebhookEvent =
   | EmailDeliveredEvent
   | EmailBouncedEvent
@@ -706,7 +1282,22 @@ export type OtokWebhookEvent =
   | PaymentRequestCreatedEvent
   | PaymentRequestPaidEvent
   | PaymentRequestExpiredEvent
-  | PaymentRequestCancelledEvent;
+  | PaymentRequestCancelledEvent
+  | ContactCreatedEvent
+  | ContactUpdatedEvent
+  | ContactDeletedEvent
+  | ContactConsentChangedEvent
+  | MessageReceivedEvent
+  | DealCreatedEvent
+  | DealStageChangedEvent
+  | DealWonEvent
+  | DealLostEvent
+  | BookingCreatedEvent
+  | BookingRescheduledEvent
+  | BookingCancelledEvent
+  | BookingReassignedEvent
+  | EventAttendanceChangedEvent
+  | FormSubmittedEvent;
 
 // ─────────────────────────── Campaigns ───────────────────────────
 
