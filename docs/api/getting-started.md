@@ -1,6 +1,6 @@
 # Getting Started
 
-The oToK REST API lets you manage contacts, tags, groups, campaigns, deals, payments, orders, bookings, and transactional email from your own systems. All endpoints live under a versioned `/v1` path and authenticate with workspace API keys.
+The oToK REST API lets you manage contacts, tags, groups, campaigns, deals, payments, orders, bookings, broadcast email campaigns, newsletters, and transactional email from your own systems. All endpoints live under a versioned `/v1` path and authenticate with workspace API keys.
 
 ## Base URL
 
@@ -48,6 +48,8 @@ Endpoint groups that mirror a plan-gated product area additionally require that 
 | `/v1/orders*` (all routes, including the action routes) | Orders |
 | `/v1/campaigns*` (all routes, including `/execute`) | Campaigns |
 | `/v1/bookings*` and `/v1/meeting-types*` (all routes) | Booking |
+| `/v1/email-campaigns*` and `/v1/suppressions*` (all routes) | Email marketing (`email_marketing`) |
+| `/v1/newsletters*` and `/v1/newsletter-issues*` (all routes) | Newsletters (`newsletters`) |
 
 Note the **two distinct payment gates**: `payments` covers the payments ledger (`/v1/payments*`) and the contact documents read, while `workspace_payments` covers pay-links collected through the workspace's own connected payment provider (`/v1/payment-requests*`). A workspace can hold either feature without the other — the 403 message embeds whichever feature id is missing.
 
@@ -60,9 +62,9 @@ A workspace whose plan lacks the feature receives `403 Forbidden` on every call 
 }
 ```
 
-The identifier after `feature:` is the lowercase plan-feature id — `deals`, `payments`, `workspace_payments`, `orders`, `campaigns`, or `booking` — not the product display name. Key on `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"`, not on the message text.
+The identifier after `feature:` is the lowercase plan-feature id — `deals`, `payments`, `workspace_payments`, `orders`, `campaigns`, `booking`, `email_marketing`, or `newsletters` — not the product display name. Key on `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"`, not on the message text.
 
-All other resources — contacts (except the documents sub-route above), notes, tags, contact groups, templates, transactional emails, and webhook endpoints — require only plan-wide API access.
+All other resources — contacts (except the documents sub-route above), notes, tags, contact groups, products, templates, transactional emails, and webhook endpoints — require only plan-wide API access.
 
 ## Authentication
 
@@ -255,15 +257,17 @@ curl -G "https://app.otok.io/api/v1/contacts" \
 - Its UUID-parameter validation messages are worded differently: `"contact_id must be a UUID"` (orders) vs `"Invalid contact_id: must be a UUID"` (deals/payments).
 - There is no `search` parameter on `GET /v1/orders`.
 
-See [Deals](deals.md), [Payments](payments.md), and [Orders](orders.md).
+The email-marketing lists — `GET /v1/email-campaigns`, `GET /v1/newsletters`, and `GET /v1/newsletters/:id/issues` — paginate exactly like deals/payments (default 25, cap 100, malformed `limit`/`offset` → 400) with dedicated query parameters and no `filter`/`sort`/`search`. Like `GET /v1/payment-requests`, the campaign and issue lists reject an unknown `status` value with 400.
+
+See [Deals](deals.md), [Payments](payments.md), [Orders](orders.md), [Email Campaigns](email-campaigns.md), and [Newsletters](newsletters.md).
 
 ## Success status codes
 
 - `GET` / `PATCH` → **200**.
 - `POST` → **201**, including action-style routes (`/stage`, `/status`, `/cancel`, `/refund`, booking `/reschedule`, etc.). Treat any 2xx as success.
-- `POST /v1/campaigns/:id/execute` → **200** on success; failures use real error statuses (404/409 — see [Campaigns](campaigns.md)).
-- `DELETE /v1/webhook-endpoints/:id` → **204** (no body); `DELETE /v1/notes/:id` → **200** with `{"success": true}`. These are the **only** DELETE endpoints: the API never deletes customer data — contacts, deals, payments, orders, campaigns, tags, and contact groups have no DELETE routes.
-- The idempotent create routes (`POST /v1/contacts`, `/v1/deals`, `/v1/payments`, `/v1/orders`, `/v1/bookings`) return **201 for both** a fresh create and an upsert/replay. All of them except orders carry a top-level boolean **`duplicate`** field (`false` on a fresh create, `true` when the call matched an existing record); **`POST /v1/orders` carries no `duplicate` field** — both outcomes return the same full-order body (see [Orders](orders.md#post-apiv1orders)). Order **refunds** (`POST /v1/orders/:id/refunds`) do return `{ duplicate, order }` on their `external_refund_id` idempotency.
+- `POST /v1/campaigns/:id/execute` → **200** on success; failures use real error statuses (404/409 — see [Campaigns](campaigns.md)). The email-campaign and newsletter-issue lifecycle routes (`…/send`, `…/schedule`, `…/unschedule`, `…/publish`) also answer **200**.
+- `DELETE /v1/webhook-endpoints/:id` and `DELETE /v1/suppressions/:id` → **204** (no body); `DELETE /v1/notes/:id` and `DELETE /v1/newsletter-issues/:id` → **200** with `{"success": true}`. These are the **only** DELETE endpoints: the API never deletes customer data — contacts, deals, products, payments, orders, campaigns, tags, and contact groups have no DELETE routes (a newsletter issue is deletable only while never published; removing a suppression deletes no contact data).
+- The idempotent create routes (`POST /v1/contacts`, `/v1/deals`, `/v1/payments`, `/v1/orders`, `/v1/bookings`, `/v1/email-campaigns`, `/v1/products` — by `external_id` — and issue creation `POST /v1/newsletters/:id/issues`) return **201 for both** a fresh create and an upsert/replay. All of them except orders carry a top-level boolean **`duplicate`** field (`false` on a fresh create, `true` when the call matched an existing record); **`POST /v1/orders` carries no `duplicate` field** — both outcomes return the same full-order body (see [Orders](orders.md#post-apiv1orders)). Order **refunds** (`POST /v1/orders/:id/refunds`) do return `{ duplicate, order }` on their `external_refund_id` idempotency.
 - **`POST /v1/payment-requests` is deliberately NOT idempotent** — there is no idempotency key on the resource, and a repeat POST mints a second, independently payable link (see [Payment Requests](payment-requests.md)).
 - `POST /v1/emails` is the one idempotent route whose status code also splits: **201** for a fresh send, **200** for an idempotent replay (its body carries the same `duplicate` field).
 
@@ -285,6 +289,8 @@ Every authenticated `/v1` request that reaches an endpoint is recorded (method, 
 - [Payments](payments.md)
 - [Payment Requests](payment-requests.md) — hosted pay-links through your own provider
 - [Orders](orders.md) — e-commerce orders, refunds, mark-paid/cancel
+- [Email Campaigns](email-campaigns.md) — broadcast email campaigns: the shared content contract, estimate, send/schedule
+- [Newsletters](newsletters.md) — sequenced newsletter issues with per-subscriber catch-up
 - [Transactional Emails](emails.md)
 - [Webhooks](webhooks.md) — email delivery/engagement events + order and payment-request lifecycle events
 - [Bookings & Meeting Types](bookings.md)

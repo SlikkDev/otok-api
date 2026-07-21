@@ -1,16 +1,12 @@
 {
-  "name": "@otok/node",
-  "version": "0.7.0",
-  "description": "Official Node.js SDK for the oToK marketing platform public API (/v1) — contacts, deals, orders, transactional email, webhooks, and a high-level e-commerce layer.",
+  "name": "@otok/mcp",
+  "version": "0.1.0",
+  "description": "Official MCP (Model Context Protocol) server for the oToK marketing platform — exposes the public /v1 API to AI assistants, starting with the email-marketing surface (email campaigns + smart newsletters).",
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    },
-    "./package.json": "./package.json"
+  "bin": {
+    "otok-mcp": "dist/index.js"
   },
   "publishConfig": {
     "access": "public"
@@ -31,23 +27,26 @@
   },
   "keywords": [
     "otok",
-    "marketing",
-    "crm",
-    "sdk",
-    "api-client",
-    "e-commerce",
-    "orders",
-    "webhooks",
-    "transactional-email"
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "email-marketing",
+    "newsletters",
+    "campaigns"
   ],
   "repository": {
     "type": "git",
     "url": "https://github.com/SlikkDev/otok-api.git",
-    "directory": "sdk/node"
+    "directory": "mcp"
   },
-  "homepage": "https://github.com/SlikkDev/otok-api/tree/main/sdk/node#readme",
+  "homepage": "https://github.com/SlikkDev/otok-api/tree/main/mcp#readme",
   "bugs": {
     "url": "https://github.com/SlikkDev/otok-api/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@otok/node": "^0.7.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^18.19.0",

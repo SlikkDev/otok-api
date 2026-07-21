@@ -32,6 +32,8 @@ const GUIDES = [
   ["payment-requests", "Payment Requests"],
   ["orders", "Orders"],
   ["emails", "Transactional Emails"],
+  ["email-campaigns", "Email Campaigns"],
+  ["newsletters", "Newsletters"],
   ["consent-and-suppressions", "Consent & Suppressions"],
   ["webhooks", "Webhooks"],
   ["bookings", "Bookings & Meeting Types"],

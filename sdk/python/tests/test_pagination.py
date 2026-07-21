@@ -91,6 +91,27 @@ class TestPaginationIterators:
         for page in transport.pages:
             assert page["query"]["status"] == ["pending"]
 
+    def test_email_campaigns_iter_uses_the_100_cap_and_forwards_the_status_filter(self) -> None:
+        client, transport = make_client(120)
+        campaigns = list(client.email_campaigns.iter({"status": "sent"}))
+        assert len(campaigns) == 120
+        assert page_shapes(transport) == [(100, 0), (100, 100)]
+        for page in transport.pages:
+            assert page["query"]["status"] == ["sent"]
+
+    def test_newsletters_iter_uses_the_100_cap(self) -> None:
+        client, transport = make_client(3)
+        list(client.newsletters.iter())
+        assert page_shapes(transport) == [(100, 0)]
+
+    def test_newsletter_issues_iter_pages_the_nested_route(self) -> None:
+        client, transport = make_client(150)
+        issues = list(client.newsletters.iter_issues("nl-1", {"status": "draft"}))
+        assert len(issues) == 150
+        assert page_shapes(transport) == [(100, 0), (100, 100)]
+        for page in transport.pages:
+            assert page["query"]["status"] == ["draft"]
+
     def test_orders_iter_uses_the_deals_payments_cap(self) -> None:
         client, transport = make_client(150)
         orders = list(client.orders.iter({"limit": 250}))

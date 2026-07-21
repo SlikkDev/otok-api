@@ -110,6 +110,69 @@ describe("pagination iterators", () => {
     for (const page of pages) expect(page.query.get("status")).toBe("pending");
   });
 
+  it("emailCampaigns.iter uses the deals/payments cap (100) and forwards filters", async () => {
+    const { fetchMock, pages } = pagedFetch(120);
+    const otok = makeClient(fetchMock as any);
+    const campaigns = await collect(
+      otok.emailCampaigns.iter({ status: "sent" }),
+    );
+    expect(campaigns).toHaveLength(120);
+    expect(pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+    for (const page of pages) expect(page.query.get("status")).toBe("sent");
+  });
+
+  it("audiences.iter and senderProfiles.iter use the deals/payments cap (100)", async () => {
+    const { fetchMock, pages } = pagedFetch(120);
+    const otok = makeClient(fetchMock as any);
+    const audiences = await collect(otok.audiences.iter({ kind: "static" }));
+    expect(audiences).toHaveLength(120);
+    expect(pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+    for (const page of pages) expect(page.query.get("kind")).toBe("static");
+
+    const senders = pagedFetch(101);
+    const otok2 = makeClient(senders.fetchMock as any);
+    expect(await collect(otok2.senderProfiles.iter())).toHaveLength(101);
+    expect(senders.pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+  });
+
+  it("newsletters.iter and iterIssues use the deals/payments cap (100)", async () => {
+    const { fetchMock, pages } = pagedFetch(101);
+    const otok = makeClient(fetchMock as any);
+    expect(await collect(otok.newsletters.iter())).toHaveLength(101);
+    expect(pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+
+    const issues = pagedFetch(150);
+    const otok2 = makeClient(issues.fetchMock as any);
+    const rows = await collect(
+      otok2.newsletters.iterIssues("nl-1", { status: "draft", limit: 250 }),
+    );
+    expect(rows).toHaveLength(150);
+    // Overrides above the cap clamp to 100; filters forward on every page.
+    expect(issues.pages.map((p) => [p.limit, p.offset])).toEqual([
+      [100, 0],
+      [100, 100],
+    ]);
+    for (const page of issues.pages) {
+      expect(page.query.get("status")).toBe("draft");
+    }
+    const [issuesUrl] = issues.fetchMock.mock.calls[0] as [any];
+    expect(new URL(String(issuesUrl)).pathname).toBe(
+      "/api/v1/newsletters/nl-1/issues",
+    );
+  });
+
   it("orders.iter uses the deals/payments cap (100), clamping overrides", async () => {
     const { fetchMock, pages } = pagedFetch(150);
     const otok = makeClient(fetchMock as any);

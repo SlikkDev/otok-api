@@ -1,18 +1,22 @@
 import { CommerceApi } from "./commerce";
 import { HttpClient, type HttpClientOptions } from "./http";
 import {
+  AudiencesApi,
   BookingsApi,
   CampaignsApi,
   ContactGroupsApi,
   ContactsApi,
   DealsApi,
+  EmailCampaignsApi,
   EmailsApi,
   MeetingTypesApi,
+  NewslettersApi,
   OrdersApi,
   PaymentRequestsApi,
   PaymentsApi,
   PipelinesApi,
   ProductsApi,
+  SenderProfilesApi,
   SuppressionsApi,
   TagsApi,
   TemplatesApi,
@@ -50,6 +54,10 @@ export class OtokClient {
   readonly suppressions: SuppressionsApi;
   readonly emails: EmailsApi;
   readonly campaigns: CampaignsApi;
+  readonly audiences: AudiencesApi;
+  readonly senderProfiles: SenderProfilesApi;
+  readonly emailCampaigns: EmailCampaignsApi;
+  readonly newsletters: NewslettersApi;
   readonly templates: TemplatesApi;
   readonly payments: PaymentsApi;
   readonly paymentRequests: PaymentRequestsApi;
@@ -73,6 +81,10 @@ export class OtokClient {
     this.suppressions = new SuppressionsApi(this.http);
     this.emails = new EmailsApi(this.http);
     this.campaigns = new CampaignsApi(this.http);
+    this.audiences = new AudiencesApi(this.http);
+    this.senderProfiles = new SenderProfilesApi(this.http);
+    this.emailCampaigns = new EmailCampaignsApi(this.http);
+    this.newsletters = new NewslettersApi(this.http);
     this.templates = new TemplatesApi(this.http);
     this.payments = new PaymentsApi(this.http);
     this.paymentRequests = new PaymentRequestsApi(this.http);

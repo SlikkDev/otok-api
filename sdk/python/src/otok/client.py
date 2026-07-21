@@ -12,18 +12,22 @@ from ._http import (
 )
 from .commerce import CommerceApi
 from .resources import (
+    AudiencesApi,
     BookingsApi,
     CampaignsApi,
     ContactGroupsApi,
     ContactsApi,
     DealsApi,
+    EmailCampaignsApi,
     EmailsApi,
     MeetingTypesApi,
+    NewslettersApi,
     OrdersApi,
     PaymentRequestsApi,
     PaymentsApi,
     PipelinesApi,
     ProductsApi,
+    SenderProfilesApi,
     SuppressionsApi,
     TagsApi,
     TemplatesApi,
@@ -89,6 +93,10 @@ class OtokClient:
         self.suppressions = SuppressionsApi(self._http)
         self.emails = EmailsApi(self._http)
         self.campaigns = CampaignsApi(self._http)
+        self.audiences = AudiencesApi(self._http)
+        self.sender_profiles = SenderProfilesApi(self._http)
+        self.email_campaigns = EmailCampaignsApi(self._http)
+        self.newsletters = NewslettersApi(self._http)
         self.templates = TemplatesApi(self._http)
         self.payments = PaymentsApi(self._http)
         self.payment_requests = PaymentRequestsApi(self._http)

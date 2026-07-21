@@ -8,6 +8,7 @@ on:
     paths:
       - "sdk/node/**"
       - "sdk/python/**"
+      - "mcp/**"
       - ".github/workflows/ci.yml"
   push:
     branches:
@@ -15,6 +16,7 @@ on:
     paths:
       - "sdk/node/**"
       - "sdk/python/**"
+      - "mcp/**"
       - ".github/workflows/ci.yml"
 
 jobs:
@@ -34,6 +36,34 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
+
+  mcp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # @otok/mcp depends on "@otok/node": "^0.7.0", which may not be on npm
+      # yet when this runs — build the sibling workspace copy and pack it, so
+      # the tarball satisfies the (unchanged) semver range. mcp/ has no
+      # lockfile until the registry serves ^0.7.0 (see mcp/README.md).
+      - name: Build + pack the local @otok/node
+        working-directory: sdk/node
+        run: |
+          npm ci
+          npm run build
+          mkdir -p ../../mcp/.local
+          npm pack --pack-destination ../../mcp/.local
+      - name: Install (tarball satisfies @otok/node ^0.7.0)
+        working-directory: mcp
+        run: npm install --no-save ./.local/otok-node-*.tgz
+      - run: npm run typecheck
+        working-directory: mcp
+      - run: npm run build
+        working-directory: mcp
+      - run: npm test
+        working-directory: mcp
 
   sdk-python:
     runs-on: ubuntu-latest

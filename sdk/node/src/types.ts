@@ -1358,6 +1358,504 @@ export interface CampaignExecuteResult {
   [key: string]: unknown;
 }
 
+// ─────────────────────────── Audiences ───────────────────────────
+
+export type AudienceKind = "dynamic" | "static";
+
+/**
+ * A saved workspace audience summary row, as returned by GET /v1/audiences —
+ * the reusable targeting selectors campaigns and email campaigns accept as
+ * `audience_id`. The stored `definition` (the `$where` condition tree behind
+ * a dynamic audience) is deliberately never exposed through the public API.
+ * `last_count` is an advisory size cache stamped when the audience was last
+ * counted or snapshotted in-app — never a live resolution (estimate a
+ * campaign's real reach with `emailCampaigns.estimate`).
+ */
+export interface AudienceSummary {
+  id: string;
+  name: string;
+  /** `dynamic` = re-evaluated live at every use; `static` = frozen membership. */
+  kind: AudienceKind;
+  /** Advisory size cache — may be stale or null (never counted). */
+  last_count: number | null;
+  /** When `last_count` was stamped. */
+  last_counted_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * GET /v1/audiences query params. Pages like deals/payments (default 25,
+ * cap 100). An unknown `kind` value 400s.
+ */
+export interface AudienceListParams {
+  kind?: AudienceKind;
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+// ─────────────────────────── Sender profiles ───────────────────────────
+
+/**
+ * An email from-identity, as returned by GET /v1/sender-profiles — the
+ * selectors email campaigns accept as `sender_profile_id`. `verified` is the
+ * send-readiness signal (`true` exactly when the linked sending domain's
+ * status is `verified` — the same gate in-app sends assert); DKIM/DNS
+ * verification material is never returned. Profiles are managed in-app
+ * (Settings → Email).
+ */
+export interface SenderProfile {
+  id: string;
+  /** Display name recipients see. */
+  from_name: string;
+  /** The composed sending address (`local-part@domain`). */
+  from_email: string;
+  /** Reply-to address, when it differs from `from_email`. */
+  reply_to: string | null;
+  /** Email delivery backend behind this profile. */
+  provider: "smtp" | "ses";
+  /** Whether this is the workspace's default sender profile. */
+  is_default: boolean;
+  sending_domain_id: string;
+  /** The sending domain (the part after `@` in `from_email`). */
+  domain: string;
+  /** The sending domain's verification state. */
+  domain_status: "pending" | "verifying" | "verified" | "failed" | "disabled";
+  /** `true` exactly when `domain_status` is `verified` — this profile can pass the launch gate. */
+  verified: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * GET /v1/sender-profiles query params. Pages like deals/payments (default
+ * 25, cap 100).
+ */
+export interface SenderProfileListParams {
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+// ─────────────────── Email campaigns & newsletters ───────────────────
+
+export type ContentDirection = "ltr" | "rtl";
+
+export type ContentBlockKind =
+  | "heading"
+  | "paragraph"
+  | "button"
+  | "bullets"
+  | "spacer"
+  | "image"
+  | "divider"
+  | "snippet";
+
+/**
+ * One block of the `blocks` content source. `kind` selects the shape; the
+ * other fields apply per kind — an unknown `kind` or a mistyped field returns
+ * 400 `invalid_content`. Text fields (`text`, `items` entries, button
+ * `label`) may embed `[[…]]` variable tokens.
+ *
+ * | kind | fields | notes |
+ * |---|---|---|
+ * | `heading` | `text`, `level` | `level` 1–3 (out of range clamps; omitted → 2). |
+ * | `paragraph` | `text` | Empty text drops the block. |
+ * | `button` | `label`, `url` | Themed CTA button; non-http(s) URLs are replaced with a safe placeholder. |
+ * | `bullets` | `items` | Bullet list. |
+ * | `spacer` | — | Fixed vertical spacing. |
+ * | `image` | `url`, `alt` | `url` must be absolute https (else 400 `invalid_content`). |
+ * | `divider` | — | Horizontal rule. |
+ * | `snippet` | `id` **or** `name` | Splices a workspace snippet (no match → 400 `unknown_snippet`). |
+ */
+export interface ContentBlock {
+  kind: ContentBlockKind;
+  /** `heading` / `paragraph` text (may embed `[[variable : fallback]]` tokens). */
+  text?: string;
+  /** `heading` only (1–3). */
+  level?: number;
+  /** `button` only — the button text. */
+  label?: string;
+  /** `button` link / `image` source (image URLs must be absolute https). */
+  url?: string;
+  /** `bullets` only. */
+  items?: string[];
+  /** `image` only — alt text. */
+  alt?: string;
+  /** `snippet` only — resolve by snippet UUID. */
+  id?: string;
+  /** `snippet` only — resolve by case-insensitive exact name. */
+  name?: string;
+}
+
+/**
+ * A CommonMark subset plus two directive lines (each on its own line):
+ * `::button[Label](https://url)` → a themed CTA button block, and
+ * `::snippet[name-or-uuid]` → splices a workspace snippet (unknown reference
+ * → 400 `unknown_snippet`). `[[path : fallback]]` variable tokens become
+ * per-recipient personalization pills. Raw HTML never passes through — tags
+ * are stripped to their text content with a warning.
+ */
+export interface MarkdownContentInput {
+  direction?: ContentDirection;
+  markdown: string;
+  blocks?: never;
+  design_json?: never;
+}
+
+/** A typed block array — each item is one {@link ContentBlock}, rendered in order. */
+export interface BlocksContentInput {
+  direction?: ContentDirection;
+  blocks: ContentBlock[];
+  markdown?: never;
+  design_json?: never;
+}
+
+/**
+ * A raw editor document (the native design JSON the in-app email editor
+ * submits), passed through after a structural sanity check. Use this to
+ * replay a document read back from the API (a GET's `design_json`);
+ * authoring from scratch is easier with `markdown` or `blocks`.
+ */
+export interface DesignJsonContentInput {
+  direction?: ContentDirection;
+  design_json: Record<string, unknown>;
+  markdown?: never;
+  blocks?: never;
+}
+
+/**
+ * The shared authoring contract for email-campaign bodies and newsletter
+ * issues: an optional `direction` plus EXACTLY ONE of `markdown` | `blocks` |
+ * `design_json` (zero or two-plus sources → 400 `invalid_content`; total
+ * content size capped at 512,000 characters). Whichever source is sent
+ * compiles immediately — the write response's `compile` envelope reports
+ * errors and warnings up front, not at send time.
+ */
+export type ContentInput =
+  | MarkdownContentInput
+  | BlocksContentInput
+  | DesignJsonContentInput;
+
+/**
+ * Present on campaign/issue WRITE responses (create, PATCH, and idempotent
+ * replays that updated the record — never on plain GETs; a post-launch
+ * campaign replay omits it entirely). `errors` are render problems to fix
+ * before sending; `warnings` are lossy-but-accepted conversions (stripped
+ * raw HTML, a dropped non-https image, clamped heading levels, an unknown
+ * `::directive` kept as text). `ok` is `true` when `errors` is empty; a
+ * write with no `content` in the payload reports `ok: true` with empty
+ * arrays.
+ */
+export interface CompileResult {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+/** Response of GET /v1/email-campaigns/:id/estimate. */
+export interface AudienceEstimate {
+  /** Recipients the stored targeting resolves to right now. */
+  estimated_recipients: number;
+}
+
+/**
+ * The API mutates only `draft`/`scheduled` campaigns; everything from the
+ * launch claim onward (`sending`, `paused`, `sent`, `failed`, `cancelled`)
+ * is system-managed.
+ */
+export type EmailCampaignStatus =
+  | "draft"
+  | "scheduled"
+  | "sending"
+  | "paused"
+  | "sent"
+  | "failed"
+  | "cancelled";
+
+/**
+ * Broadcast email campaign as returned by the API. The stored
+ * subject/preheader override columns are read AND written under the names
+ * `subject`/`preheader`, so a GET → tweak → PATCH round-trip echoes cleanly.
+ * List rows omit the content columns (`template_id`, `design_json`,
+ * `compiled_html`, `compiled_styles`, `plain_text`) and the in-app-only A/B
+ * fields; single reads and write responses include them.
+ */
+export interface EmailCampaign {
+  id: string;
+  name: string;
+  status: EmailCampaignStatus;
+  sender_profile_id: string | null;
+  /** May embed `[[…]]` variable tokens, resolved per recipient. */
+  subject: string | null;
+  preheader: string | null;
+  direction: ContentDirection | null;
+  /** Preference-center topic — opted-out contacts are excluded at send. */
+  topic_key: string | null;
+  contact_group_ids: string[] | null;
+  audience_id: string | null;
+  /** A `$where` condition tree (same grammar as the contacts list filter). */
+  audience_filters: Record<string, unknown> | null;
+  scheduled_at: string | null;
+  timezone: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  total_recipients: number | null;
+  sent_count: number | null;
+  delivered_count: number | null;
+  open_count: number | null;
+  click_count: number | null;
+  bounce_count: number | null;
+  complaint_count: number | null;
+  unsubscribe_count: number | null;
+  failed_count: number | null;
+  /** Terminal-but-not-failed recipients (suppression/eligibility skips). */
+  skipped_count: number | null;
+  pending_retry_count: number | null;
+  /** Your idempotency reference, unique per workspace. */
+  external_reference: string | null;
+  created_at: string;
+  updated_at: string | null;
+  /**
+   * In-app template reference — always null for API-authored content; a
+   * PATCH with `content` clears it (the patched content is what sends).
+   * Single reads/write responses only, omitted on list rows.
+   */
+  template_id?: string | null;
+  /** The stored editor document. Omitted on list rows. */
+  design_json?: Record<string, unknown> | null;
+  /** Compiled body fragment. Omitted on list rows. */
+  compiled_html?: string | null;
+  /** Compiled head styles. Omitted on list rows. */
+  compiled_styles?: string | null;
+  /** Compiled plain-text part. Omitted on list rows. */
+  plain_text?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * POST /v1/email-campaigns — create a draft campaign (idempotent upsert via
+ * `external_reference`). `content` compiles immediately; the campaign starts
+ * as `draft` — launch with `send`/`schedule`.
+ */
+export interface EmailCampaignCreateParams {
+  name: string;
+  /** May embed `[[…]]` variable tokens. Max 400 chars. */
+  subject: string;
+  preheader?: string;
+  /** Must belong to the workspace (400 `sender_profile_not_found`). */
+  sender_profile_id: string;
+  /**
+   * Idempotency key (max 255 chars). A repeat POST with the same value
+   * updates that campaign's fields while it is still draft/scheduled
+   * (`duplicate: true`); once the launch claimed it the campaign returns
+   * verbatim with nothing mutated (and no `compile` envelope).
+   */
+  external_reference?: string;
+  content: ContentInput;
+  /** Saved audience id; wins over `audience_filters`. */
+  audience_id?: string;
+  /** Ad-hoc `$where` condition tree; validated on write. */
+  audience_filters?: Record<string, unknown>;
+  /** Additional contact-group targeting (OR semantics), narrowing the audience. */
+  contact_group_ids?: string[];
+  /** Preference-center topic key — opted-out contacts are excluded. */
+  topic_key?: string;
+}
+
+/**
+ * PATCH /v1/email-campaigns/:id — same field set as create minus
+ * `external_reference`; only present fields are touched. Nullable fields
+ * clear on an explicit null; a `content` change recompiles (and detaches an
+ * in-app template — the patched content is what sends).
+ */
+export interface EmailCampaignUpdateParams {
+  name?: string;
+  subject?: string | null;
+  preheader?: string | null;
+  sender_profile_id?: string;
+  content?: ContentInput;
+  audience_id?: string | null;
+  audience_filters?: Record<string, unknown> | null;
+  contact_group_ids?: string[] | null;
+  topic_key?: string | null;
+}
+
+/**
+ * GET /v1/email-campaigns query params. Pages like deals/payments (default
+ * 25, cap 100). An unknown `status` value 400s.
+ */
+export interface EmailCampaignListParams {
+  status?: EmailCampaignStatus;
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Response of POST /v1/email-campaigns. Both outcomes return HTTP 201;
+ * `duplicate: true` = `external_reference` matched an existing campaign —
+ * still-draft/scheduled campaigns had their fields updated, post-launch
+ * campaigns return verbatim (and `compile` is then absent, since nothing was
+ * recompiled).
+ */
+export interface EmailCampaignCreateResult extends EmailCampaign {
+  duplicate: boolean;
+  /** Absent only on a post-launch verbatim replay. */
+  compile?: CompileResult;
+}
+
+/** Response of PATCH /v1/email-campaigns/:id — the campaign plus the compile envelope. */
+export interface EmailCampaignUpdateResult extends EmailCampaign {
+  compile: CompileResult;
+}
+
+export type NewsletterStatus = "active" | "paused" | "archived";
+
+/**
+ * A smart newsletter (a sequence of issues with per-subscriber catch-up).
+ * List rows carry the summary fields typed here; a single read additionally
+ * returns the full stored configuration (enrollment policy, catch-up
+ * cadence, tag auto-subscribe, chrome snippet assignments, public-archive
+ * settings) — managed in-app and available via the index signature.
+ */
+export interface Newsletter {
+  id: string;
+  name: string;
+  description: string | null;
+  status: NewsletterStatus;
+  /** null = the workspace default profile is used at send time. */
+  sender_profile_id: string | null;
+  /** Computed — subscriptions currently in `active` status. */
+  active_subscriber_count: number;
+  created_at: string;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * POST /v1/newsletters — a `name` alone suffices; cadence, enrollment policy
+ * and archive settings take their in-app defaults. Enforces the plan's
+ * newsletter cap (403 `PLAN_LIMIT_EXCEEDED`); a duplicate name throws 409
+ * `duplicate_name`.
+ */
+export interface NewsletterCreateParams {
+  /** Unique per workspace, case-insensitive. Max 120 chars. */
+  name: string;
+  description?: string;
+  /** Omit to fall back to the workspace default profile at send time. */
+  sender_profile_id?: string;
+}
+
+/** GET /v1/newsletters query params (default 25, cap 100). */
+export interface NewsletterListParams {
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+export type NewsletterIssueStatus = "draft" | "scheduled" | "published";
+
+/**
+ * One issue in a newsletter's sequence. `issue_number` is assigned AT
+ * PUBLISH (null on drafts/scheduled issues) — issue #N always means the Nth
+ * published issue. List rows omit the content columns (`design_json`,
+ * `compiled_html`, `compiled_styles`, `plain_text`); single reads and write
+ * responses include them.
+ */
+export interface NewsletterIssue {
+  id: string;
+  newsletter_id: string;
+  /** Assigned at publish; null until then. */
+  issue_number: number | null;
+  /** May embed `[[…]]` variable tokens, resolved per recipient. */
+  subject: string | null;
+  preheader: string | null;
+  status: NewsletterIssueStatus;
+  scheduled_at: string | null;
+  published_at: string | null;
+  /** Whether the issue appears in the newsletter's public archive (when enabled). */
+  include_in_archive: boolean;
+  /** Your idempotency reference, unique per workspace. */
+  external_reference: string | null;
+  created_at: string;
+  updated_at: string | null;
+  /** The stored editor document. Omitted on list rows. */
+  design_json?: Record<string, unknown> | null;
+  /** Compiled body fragment. Omitted on list rows. */
+  compiled_html?: string | null;
+  /** Compiled head styles. Omitted on list rows. */
+  compiled_styles?: string | null;
+  /** Compiled plain-text part. Omitted on list rows. */
+  plain_text?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * POST /v1/newsletters/:id/issues — all fields optional (an issue can start
+ * as an empty placeholder), but publishing or scheduling requires a subject
+ * and compiled content (409 `issue_missing_content`).
+ */
+export interface NewsletterIssueCreateParams {
+  /** May embed `[[…]]` variable tokens. Max 400 chars. */
+  subject?: string;
+  preheader?: string;
+  /** Default true. */
+  include_in_archive?: boolean;
+  /**
+   * Idempotency key (max 255 chars). A repeat POST with the same value
+   * updates the matched issue's content/fields instead of creating a
+   * duplicate (`duplicate: true`) — never its `status`, `scheduled_at`, or
+   * `issue_number`. One reference maps to one issue per WORKSPACE — a replay
+   * under a different newsletter throws 409 `external_reference_in_use`.
+   */
+  external_reference?: string;
+  content?: ContentInput;
+}
+
+/**
+ * PATCH /v1/newsletter-issues/:id — only present fields are touched.
+ * `subject`/`preheader` clear on an explicit null. Published issues stay
+ * editable (a content change recompiles); a scheduled issue's content cannot
+ * be cleared — unschedule first.
+ */
+export interface NewsletterIssueUpdateParams {
+  subject?: string | null;
+  preheader?: string | null;
+  include_in_archive?: boolean;
+  content?: ContentInput;
+}
+
+/**
+ * GET /v1/newsletters/:id/issues query params (default 25, cap 100). An
+ * unknown `status` value 400s.
+ */
+export interface NewsletterIssueListParams {
+  status?: NewsletterIssueStatus;
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Response of POST /v1/newsletters/:id/issues. Both outcomes return HTTP
+ * 201; `duplicate: true` = `external_reference` matched an existing issue,
+ * whose content/fields were updated — status, scheduled_at and issue_number
+ * are never touched on a replay.
+ */
+export interface NewsletterIssueCreateResult extends NewsletterIssue {
+  duplicate: boolean;
+  compile: CompileResult;
+}
+
+/** Response of PATCH /v1/newsletter-issues/:id — the issue plus the compile envelope. */
+export interface NewsletterIssueUpdateResult extends NewsletterIssue {
+  compile: CompileResult;
+}
+
 // ─────────────────────────── Templates (WhatsApp) ───────────────────────────
 
 export interface MessageTemplate {

@@ -1,0 +1,7 @@
+# @otok/node is consumed from a locally packed tarball until 0.6.0 is on npm
+# (see README.md → Local development), so the lockfile would pin file: paths.
+# Regenerate and commit package-lock.json once the registry serves ^0.6.0.
+package-lock.json
+node_modules/
+dist/
+.local/

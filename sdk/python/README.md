@@ -2,7 +2,7 @@
 
 Official Python SDK for the [oToK](https://github.com/SlikkDev/otok-api) marketing platform public API (`/v1`).
 
-Gives bespoke websites and e-commerce stores out-of-the-box integration with oToK: contact upserts, sales deals, e-commerce orders, transactional email, WhatsApp templates, campaigns, payments, hosted pay-links, bookings — plus signed-webhook verification and a high-level e-commerce layer that is safe to retry by design.
+Gives bespoke websites and e-commerce stores out-of-the-box integration with oToK: contact upserts, sales deals, e-commerce orders, transactional email, broadcast email campaigns, newsletters, WhatsApp templates, campaigns, payments, hosted pay-links, bookings — plus signed-webhook verification and a high-level e-commerce layer that is safe to retry by design.
 
 - **Python 3.9+**, zero runtime dependencies (stdlib `urllib` behind an injectable transport)
 - Full type hints (`py.typed`) derived from the real API contract
@@ -56,7 +56,7 @@ for contact in client.contacts.iter({"filter": {"lifecycle_stage": "customer"}})
     print(contact["email"])
 ```
 
-Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, payment requests, and orders, which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
+Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, payment requests, orders, email campaigns, and newsletters (including newsletter issues), which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
 
 ```python
 for deal in client.deals.iter({"status": "open", "limit": 50}):
@@ -304,6 +304,10 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 | `client.products` | `GET/POST /v1/products`, `GET/PATCH /v1/products/:id` — the product catalog shared by deals and payments (POST = idempotent upsert by `external_id`; no delete — deactivate with `is_active: False`) |
 | `client.emails` | `POST /v1/emails` (transactional, idempotent) |
 | `client.suppressions` | `GET/POST /v1/suppressions`, `DELETE /v1/suppressions/:id` — the email suppression list (`email_marketing` feature; add is idempotent, and deliberately independent of consent) |
+| `client.audiences` | `GET /v1/audiences` — read-only discovery of saved audiences (the `audience_id` targeting selectors; rows carry the advisory `last_count` size cache but never the stored definition) |
+| `client.sender_profiles` | `GET /v1/sender-profiles` — read-only discovery of email from-identities (the `sender_profile_id` selectors) with the `verified` send-readiness signal (`email_marketing` feature) |
+| `client.email_campaigns` | `GET/POST /v1/email-campaigns`, `GET/PATCH /v1/email-campaigns/:id`, `GET …/estimate`, `POST …/send`, `POST …/schedule`, `POST …/unschedule` — broadcast email campaigns authored through the shared content contract (`email_marketing` feature; POST = idempotent upsert by `external_reference`) |
+| `client.newsletters` | `GET/POST /v1/newsletters`, `GET /v1/newsletters/:id`; issues: `GET/POST /v1/newsletters/:id/issues`, `GET/PATCH/DELETE /v1/newsletter-issues/:id`, `POST …/publish`, `POST …/schedule`, `POST …/unschedule` (`newsletters` feature; issue POST = idempotent upsert by `external_reference`) |
 | `client.campaigns` | `GET/POST /v1/campaigns`, `GET/PATCH /v1/campaigns/:id`, `POST /v1/campaigns/:id/execute` |
 | `client.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
 | `client.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
@@ -316,12 +320,12 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier flat dicts and maps them for you.
 
-Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, audiences, sender profiles, email campaigns, newsletters, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — plus `client.newsletters.iter_issues(newsletter_id)` for one newsletter's issues. See [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
 
 ## Errors, timeouts, retries
 
 - Non-2xx responses raise **`OtokAPIError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{"error": {"code", "message"}}` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
-- **Plan-feature gating (403):** the endpoint groups that mirror plan-gated product areas — deals + pipelines (Deals), payments (`client.payments` + `client.contacts.list_documents`), payment requests (`client.payment_requests`, gated by the separate `workspace_payments` feature), orders (Orders), campaigns (Campaigns), bookings + meeting types (Booking), suppressions (`client.suppressions`, gated by `email_marketing`) — answer every call with a `403` with `err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"` when the workspace's plan lacks the feature. Contacts (including consent, except the documents sub-route), tags, contact groups, templates, products, notes, emails, and webhook endpoints are not feature-gated.
+- **Plan-feature gating (403):** the endpoint groups that mirror plan-gated product areas — deals + pipelines (Deals), payments (`client.payments` + `client.contacts.list_documents`), payment requests (`client.payment_requests`, gated by the separate `workspace_payments` feature), orders (Orders), campaigns (Campaigns), bookings + meeting types (Booking), email campaigns + suppressions + sender profiles (`client.email_campaigns` + `client.suppressions` + `client.sender_profiles`, all gated by `email_marketing`), newsletters (`client.newsletters`, gated by `newsletters`) — answer every call with a `403` with `err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"` when the workspace's plan lacks the feature. Contacts (including consent, except the documents sub-route), tags, contact groups, templates, products, audiences, notes, emails, and webhook endpoints are not feature-gated.
 - **Invalid `filter` values (400):** list-endpoint `filter` values are type-checked against the target field — a mistyped date/UUID/enum/number/boolean returns a `400` with a descriptive message (e.g. `Invalid filter value for "created_at": "not-a-date" is not a date`) instead of a server error.
 - **Duplicate names (409):** creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) returns a `409` (`A tag with this name already exists`).
 - **Contact identity conflicts (409):** `PATCH /v1/contacts/:id` now behaves like `POST /v1/contacts` when a `phone`/`email` change collides with an identifier another contact holds (or previously held): the write is **not** applied — a merge request is parked for review in oToK and the `409` raises with `err.code == "CONTACT_MERGE_REQUIRED"`; its `merge_request_id` is on `err.body`. Non-identity fields sent in the same PATCH are held on the merge request and applied when it is resolved.
@@ -331,7 +335,7 @@ Every namespace with a paginated `list()` (contacts, tags, contact groups, deals
 - `429` and `5xx` responses are retried up to `max_retries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header (both delta-seconds and HTTP-date forms). This applies to **all** requests: the server answered, so the retry semantics are unchanged from v0.1.
 - **Transient network errors are retried too — but only when replaying is safe.** Connection resets/refusals (`ConnectionError`), DNS failures (`socket.gaierror`), socket timeouts (`TimeoutError`, and the SDK's own `OtokTimeoutError`) — raised directly or wrapped in a `urllib.error.URLError` — share the same bounded backoff schedule (`max_retries`, exponential + full jitter) **if and only if** the request is:
   - a **safe method** (`GET`/`HEAD`), or
-  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`client.emails.send`), `external_reference` (`client.deals.create`, `client.payments.create`, `client.orders.create`), or `external_refund_id` (`client.orders.create_refund`).
+  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`client.emails.send`), `external_reference` (`client.deals.create`, `client.payments.create`, `client.orders.create`, `client.email_campaigns.create`, `client.newsletters.create_issue`), or `external_refund_id` (`client.orders.create_refund`).
 
   Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, ...) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is raised for you to handle. In particular, **`client.payment_requests.create` is never auto-retried**: the endpoint has no idempotency key at all, and a replay would mint a second, independently payable link — check `client.payment_requests.list()` before minting again after a failure. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `client.commerce.track_order`) or retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
@@ -369,9 +373,21 @@ ruff check .
 mypy
 ```
 
-## Versioning & scope (v0.5)
+## Versioning & scope (v0.7)
 
-Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
+Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), the email-marketing surface (broadcast email campaigns + newsletters, authored through the shared content contract), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
+
+New in v0.7.0:
+
+- `client.email_campaigns` — the Email Campaigns API (`/v1/email-campaigns`, requires the `email_marketing` plan feature): `list`/`iter` (pages of 100, like deals/payments), `get`, `create` (idempotent upsert via `external_reference` — `duplicate: True` on a replay; write responses carry a `compile: {ok, errors, warnings}` envelope), `update`, `estimate` (`{"estimated_recipients": n}`), `send` (a launch-gate failure raises a 422 with `err.code == "launch_failed"` and `campaign_status` on the error body), `schedule`, and `unschedule`
+- `client.newsletters` — the Newsletters API (`/v1/newsletters` + `/v1/newsletter-issues`, requires the `newsletters` plan feature): `list`/`iter`, `create`, `get`, plus issues — `list_issues`/`iter_issues`, `create_issue` (idempotent upsert via `external_reference`), `get_issue`, `update_issue`, `delete_issue` (never-published issues only), `publish_issue`, `schedule_issue`, and `unschedule_issue`
+- The shared content contract types: an optional `direction` plus exactly one of `markdown` (with `::button[Label](url)` / `::snippet[name-or-uuid]` directives and `[[…]]` variable tokens), `blocks` (typed block array), or `design_json` (raw editor document)
+- Transient-network-error retries automatically cover the new `external_reference` writes (`client.email_campaigns.create`, `client.newsletters.create_issue`)
+- `client.audiences` / `client.sender_profiles` — read-only targeting-selector discovery (`GET /v1/audiences`, `GET /v1/sender-profiles`): `list`/`iter` (pages of 100, like deals/payments). Audience rows carry the advisory `last_count` size cache but never the stored definition (optional `kind` filter — an unknown value raises a 400); sender-profile rows carry the composed `from_email` and the `verified` send-readiness signal. Sender profiles require the `email_marketing` plan feature; audiences need only API access
+
+New in v0.6.0:
+
+- `client.meeting_types.embed(meeting_type_id)` — website-embed material for a meeting type (`GET /v1/meeting-types/:id/embed`, requires the `booking` plan feature): the hosted booking page URL, the workspace's publishable embed key (`bk_…`, safe in page HTML — not the secret API key), and a ready-to-paste snippet
 
 New in v0.5.0:
 

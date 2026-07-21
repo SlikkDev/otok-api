@@ -2,7 +2,7 @@
 
 Official Node.js SDK for the [oToK](https://github.com/SlikkDev/otok-api) marketing platform public API (`/v1`).
 
-Gives bespoke websites and e-commerce stores out-of-the-box integration with oToK: contact upserts, sales deals, e-commerce orders, transactional email, WhatsApp templates, campaigns, payments, hosted pay-links, bookings — plus signed-webhook verification and a high-level e-commerce layer that is safe to retry by design.
+Gives bespoke websites and e-commerce stores out-of-the-box integration with oToK: contact upserts, sales deals, e-commerce orders, transactional email, broadcast email campaigns, newsletters, WhatsApp templates, campaigns, payments, hosted pay-links, bookings — plus signed-webhook verification and a high-level e-commerce layer that is safe to retry by design.
 
 - **Node 18+**, zero runtime dependencies (native `fetch`)
 - Full TypeScript types derived from the real API contract
@@ -59,7 +59,7 @@ for await (const contact of otok.contacts.iter({ filter: { lifecycle_stage: "cus
 }
 ```
 
-Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, payment requests, and orders, which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
+Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, payment requests, orders, email campaigns, and newsletters (including newsletter issues), which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
 
 ```ts
 for await (const deal of otok.deals.iter({ status: "open", limit: 50 })) {
@@ -293,6 +293,10 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 | `otok.products` | `GET/POST /v1/products`, `GET/PATCH /v1/products/:id` — the product catalog shared by deals and payments (POST = idempotent upsert by `external_id`; no delete — deactivate with `is_active: false`) |
 | `otok.emails` | `POST /v1/emails` (transactional, idempotent) |
 | `otok.suppressions` | `GET/POST /v1/suppressions`, `DELETE /v1/suppressions/:id` — the email suppression list (`email_marketing` feature; add is idempotent, and deliberately independent of consent) |
+| `otok.audiences` | `GET /v1/audiences` — read-only discovery of saved audiences (the `audience_id` targeting selectors; rows carry the advisory `last_count` size cache but never the stored definition) |
+| `otok.senderProfiles` | `GET /v1/sender-profiles` — read-only discovery of email from-identities (the `sender_profile_id` selectors) with the `verified` send-readiness signal (`email_marketing` feature) |
+| `otok.emailCampaigns` | `GET/POST /v1/email-campaigns`, `GET/PATCH /v1/email-campaigns/:id`, `GET …/estimate`, `POST …/send`, `POST …/schedule`, `POST …/unschedule` — broadcast email campaigns authored through the shared content contract (`email_marketing` feature; POST = idempotent upsert by `external_reference`) |
+| `otok.newsletters` | `GET/POST /v1/newsletters`, `GET /v1/newsletters/:id`; issues: `GET/POST /v1/newsletters/:id/issues`, `GET/PATCH/DELETE /v1/newsletter-issues/:id`, `POST …/publish`, `POST …/schedule`, `POST …/unschedule` (`newsletters` feature; issue POST = idempotent upsert by `external_reference`) |
 | `otok.campaigns` | `GET/POST /v1/campaigns`, `GET/PATCH /v1/campaigns/:id`, `POST /v1/campaigns/:id/execute` |
 | `otok.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
 | `otok.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
@@ -305,12 +309,12 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier camelCase objects and maps them for you.
 
-Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, audiences, sender profiles, email campaigns, newsletters, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — plus `otok.newsletters.iterIssues(newsletterId)` for one newsletter's issues. See [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
 
 ## Errors, timeouts, retries
 
 - Non-2xx responses throw **`OtokApiError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{ error: { code, message } }` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
-- **403 `FEATURE_NOT_INCLUDED_IN_PLAN`** — deals/pipelines, payments (`otok.payments` + `otok.contacts.listDocuments`), payment requests (`otok.paymentRequests`, gated by the separate `workspace_payments` feature), orders, campaigns, bookings/meeting-types, and suppressions (`otok.suppressions`, gated by `email_marketing`) each require the matching feature on the workspace's plan. When the plan lacks it, **every** route in that group (reads and writes alike) throws this.
+- **403 `FEATURE_NOT_INCLUDED_IN_PLAN`** — deals/pipelines, payments (`otok.payments` + `otok.contacts.listDocuments`), payment requests (`otok.paymentRequests`, gated by the separate `workspace_payments` feature), orders, campaigns, bookings/meeting-types, email campaigns + suppressions + sender profiles (`otok.emailCampaigns` + `otok.suppressions` + `otok.senderProfiles`, all gated by `email_marketing`), and newsletters (`otok.newsletters`, gated by `newsletters`) each require the matching feature on the workspace's plan. When the plan lacks it, **every** route in that group (reads and writes alike) throws this.
 - **409 `CONTACT_MERGE_REQUIRED`** — `otok.contacts.update` that would set a `phone`/`email` belonging to another contact (now or historically) is **not applied**; a merge request is parked for review in oToK instead. Its id is on the body — `(err.body as { merge_request_id?: string }).merge_request_id` — and non-identity fields from the same call are applied when the request is resolved.
 - **409 on duplicate names** — creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) throws `409 Conflict`.
 - **400 on invalid `filter` values** — list-endpoint `filter` values are type-checked against the target field (dates, UUIDs, enums, numbers, booleans); a mistyped value throws a 400 naming the field and expected kind.
@@ -319,7 +323,7 @@ Every namespace with a paginated `list()` (contacts, tags, contact groups, deals
 - `429` and `5xx` responses are retried up to `maxRetries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header. This applies to **all** requests: the server answered, so the retry semantics are unchanged from v0.1.
 - **Transient network errors are retried too — but only when replaying is safe.** Connection reset/refusal (`ECONNRESET`/`ECONNREFUSED`), DNS failures (`ENOTFOUND`/`EAI_AGAIN`), socket timeouts (`ETIMEDOUT`, and the SDK's own `OtokTimeoutError`), and similar transport-level failures share the same bounded backoff schedule (`maxRetries`, exponential + full jitter) **if and only if** the request is:
   - a **safe method** (`GET`/`HEAD`), or
-  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`otok.emails.send`), `external_reference` (`otok.deals.create`, `otok.payments.create`, `otok.orders.create`), or `external_refund_id` (`otok.orders.createRefund`).
+  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`otok.emails.send`), `external_reference` (`otok.deals.create`, `otok.payments.create`, `otok.orders.create`, `otok.emailCampaigns.create`, `otok.newsletters.createIssue`), or `external_refund_id` (`otok.orders.createRefund`).
 
   Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, …) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is thrown for you to handle. In particular, **`otok.paymentRequests.create` is never auto-retried**: the endpoint has no idempotency key at all, and a replay would mint a second, independently payable link — check `otok.paymentRequests.list()` before minting again after a failure. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `otok.commerce.trackOrder`) or retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
@@ -355,9 +359,21 @@ npm test
 npm run build
 ```
 
-## Versioning & scope (v0.5)
+## Versioning & scope (v0.7)
 
-Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), the email-marketing surface (broadcast email campaigns + newsletters, authored through the shared content contract), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+
+New in v0.7.0:
+
+- `otok.emailCampaigns` — the Email Campaigns API (`/v1/email-campaigns`, requires the `email_marketing` plan feature): `list`/`iter` (pages of 100, like deals/payments), `get`, `create` (idempotent upsert via `external_reference` — `duplicate: true` on a replay; write responses carry a `compile: {ok, errors, warnings}` envelope), `update`, `estimate` (`{estimated_recipients}`), `send` (a launch-gate failure throws 422 `launch_failed` with `campaign_status` on the error body), `schedule`, and `unschedule`
+- `otok.newsletters` — the Newsletters API (`/v1/newsletters` + `/v1/newsletter-issues`, requires the `newsletters` plan feature): `list`/`iter`, `create`, `get`, plus issues — `listIssues`/`iterIssues`, `createIssue` (idempotent upsert via `external_reference`), `getIssue`, `updateIssue`, `deleteIssue` (never-published issues only), `publishIssue`, `scheduleIssue`, and `unscheduleIssue`
+- The shared content contract types: an optional `direction` plus exactly one of `markdown` (with `::button[Label](url)` / `::snippet[name-or-uuid]` directives and `[[…]]` variable tokens), `blocks` (typed block array), or `design_json` (raw editor document)
+- Transient-network-error retries automatically cover the new `external_reference` writes (`otok.emailCampaigns.create`, `otok.newsletters.createIssue`)
+- `otok.audiences` / `otok.senderProfiles` — read-only targeting-selector discovery (`GET /v1/audiences`, `GET /v1/sender-profiles`): `list`/`iter` (pages of 100, like deals/payments). Audience rows carry the advisory `last_count` size cache but never the stored definition (optional `kind` filter — an unknown value 400s); sender-profile rows carry the composed `from_email` and the `verified` send-readiness signal. Sender profiles require the `email_marketing` plan feature; audiences need only API access
+
+New in v0.6.0:
+
+- `otok.meetingTypes.embed(id)` — website-embed material for a meeting type (`GET /v1/meeting-types/:id/embed`, requires the `booking` plan feature): the hosted booking page URL, the workspace's publishable embed key (`bk_…`, safe in page HTML — not the secret API key), and a ready-to-paste snippet
 
 New in v0.5.0:
 
