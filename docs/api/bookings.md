@@ -103,7 +103,7 @@ Response `200`:
 
 ### GET /api/v1/meeting-types/:id/embed
 
-Everything needed to put the booking calendar on your own website — the same material shown in the oToK app under **Settings → Booking**.
+Everything needed to put the booking calendar on your own website — the same embed code the oToK app shows when editing a meeting type (**Booking page → Share**); key management lives under **Settings → Booking**.
 
 ```bash
 curl "https://app.otok.io/api/v1/meeting-types/mt-1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809/embed" \
