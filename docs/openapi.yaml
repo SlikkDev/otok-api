@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.5.0"
+  version: "1.6.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
@@ -112,7 +112,7 @@ info:
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
     `POST /v1/emails`, which answers 201 fresh / 200 replay.
 
-    ## Changes in 1.5.0
+    ## Changes in 1.6.0
 
     - New **Email campaigns** resource group (`/v1/email-campaigns*`) — author, estimate,
       launch, and schedule broadcast email campaigns: idempotent create via
@@ -130,6 +130,13 @@ info:
       `::snippet[name-or-uuid]` directives + `[[…]]` personalization tokens), typed
       `blocks`, or a raw `design_json` document — compiled at write time, with the
       result reported in the response's `compile: {ok, errors, warnings}` envelope.
+
+    ## Changes in 1.5.0
+
+    - New `GET /v1/meeting-types/{id}/embed` — website-embed material for a meeting type:
+      the hosted booking page URL, the workspace's publishable embed key (`bk_…`, safe in
+      page HTML — not the secret API key), and a ready-to-paste snippet. Requires the
+      `booking` plan feature.
 
     ## Changes in 1.4.0
 

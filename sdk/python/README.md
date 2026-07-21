@@ -371,16 +371,20 @@ ruff check .
 mypy
 ```
 
-## Versioning & scope (v0.6)
+## Versioning & scope (v0.7)
 
 Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), the email-marketing surface (broadcast email campaigns + newsletters, authored through the shared content contract), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Sync client only; not covered yet: an async client and list-endpoint `$where` advanced filter helpers — planned for a later release.
 
-New in v0.6.0:
+New in v0.7.0:
 
 - `client.email_campaigns` — the Email Campaigns API (`/v1/email-campaigns`, requires the `email_marketing` plan feature): `list`/`iter` (pages of 100, like deals/payments), `get`, `create` (idempotent upsert via `external_reference` — `duplicate: True` on a replay; write responses carry a `compile: {ok, errors, warnings}` envelope), `update`, `estimate` (`{"estimated_recipients": n}`), `send` (a launch-gate failure raises a 422 with `err.code == "launch_failed"` and `campaign_status` on the error body), `schedule`, and `unschedule`
 - `client.newsletters` — the Newsletters API (`/v1/newsletters` + `/v1/newsletter-issues`, requires the `newsletters` plan feature): `list`/`iter`, `create`, `get`, plus issues — `list_issues`/`iter_issues`, `create_issue` (idempotent upsert via `external_reference`), `get_issue`, `update_issue`, `delete_issue` (never-published issues only), `publish_issue`, `schedule_issue`, and `unschedule_issue`
 - The shared content contract types: an optional `direction` plus exactly one of `markdown` (with `::button[Label](url)` / `::snippet[name-or-uuid]` directives and `[[…]]` variable tokens), `blocks` (typed block array), or `design_json` (raw editor document)
 - Transient-network-error retries automatically cover the new `external_reference` writes (`client.email_campaigns.create`, `client.newsletters.create_issue`)
+
+New in v0.6.0:
+
+- `client.meeting_types.embed(meeting_type_id)` — website-embed material for a meeting type (`GET /v1/meeting-types/:id/embed`, requires the `booking` plan feature): the hosted booking page URL, the workspace's publishable embed key (`bk_…`, safe in page HTML — not the secret API key), and a ready-to-paste snippet
 
 New in v0.5.0:
 

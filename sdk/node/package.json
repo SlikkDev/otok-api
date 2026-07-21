@@ -1,6 +1,6 @@
 {
   "name": "@otok/node",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Official Node.js SDK for the oToK marketing platform public API (/v1) — contacts, deals, orders, transactional email, webhooks, and a high-level e-commerce layer.",
   "license": "MIT",
   "main": "dist/index.js",

@@ -112,7 +112,7 @@ Content-bearing tools accept one shared `content` parameter: `{ direction?, mark
 
 ## Local development
 
-`@otok/mcp` depends on `"@otok/node": "^0.6.0"`. Until that version is on npm, install it from a locally packed tarball — the tarball satisfies the range, so the published dependency spec never changes:
+`@otok/mcp` depends on `"@otok/node": "^0.7.0"`. Until that version is on npm, install it from a locally packed tarball — the tarball satisfies the range, so the published dependency spec never changes:
 
 ```bash
 # From the repo root
@@ -126,7 +126,7 @@ npm install --no-save ./.local/otok-node-*.tgz   # installs the tarball + all ot
 npm run typecheck && npm run build && npm test
 ```
 
-CI (`.github/workflows/ci.yml`, `mcp` job) runs the same steps. `mcp/` deliberately ships **without `package-lock.json`** for now — a lockfile would pin the `file:` tarball path; regenerate and commit it once the registry serves `@otok/node@^0.6.0`.
+CI (`.github/workflows/ci.yml`, `mcp` job) runs the same steps. `mcp/` deliberately ships **without `package-lock.json`** for now — a lockfile would pin the `file:` tarball path; regenerate and commit it once the registry serves `@otok/node@^0.7.0`.
 
 > **tsconfig note:** unlike `sdk/node` (`moduleResolution: "Node"`), this package uses `module`/`moduleResolution: "Node16"` because the MCP SDK's subpaths (`@modelcontextprotocol/sdk/server/mcp.js`) resolve only through its `exports` map, which node10 resolution cannot see. Output is still CommonJS.
 
@@ -134,7 +134,7 @@ CI (`.github/workflows/ci.yml`, `mcp` job) runs the same steps. `mcp/` deliberat
 
 Tag-driven, mirroring the Node SDK (`.github/workflows/release-mcp.yml`, npm trusted publishing/OIDC with an `NPM_TOKEN` fallback for the first publish):
 
-1. **Publish `@otok/node` first** — the workflow refuses to publish while `@otok/node@^0.6.0` is not installable from npm.
+1. **Publish `@otok/node` first** — the workflow refuses to publish while `@otok/node@^0.7.0` is not installable from npm.
 2. Bump `version` in `mcp/package.json` **and** `SERVER_VERSION` in `mcp/src/server.ts`.
 3. Tag `mcp-v<version>` and push the tag (or run the workflow manually via *workflow_dispatch* — it publishes and pushes the tag itself).
 

@@ -357,16 +357,20 @@ npm test
 npm run build
 ```
 
-## Versioning & scope (v0.6)
+## Versioning & scope (v0.7)
 
 Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), the email-marketing surface (broadcast email campaigns + newsletters, authored through the shared content contract), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
 
-New in v0.6.0:
+New in v0.7.0:
 
 - `otok.emailCampaigns` — the Email Campaigns API (`/v1/email-campaigns`, requires the `email_marketing` plan feature): `list`/`iter` (pages of 100, like deals/payments), `get`, `create` (idempotent upsert via `external_reference` — `duplicate: true` on a replay; write responses carry a `compile: {ok, errors, warnings}` envelope), `update`, `estimate` (`{estimated_recipients}`), `send` (a launch-gate failure throws 422 `launch_failed` with `campaign_status` on the error body), `schedule`, and `unschedule`
 - `otok.newsletters` — the Newsletters API (`/v1/newsletters` + `/v1/newsletter-issues`, requires the `newsletters` plan feature): `list`/`iter`, `create`, `get`, plus issues — `listIssues`/`iterIssues`, `createIssue` (idempotent upsert via `external_reference`), `getIssue`, `updateIssue`, `deleteIssue` (never-published issues only), `publishIssue`, `scheduleIssue`, and `unscheduleIssue`
 - The shared content contract types: an optional `direction` plus exactly one of `markdown` (with `::button[Label](url)` / `::snippet[name-or-uuid]` directives and `[[…]]` variable tokens), `blocks` (typed block array), or `design_json` (raw editor document)
 - Transient-network-error retries automatically cover the new `external_reference` writes (`otok.emailCampaigns.create`, `otok.newsletters.createIssue`)
+
+New in v0.6.0:
+
+- `otok.meetingTypes.embed(id)` — website-embed material for a meeting type (`GET /v1/meeting-types/:id/embed`, requires the `booking` plan feature): the hosted booking page URL, the workspace's publishable embed key (`bk_…`, safe in page HTML — not the secret API key), and a ready-to-paste snippet
 
 New in v0.5.0:
 

@@ -45,7 +45,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@otok/node": "^0.6.0",
+    "@otok/node": "^0.7.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

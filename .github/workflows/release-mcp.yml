@@ -36,20 +36,20 @@ jobs:
             echo "Tag version ($TAG_VERSION) does not match package.json version ($PKG_VERSION)" >&2
             exit 1
           fi
-      # The published package depends on "@otok/node": "^0.6.0" from the
+      # The published package depends on "@otok/node": "^0.7.0" from the
       # registry — refuse to publish before that range is installable, or
       # every consumer's install would fail. Publish @otok/node first
       # (the sdk-node-v* release workflow).
-      - name: Check @otok/node ^0.6.0 is on the registry
+      - name: Check @otok/node ^0.7.0 is on the registry
         run: |
-          if ! npm view "@otok/node@^0.6.0" version >/dev/null 2>&1; then
-            echo "@otok/node ^0.6.0 is not on npm yet — release @otok/node first (sdk-node-v* tag)" >&2
+          if ! npm view "@otok/node@^0.7.0" version >/dev/null 2>&1; then
+            echo "@otok/node ^0.7.0 is not on npm yet — release @otok/node first (sdk-node-v* tag)" >&2
             exit 1
           fi
       # Build @otok/node from this checkout and install it via tarball: keeps
       # the install hermetic to the tagged commit without changing the
-      # published ^0.6.0 dependency range (mcp/ has no lockfile until the
-      # registry serves ^0.6.0 — see mcp/README.md).
+      # published ^0.7.0 dependency range (mcp/ has no lockfile until the
+      # registry serves ^0.7.0 — see mcp/README.md).
       - name: Build + pack the local @otok/node
         working-directory: sdk/node
         run: |
@@ -57,7 +57,7 @@ jobs:
           npm run build
           mkdir -p ../../mcp/.local
           npm pack --pack-destination ../../mcp/.local
-      - name: Install (tarball satisfies @otok/node ^0.6.0)
+      - name: Install (tarball satisfies @otok/node ^0.7.0)
         run: npm install --no-save ./.local/otok-node-*.tgz
       - run: npm run typecheck
       - run: npm run build
