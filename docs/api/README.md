@@ -48,7 +48,7 @@ Start with **[Getting Started](getting-started.md)** — authentication, error e
 | **Emails** | `POST /v1/emails` |
 | **Suppressions** | `GET /v1/suppressions` · `POST /v1/suppressions` (idempotent add) · `DELETE /v1/suppressions/:id` |
 | **Webhook endpoints** | `GET /v1/webhook-endpoints` · `POST /v1/webhook-endpoints` · `DELETE /v1/webhook-endpoints/:id` |
-| **Meeting types** | `GET /v1/meeting-types` · `GET /v1/meeting-types/:id` · `GET /v1/meeting-types/:id/slots` |
+| **Meeting types** | `GET /v1/meeting-types` · `GET /v1/meeting-types/:id` · `GET /v1/meeting-types/:id/slots` · `GET /v1/meeting-types/:id/embed` |
 | **Bookings** | `GET /v1/bookings` · `GET /v1/bookings/:id` · `POST /v1/bookings` · `POST /v1/bookings/:id/cancel` · `POST /v1/bookings/:id/reschedule` · `POST /v1/bookings/:id/reassign` |
 
 ## Conventions at a glance

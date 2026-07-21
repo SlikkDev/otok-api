@@ -11,6 +11,7 @@ All endpoints require [authentication](getting-started.md#authentication).
 | GET | `/api/v1/meeting-types` | List meeting types |
 | GET | `/api/v1/meeting-types/:id` | Get one meeting type |
 | GET | `/api/v1/meeting-types/:id/slots` | Get open slots for a date range |
+| GET | `/api/v1/meeting-types/:id/embed` | Get website-embed material (hosted page URL, publishable key, snippet) |
 | GET | `/api/v1/bookings` | List bookings |
 | GET | `/api/v1/bookings/:id` | Get one booking |
 | POST | `/api/v1/bookings` | Create a booking |
@@ -97,6 +98,33 @@ Response `200`:
 | 400 | `"Meeting type is not active"` |
 | 400 | `"from/to must be valid ISO dates"` / `` "`to` must be after `from`" `` / `"Requested range may not exceed 62 days"` |
 | 404 | Unknown meeting type |
+
+## Embedding the booking calendar
+
+### GET /api/v1/meeting-types/:id/embed
+
+Everything needed to put the booking calendar on your own website — the same material shown in the oToK app under **Settings → Booking**.
+
+```bash
+curl "https://app.otok.io/api/v1/meeting-types/mt-1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809/embed" \
+  -H "Authorization: Bearer otok_live_abc123..."
+```
+
+Response `200`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `workspace_ref` | string | The workspace's public ref used in hosted booking URLs |
+| `slug` | string | The meeting type's slug |
+| `embed_key` | string | The workspace's **publishable** embed key (`bk_…`) — see below |
+| `page_url` | string | The hosted booking page for this meeting type — link to it directly if you don't want an inline embed |
+| `snippet_html` | string | A ready-to-paste two-line HTML snippet (a placeholder element + a script tag) rendering the booking calendar inline. Paste it verbatim where the calendar should appear — the key and meeting-type reference are already filled in |
+
+`404` when the meeting type is unknown in this workspace; non-UUID id → 400.
+
+**The embed key is publishable by design.** `embed_key` (`bk_…`) is meant to appear in your page's HTML — it is **not** the secret API key (`otok_live_…`), grants no API access, and must never be swapped for it in the snippet. It is workspace-level and rotatable: rotation, the allowed-origins list, and the embed on/off switch live in the oToK app under **Settings → Booking**. Rotating the key invalidates previously pasted snippets — re-fetch this endpoint (or copy the new snippet from the app) after a rotation.
+
+Bookings made through the embed carry `source: "embed"` — the [booking webhook events](webhooks.md#booking-event-data) distinguish them from `public_page`, `manual`, and `api` bookings.
 
 ---
 
