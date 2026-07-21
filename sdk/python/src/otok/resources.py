@@ -10,6 +10,7 @@ from typing import Any, Callable, Optional, cast
 from ._http import HttpClient, QueryValue
 from .types import (
     AudienceEstimate,
+    AudienceListParams,
     Booking,
     BookingCreateParams,
     BookingListParams,
@@ -72,6 +73,7 @@ from .types import (
     ProductCreateParams,
     ProductListParams,
     ProductUpdateParams,
+    SenderProfileListParams,
     SetConsentParams,
     SlotsParams,
     Suppression,
@@ -684,6 +686,97 @@ class CampaignsApi:
         return cast(
             dict[str, Any],
             self._http.request("POST", f"/v1/campaigns/{campaign_id}/execute"),
+        )
+
+
+# ─────────────────────────── Audiences ───────────────────────────
+
+
+class AudiencesApi:
+    """Read-only discovery of the workspace's saved audiences — the reusable
+    targeting selectors campaigns and email campaigns accept as
+    ``audience_id``. Rows never include the stored ``definition`` (the
+    ``$where`` condition tree behind a dynamic audience); audiences are
+    managed in-app and are not writable through the public API.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[AudienceListParams] = None) -> Paginated:
+        """List the workspace's audiences, newest first (default 25, cap
+        100). ``last_count`` is an advisory size cache, never a live
+        resolution — use ``email_campaigns.estimate`` for a campaign's real
+        reach. An unknown ``kind`` raises a 400.
+        """
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/audiences", query=_params_query(params)),
+        )
+
+    def iter(
+        self, params: Optional[AudienceListParams] = None
+    ) -> Iterator[dict[str, Any]]:
+        """Iterate every matching audience, auto-paginating ``GET
+        /v1/audiences`` (``limit`` cap 100 — the deals/payments family).
+        Accepts the same params as ``list``.
+        """
+        p: AudienceListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(AudienceListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+
+# ─────────────────────────── Sender profiles ───────────────────────────
+
+
+class SenderProfilesApi:
+    """Read-only discovery of the workspace's email from-identities — the
+    selectors email campaigns accept as ``sender_profile_id``. Each row
+    carries the composed ``from_email`` plus the sending domain's
+    verification status (``verified: True`` = the profile can pass the
+    launch gate); DKIM/DNS material is never returned. Profiles are managed
+    in-app (Settings → Email) and are not writable through the public API.
+
+    Requires the Email marketing feature (``email_marketing``) on the
+    workspace's plan — raises a 403 with ``err.code ==
+    "FEATURE_NOT_INCLUDED_IN_PLAN"`` otherwise.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[SenderProfileListParams] = None) -> Paginated:
+        """List the workspace's sender profiles, newest first (default 25,
+        cap 100).
+        """
+        return cast(
+            Paginated,
+            self._http.request(
+                "GET", "/v1/sender-profiles", query=_params_query(params)
+            ),
+        )
+
+    def iter(
+        self, params: Optional[SenderProfileListParams] = None
+    ) -> Iterator[dict[str, Any]]:
+        """Iterate every sender profile, auto-paginating ``GET
+        /v1/sender-profiles`` (``limit`` cap 100 — the deals/payments
+        family). Accepts the same params as ``list``.
+        """
+        p: SenderProfileListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(SenderProfileListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
         )
 
 

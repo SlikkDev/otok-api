@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from typing import cast
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -19,6 +20,7 @@ from otok import (
     MESSAGE_WEBHOOK_EVENT_TYPES,
     ORDER_WEBHOOK_EVENT_TYPES,
     PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+    AudienceListParams,
     OtokAPIError,
     OtokClient,
 )
@@ -773,6 +775,169 @@ class TestCampaignsAndTemplates:
             "/api/v1/templates/tpl-1/send",
         )
         assert transport.request_body()["to"] == "+972501234567"
+
+
+class TestAudiences:
+    def test_list_serializes_kind_and_paging(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 10, "offset": 20})
+        )
+        client.audiences.list({"kind": "dynamic", "limit": 10, "offset": 20})
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/audiences"
+        assert query_of(request) == {
+            "kind": ["dynamic"],
+            "limit": ["10"],
+            "offset": ["20"],
+        }
+
+    def test_rows_carry_the_summary_columns_never_the_definition(self) -> None:
+        client, _transport = make_client(
+            json_response(
+                200,
+                {
+                    "data": [
+                        {
+                            "id": "aud-1",
+                            "name": "Active leads",
+                            "kind": "dynamic",
+                            "last_count": 812,
+                            "last_counted_at": "2026-07-01T09:00:00Z",
+                        }
+                    ],
+                    "total": 1,
+                    "limit": 25,
+                    "offset": 0,
+                },
+            )
+        )
+        page = client.audiences.list()
+        assert page["data"][0]["last_count"] == 812
+        assert "definition" not in page["data"][0]
+
+    def test_unknown_kind_surfaces_the_api_400(self) -> None:
+        client, _transport = make_client(
+            json_response(
+                400,
+                {
+                    "statusCode": 400,
+                    "message": "Invalid kind: must be one of dynamic, static",
+                    "error": "Bad Request",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc:
+            client.audiences.list(cast(AudienceListParams, {"kind": "fresh"}))
+        assert exc.value.status == 400
+
+    def test_iter_pages_at_the_deals_payments_cap(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "data": [{"id": f"aud-{i}"} for i in range(100)],
+                    "total": 101,
+                    "limit": 100,
+                    "offset": 0,
+                },
+            ),
+            json_response(
+                200,
+                {"data": [{"id": "aud-100"}], "total": 101, "limit": 100, "offset": 100},
+            ),
+        )
+        rows = list(client.audiences.iter({"kind": "static"}))
+        assert len(rows) == 101
+        assert [query_of(r)["limit"] for r in transport.requests] == [["100"], ["100"]]
+        assert all(query_of(r)["kind"] == ["static"] for r in transport.requests)
+
+
+class TestSenderProfiles:
+    def test_list_hits_the_documented_route(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 25, "offset": 0})
+        )
+        client.sender_profiles.list()
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/sender-profiles"
+        assert query_of(request) == {}
+
+    def test_rows_surface_the_verified_send_readiness_signal(self) -> None:
+        client, _transport = make_client(
+            json_response(
+                200,
+                {
+                    "data": [
+                        {
+                            "id": "sp-1",
+                            "from_name": "Acme",
+                            "from_email": "news@mail.example.com",
+                            "provider": "ses",
+                            "is_default": True,
+                            "domain": "mail.example.com",
+                            "domain_status": "verified",
+                            "verified": True,
+                        },
+                        {
+                            "id": "sp-2",
+                            "from_name": "Acme staging",
+                            "from_email": "hello@staging.example.com",
+                            "provider": "smtp",
+                            "is_default": False,
+                            "domain": "staging.example.com",
+                            "domain_status": "pending",
+                            "verified": False,
+                        },
+                    ],
+                    "total": 2,
+                    "limit": 25,
+                    "offset": 0,
+                },
+            )
+        )
+        page = client.sender_profiles.list()
+        assert [row["verified"] for row in page["data"]] == [True, False]
+        assert page["data"][0]["from_email"] == "news@mail.example.com"
+
+    def test_iter_pages_at_the_deals_payments_cap(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "data": [{"id": f"sp-{i}"} for i in range(100)],
+                    "total": 101,
+                    "limit": 100,
+                    "offset": 0,
+                },
+            ),
+            json_response(
+                200,
+                {"data": [{"id": "sp-100"}], "total": 101, "limit": 100, "offset": 100},
+            ),
+        )
+        rows = list(client.sender_profiles.iter())
+        assert len(rows) == 101
+        assert [query_of(r)["offset"] for r in transport.requests] == [["0"], ["100"]]
+
+    def test_feature_gate_403_embeds_the_email_marketing_feature_id(self) -> None:
+        client, _transport = make_client(
+            json_response(
+                403,
+                {
+                    "message": (
+                        "Your current plan does not include access to this feature: "
+                        "email_marketing. Please upgrade your plan."
+                    ),
+                    "error_code": "FEATURE_NOT_INCLUDED_IN_PLAN",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc:
+            client.sender_profiles.list()
+        assert exc.value.status == 403
+        assert exc.value.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
 
 
 class TestEmailCampaigns:

@@ -1305,6 +1305,44 @@ class CampaignUpdateParams(TypedDict, total=False):
 
 Campaign = dict[str, Any]
 
+# ─────────────────────────── Audiences ───────────────────────────
+
+#: ``dynamic`` — a stored condition tree re-evaluated live at every use;
+#: ``static`` — a frozen membership list.
+AudienceKind = Literal["dynamic", "static"]
+
+
+class AudienceListParams(TypedDict, total=False):
+    #: Exact kind filter; an unknown value raises a 400.
+    kind: AudienceKind
+    #: Page size (max 100, default 25).
+    limit: int
+    offset: int
+
+
+#: Audience summary row as returned by ``GET /v1/audiences`` (open — servers
+#: may add fields): id, name, kind, the advisory ``last_count`` /
+#: ``last_counted_at`` size cache, and timestamps. The stored ``definition``
+#: is deliberately never exposed through the public API.
+AudienceSummary = dict[str, Any]
+
+# ─────────────────────────── Sender profiles ───────────────────────────
+
+
+class SenderProfileListParams(TypedDict, total=False):
+    #: Page size (max 100, default 25).
+    limit: int
+    offset: int
+
+
+#: Sender-profile row as returned by ``GET /v1/sender-profiles`` (open —
+#: servers may add fields): the from identity (``from_name``, the composed
+#: ``from_email``, ``reply_to``), ``provider``, ``is_default``, and the
+#: sending-domain linkage (``sending_domain_id`` / ``domain`` /
+#: ``domain_status``) with the ``verified`` send-readiness signal
+#: (``domain_status == "verified"``). DKIM/DNS material is never returned.
+SenderProfile = dict[str, Any]
+
 # ─────────────── Email campaigns & newsletters ───────────────
 
 EmailCampaignStatus = Literal[
