@@ -204,6 +204,50 @@ Creates a **draft** campaign. It does not send until you call [`…/send`](#post
 
 Targeting is optional. At send time the audience can only **narrow** the built-in email send-eligibility baseline (opted in, not suppressed) — never widen it. **With no targeting at all, the campaign goes to every eligible contact** — check [`…/estimate`](#get-apiv1email-campaignsidestimate) before sending.
 
+### Discovering targeting selectors
+
+Two read-only companion endpoints resolve the ids the request body above takes — call them before creating a campaign instead of guessing:
+
+**`GET /api/v1/audiences`** lists the workspace's saved audiences (the `audience_id` selectors), newest first. Rows carry `id`, `name`, `kind` (`dynamic` — a live condition tree re-evaluated at every use; `static` — a frozen membership list) and an advisory `last_count`/`last_counted_at` size cache — **never the audience's stored definition**, and audiences are not writable through the API (manage them in-app). `last_count` may be stale; use [`…/estimate`](#get-apiv1email-campaignsidestimate) for a campaign's real reach. Optional `kind` filter (an unknown value → 400); pages like this resource (`limit` default 25, cap 100). Unlike the campaign routes, audiences need only plan-wide API access.
+
+**`GET /api/v1/sender-profiles`** lists the workspace's email from-identities (the `sender_profile_id` selectors), newest first. Rows carry `from_name`, the composed `from_email`, `reply_to`, `provider`, `is_default`, and the sending-domain linkage (`sending_domain_id`, `domain`, `domain_status`) with a computed **`verified`** flag — `true` exactly when the domain's status is `verified`, the same send-readiness gate the launch asserts, so prefer `verified: true` profiles. DKIM/DNS material is never returned; profiles are managed in-app (Settings → Email). Same paging; requires the `email_marketing` feature like the rest of this page.
+
+```bash
+curl -G "https://app.otok.io/api/v1/audiences" \
+  -H "Authorization: Bearer otok_live_abc123..." \
+  --data-urlencode 'kind=dynamic'
+
+curl "https://app.otok.io/api/v1/sender-profiles" \
+  -H "Authorization: Bearer otok_live_abc123..."
+```
+
+```ts
+const audiences = await otok.audiences.list({ kind: "dynamic" });
+// audiences.data[0] — { id, name, kind, last_count, last_counted_at, … }
+
+const senders = await otok.senderProfiles.list();
+const verified = senders.data.filter((p) => p.verified);
+
+// Both auto-paginate too:
+for await (const audience of otok.audiences.iter()) {
+  console.log(audience.name, audience.kind, audience.last_count);
+}
+```
+
+```python
+audiences = client.audiences.list({"kind": "dynamic"})
+# audiences["data"][0] — { id, name, kind, last_count, last_counted_at, … }
+
+senders = client.sender_profiles.list()
+verified = [p for p in senders["data"] if p["verified"]]
+
+# Both auto-paginate too:
+for audience in client.audiences.iter():
+    print(audience["name"], audience["kind"], audience["last_count"])
+```
+
+Both lists return the standard `{ data, total, limit, offset }` envelope.
+
 ### Example
 
 ```bash
