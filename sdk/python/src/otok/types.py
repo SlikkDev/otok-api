@@ -125,6 +125,67 @@ Contact = dict[str, Any]
 #: Contact note record (``GET /v1/contacts/:id/notes`` et al.).
 Note = dict[str, Any]
 
+ConsentChannel = Literal["whatsapp", "email"]
+
+#: ``unknown`` = no decision recorded yet (and never settable via the API).
+ConsentState = Literal["subscribed", "unsubscribed", "unknown"]
+
+ConsentBasis = Literal[
+    "express_opt_in",
+    "double_opt_in",
+    "soft_opt_in",
+    "implied",
+    "imported",
+]
+
+#: Provider-owned delivery health — never writable through the API.
+#: ``complained`` is sticky: consent on that channel can never be
+#: re-subscribed via the API.
+ConsentDeliverability = Literal[
+    "unknown",
+    "deliverable",
+    "temporarily_bounced",
+    "bounced",
+    "complained",
+]
+
+#: One channel of a contact's consent picture (open — servers may add
+#: fields). A channel without a stored decision reads
+#: ``consent_state``/``deliverability`` ``"unknown"`` — treat unknown as not
+#: sendable. The EMAIL channel additionally carries the composed send-time
+#: suppression verdict (``suppressed`` + ``suppression_reason``), which is
+#: independent of the consent decision.
+ContactConsentChannel = dict[str, Any]
+
+#: ``GET /v1/contacts/:id/consent`` — ``{"contact_id", "block_state",
+#: "channels": {"whatsapp": …, "email": …}}``, both channels at once.
+ContactConsent = dict[str, Any]
+
+
+class _SetConsentRequired(TypedDict):
+    #: ``"unknown"`` is a system state and cannot be set.
+    state: Literal["subscribed", "unsubscribed"]
+
+
+class SetConsentParams(_SetConsentRequired, total=False):
+    """``PUT /v1/contacts/:id/consent/:channel`` — record a consent decision
+    with its provenance (the evidence trail stores source, IP, and user
+    agent).
+    """
+
+    #: Defaults to ``express_opt_in`` when subscribing.
+    basis: ConsentBasis
+    #: Where the decision came from in your system; recorded as
+    #: ``api:<source>`` (plain ``api`` when omitted). Max 100 chars.
+    source: str
+    #: ISO 8601 — when this consent expires.
+    expires_at: str
+    #: End-user IP captured with the decision (evidence trail).
+    ip: str
+    #: End-user user agent captured with the decision (evidence trail).
+    user_agent: str
+
+
 # ─────────────────────────── Tags / groups ───────────────────────────
 
 TagType = Literal["contact", "conversation", "both"]
@@ -263,6 +324,71 @@ class DealListParams(TypedDict, total=False):
 #: existing deal that was updated instead (201 either way).
 Deal = dict[str, Any]
 
+# ─────────────────────────── Products ───────────────────────────
+
+
+class _ProductCreateRequired(TypedDict):
+    name: str
+
+
+class ProductCreateParams(_ProductCreateRequired, total=False):
+    """``POST /v1/products`` — create a product (idempotent upsert via
+    ``external_id``: a repeat POST whose ``external_id`` matches an existing
+    product updates that product instead of creating a duplicate — the
+    response then carries ``duplicate: True``; 201 either way).
+    """
+
+    #: Per-workspace-unique product code (409 ``product_conflict`` on a
+    #: clash). Max 100 chars.
+    sku: Optional[str]
+    #: Per-workspace-unique idempotency key. Max 200 chars.
+    external_id: Optional[str]
+    description: Optional[str]
+    #: Default price in the workspace payment currency; ``None`` = dynamic
+    #: pricing (deals need an explicit amount).
+    price: Optional[float]
+    #: Both-or-neither with ``vat_rate``; send both ``None`` to clear.
+    vat_mode: Optional[PaymentVatMode]
+    #: VAT percent (0–100, max 2 decimals); paired with ``vat_mode``.
+    vat_rate: Optional[float]
+    #: Inactive products stay on existing records but can't attach to new ones.
+    is_active: bool
+
+
+class ProductUpdateParams(TypedDict, total=False):
+    """``PATCH /v1/products/:id`` — partial update; only the fields present
+    change. There is no DELETE: deactivate with ``{"is_active": False}``.
+    """
+
+    name: str
+    sku: Optional[str]
+    external_id: Optional[str]
+    description: Optional[str]
+    price: Optional[float]
+    vat_mode: Optional[PaymentVatMode]
+    vat_rate: Optional[float]
+    is_active: bool
+
+
+class ProductListParams(TypedDict, total=False):
+    #: Literal substring match on name or description (case-insensitive).
+    q: str
+    #: Exact-match lookup by SKU.
+    sku: str
+    #: Exact-match lookup by external id.
+    external_id: str
+    is_active: bool
+    #: Page size (max 500, default 50).
+    limit: int
+    offset: int
+
+
+#: Product record as returned by the API (open — servers may add fields).
+#: ``POST /v1/products`` responses additionally carry a top-level
+#: ``duplicate: bool`` — ``True`` when ``external_id`` matched an existing
+#: product that was updated instead (201 either way).
+Product = dict[str, Any]
+
 # ─────────────────────────── Transactional email ───────────────────────────
 
 
@@ -320,6 +446,44 @@ class EmailSendResult(TypedDict):
     reason: Optional[str]
     created_at: str
 
+
+# ─────────────────────────── Suppressions ───────────────────────────
+
+#: Why an address is suppressed. API adds write one of
+#: ``unsubscribe``/``bounce``/``complaint``/``manual``; system-created rows
+#: may carry other values (e.g. ``global``).
+SuppressionReason = Literal["unsubscribe", "bounce", "complaint", "manual", "global"]
+
+
+class _SuppressionCreateRequired(TypedDict):
+    email: str
+
+
+class SuppressionCreateParams(_SuppressionCreateRequired, total=False):
+    """``POST /v1/suppressions`` — idempotent add: re-adding an
+    already-suppressed address returns the existing row with
+    ``duplicate: True`` (201 either way). Adding a suppression does NOT
+    change the contact's consent state — the two compose at send time.
+    """
+
+    #: Defaults to ``manual``.
+    reason: Literal["unsubscribe", "bounce", "complaint", "manual"]
+    #: Free-form note stored with the row (max 500 chars).
+    note: str
+
+
+class SuppressionListParams(TypedDict, total=False):
+    #: Exact-match filter (case-insensitive).
+    email: str
+    #: Page size (max 500, default 50).
+    limit: int
+    offset: int
+
+
+#: Suppression record as returned by the API (open — servers may add
+#: fields). ``POST /v1/suppressions`` responses additionally carry a
+#: top-level ``duplicate: bool``.
+Suppression = dict[str, Any]
 
 # ─────────────────────────── Webhook endpoints ───────────────────────────
 
@@ -393,11 +557,95 @@ PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES: tuple[PaymentRequestWebhookEventType, ...] 
     "payment_request.cancelled",
 )
 
+ContactWebhookEventType = Literal[
+    "contact.created",
+    "contact.updated",
+    "contact.deleted",
+    "contact.consent_changed",
+]
+
+#: The four contact lifecycle + consent events. Opt-in by listing, like the
+#: order events. created/updated/deleted fire for intentional writes only —
+#: bulk edits, CSV-import updates, and contact merges are deliberately quiet
+#: (bulk DELETES do emit per contact); consent_changed fires on real
+#: consent-state transitions plus suppress escalations, never for the
+#: contact-create consent seed, same-state re-assertions, or double-opt-in
+#: ceremony markers.
+CONTACT_WEBHOOK_EVENT_TYPES: tuple[ContactWebhookEventType, ...] = (
+    "contact.created",
+    "contact.updated",
+    "contact.deleted",
+    "contact.consent_changed",
+)
+
+MessageWebhookEventType = Literal["message.received"]
+
+#: The inbound message event. Opt-in by listing. v1 = real WhatsApp inbound
+#: only, exactly once per WhatsApp message: reactions, blocked contacts, and
+#: WhatsApp coexistence echoes/history imports are all silent. Media rides
+#: as metadata only — never presigned URLs or storage keys.
+MESSAGE_WEBHOOK_EVENT_TYPES: tuple[MessageWebhookEventType, ...] = ("message.received",)
+
+DealWebhookEventType = Literal[
+    "deal.created",
+    "deal.stage_changed",
+    "deal.won",
+    "deal.lost",
+]
+
+#: The four deal lifecycle events. Opt-in by listing, like the order events.
+#: They fire for EVERY deal write source — manual, API, automations, and
+#: Salesforce sync — ``data["source"]`` says which.
+DEAL_WEBHOOK_EVENT_TYPES: tuple[DealWebhookEventType, ...] = (
+    "deal.created",
+    "deal.stage_changed",
+    "deal.won",
+    "deal.lost",
+)
+
+BookingWebhookEventType = Literal[
+    "booking.created",
+    "booking.rescheduled",
+    "booking.cancelled",
+    "booking.reassigned",
+]
+
+#: The four booking lifecycle events. Opt-in by listing, like the order
+#: events. ``booking.completed``/``booking.no_show`` deliberately do not
+#: exist as webhooks — those statuses are sweep-derived, not user actions.
+BOOKING_WEBHOOK_EVENT_TYPES: tuple[BookingWebhookEventType, ...] = (
+    "booking.created",
+    "booking.rescheduled",
+    "booking.cancelled",
+    "booking.reassigned",
+)
+
+EventAttendanceWebhookEventType = Literal["event.attendance.changed"]
+
+#: The event-attendance event — ONE type for the whole family; the payload's
+#: ``status``/``previous_status`` carry the transition. Opt-in by listing.
+EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES: tuple[EventAttendanceWebhookEventType, ...] = (
+    "event.attendance.changed",
+)
+
+FormWebhookEventType = Literal["form.submitted"]
+
+#: The form submission event — ONE type for every surface; the payload's
+#: ``origin`` distinguishes standalone form / landing page / popup. Opt-in
+#: by listing.
+FORM_WEBHOOK_EVENT_TYPES: tuple[FormWebhookEventType, ...] = ("form.submitted",)
+
 #: Any event type registrable on a webhook endpoint.
 WebhookEventType = Union[
     EmailWebhookEventType,
     OrderWebhookEventType,
     PaymentRequestWebhookEventType,
+    ContactWebhookEventType,
+    MessageWebhookEventType,
+    DealWebhookEventType,
+    BookingWebhookEventType,
+    EventAttendanceWebhookEventType,
+    FormWebhookEventType,
 ]
 
 
@@ -409,12 +657,14 @@ class WebhookEndpointCreateParams(_WebhookEndpointCreateRequired, total=False):
     """``POST /v1/webhook-endpoints`` (max 3 per workspace).
 
     ``events`` defaults to the three delivery events (``email.delivered``,
-    ``email.bounced``, ``email.complained``); the engagement types
-    (``email.opened``, ``email.clicked``), the ``order.*`` lifecycle
-    events, and the ``payment_request.*`` lifecycle events must be listed
-    explicitly. An empty list is rejected.
-    ``email.failed`` is deprecated — accepted at registration, but it never
-    fires.
+    ``email.bounced``, ``email.complained``); every other family is opt-in
+    and must be listed explicitly — the engagement types (``email.opened``,
+    ``email.clicked``) and the ``order.*``, ``payment_request.*``,
+    ``contact.*``, ``message.received``, ``deal.*``, ``booking.*``,
+    ``event.attendance.changed``, and ``form.submitted`` families. A
+    pre-existing registration never starts receiving a new family unasked.
+    An empty list is rejected. ``email.failed`` is deprecated — accepted at
+    registration, but it never fires.
     """
 
     events: list[WebhookEventType]
@@ -652,6 +902,325 @@ class PaymentRequestCancelledEvent(TypedDict):
     data: PaymentRequestWebhookEventData
 
 
+class ContactWebhookSummary(TypedDict):
+    """The compact ``contact`` block carried by ``contact.created`` /
+    ``contact.updated`` payloads — a FIXED scalar-core projection: never
+    junction arrays (tags/groups), custom fields, or engine-maintained
+    columns. Fetch the full row with ``client.contacts.get(contact_id)``.
+    """
+
+    id: str
+    phone: Optional[str]
+    email: Optional[str]
+    name: Optional[str]
+    first_name: Optional[str]
+    last_name: Optional[str]
+    lifecycle_stage: Optional[str]
+    source: Optional[str]
+    block_state: Optional[str]
+    lead_score: Optional[float]
+
+
+class ContactCreatedEventData(TypedDict):
+    contact_id: str
+    contact: ContactWebhookSummary
+    #: Which surface created the contact (e.g. ``manual``, ``api``, ``form``).
+    source: str
+    #: Always ``False`` — the event fires only for fresh inserts.
+    duplicate: bool
+
+
+class ContactUpdatedEventData(TypedDict):
+    contact_id: str
+    #: The changed field names — the same list the in-app Activity timeline
+    #: records, including the ``tags``/``groups`` junction keys and
+    #: ``custom_fields.<key>`` entries.
+    changed_fields: list[str]
+    contact: ContactWebhookSummary
+    source: str
+
+
+class ContactDeletedEventData(TypedDict):
+    """Last-known identifiers only — the row is gone; key on ``contact_id``."""
+
+    contact_id: str
+    phone: Optional[str]
+    email: Optional[str]
+    name: Optional[str]
+
+
+class ContactConsentChangedEventData(TypedDict):
+    contact_id: str
+    channel: ConsentChannel
+    #: The consent-ledger action — e.g. ``opt_in``,
+    #: ``double_opt_in_confirmed``, ``unsubscribe``, ``resubscribe``,
+    #: ``suppress``. Tolerate unknown values.
+    action: str
+    consent_state: ConsentState
+    #: ``None`` when no prior decision was stored.
+    previous_state: Optional[ConsentState]
+    basis: Optional[ConsentBasis]
+    #: Provenance — API writes read ``api`` or ``api:<source>``.
+    source: str
+    #: The consent-evidence ledger row this change wrote.
+    consent_event_id: str
+
+
+class ContactCreatedEvent(TypedDict):
+    id: str
+    type: Literal["contact.created"]
+    created_at: str
+    data: ContactCreatedEventData
+
+
+class ContactUpdatedEvent(TypedDict):
+    id: str
+    type: Literal["contact.updated"]
+    created_at: str
+    data: ContactUpdatedEventData
+
+
+class ContactDeletedEvent(TypedDict):
+    id: str
+    type: Literal["contact.deleted"]
+    created_at: str
+    data: ContactDeletedEventData
+
+
+class ContactConsentChangedEvent(TypedDict):
+    id: str
+    type: Literal["contact.consent_changed"]
+    created_at: str
+    data: ContactConsentChangedEventData
+
+
+class MessageMediaBlock(TypedDict):
+    """``message.received`` media block — METADATA only, never fetchable
+    URLs.
+    """
+
+    mime_type: Optional[str]
+    filename: Optional[str]
+    bytes: Optional[int]
+
+
+class _MessageReceivedEventDataRequired(TypedDict):
+    message_id: str
+    conversation_id: Optional[str]
+    contact_id: Optional[str]
+    channel: Literal["whatsapp_api"]
+    #: Message type (``text``, ``image``, …). Tolerate unknown values.
+    type: Optional[str]
+    #: Body text, or the media caption, else ``None``.
+    text: Optional[str]
+    wa_message_id: Optional[str]
+    #: The Meta-provided message timestamp (ISO 8601 UTC).
+    timestamp: Optional[str]
+
+
+class MessageReceivedEventData(_MessageReceivedEventDataRequired, total=False):
+    """Real WhatsApp inbound only, exactly once per WhatsApp message.
+    Every key except ``media`` is always present; ``media`` appears on
+    media messages only.
+    """
+
+    #: Media messages only — omitted otherwise.
+    media: MessageMediaBlock
+
+
+class MessageReceivedEvent(TypedDict):
+    id: str
+    type: Literal["message.received"]
+    created_at: str
+    data: MessageReceivedEventData
+
+
+class DealWebhookEventData(TypedDict):
+    """Payload ``data`` of every ``deal.*`` event — a snapshot of the deal
+    at event time, following the order-event conventions: money is a JSON
+    number in the deal's currency, instants are ISO-8601 UTC or ``None``,
+    and the full field set is always present (explicit nulls, never omitted
+    keys). ``from_stage_id``/``from_stage_name`` are set on
+    ``deal.stage_changed`` only.
+    """
+
+    deal_id: str
+    contact_id: str
+    pipeline_id: str
+    pipeline_name: Optional[str]
+    stage_id: str
+    stage_name: Optional[str]
+    from_stage_id: Optional[str]
+    from_stage_name: Optional[str]
+    status: DealStatus
+    title: Optional[str]
+    amount: Optional[float]
+    currency: Optional[str]
+    owner_user_id: Optional[str]
+    external_reference: Optional[str]
+    #: ``manual`` | ``api`` | ``automation`` | ``salesforce``. Tolerate
+    #: unknown values.
+    source: str
+    expected_close_at: Optional[str]
+    closed_at: Optional[str]
+    lost_reason: Optional[str]
+
+
+class DealCreatedEvent(TypedDict):
+    id: str
+    type: Literal["deal.created"]
+    created_at: str
+    data: DealWebhookEventData
+
+
+class DealStageChangedEvent(TypedDict):
+    id: str
+    type: Literal["deal.stage_changed"]
+    created_at: str
+    data: DealWebhookEventData
+
+
+class DealWonEvent(TypedDict):
+    id: str
+    type: Literal["deal.won"]
+    created_at: str
+    data: DealWebhookEventData
+
+
+class DealLostEvent(TypedDict):
+    id: str
+    type: Literal["deal.lost"]
+    created_at: str
+    data: DealWebhookEventData
+
+
+#: Known booking sources. Passed through verbatim from the booking row —
+#: **tolerate unknown values**: new sources may appear without an SDK bump.
+BookingWebhookSource = Literal["public_page", "manual", "api", "embed"]
+
+
+class BookingWebhookEventData(TypedDict):
+    """Payload ``data`` of every ``booking.*`` event — a snapshot of the
+    booking at event time (full field set, explicit nulls). The booking
+    module is deliberately multi-timezone, so BOTH the host and invitee
+    timezones ride the payload. There is deliberately NO ``manage_url`` (a
+    capability token). ``previous_host_name`` is set on
+    ``booking.reassigned`` only.
+    """
+
+    booking_id: str
+    contact_id: str
+    meeting_type_id: Optional[str]
+    meeting_type_name: Optional[str]
+    host_user_id: Optional[str]
+    host_name: Optional[str]
+    previous_host_name: Optional[str]
+    start_at: Optional[str]
+    end_at: Optional[str]
+    host_timezone: Optional[str]
+    invitee_timezone: Optional[str]
+    status: Optional[str]
+    location_type: Optional[str]
+    cancelled_by: Optional[str]
+    cancel_reason: Optional[str]
+    source: Optional[BookingWebhookSource]
+
+
+class BookingCreatedEvent(TypedDict):
+    id: str
+    type: Literal["booking.created"]
+    created_at: str
+    data: BookingWebhookEventData
+
+
+class BookingRescheduledEvent(TypedDict):
+    id: str
+    type: Literal["booking.rescheduled"]
+    created_at: str
+    data: BookingWebhookEventData
+
+
+class BookingCancelledEvent(TypedDict):
+    id: str
+    type: Literal["booking.cancelled"]
+    created_at: str
+    data: BookingWebhookEventData
+
+
+class BookingReassignedEvent(TypedDict):
+    id: str
+    type: Literal["booking.reassigned"]
+    created_at: str
+    data: BookingWebhookEventData
+
+
+class EventAttendanceEventSnapshot(TypedDict):
+    """The compact ``event`` block on ``event.attendance.changed``."""
+
+    id: str
+    name: Optional[str]
+    start_at: Optional[str]
+
+
+class EventAttendanceChangedEventData(TypedDict):
+    attendance_id: str
+    event_id: str
+    contact_id: str
+    #: ``registered`` | ``attending`` | ``attended`` | ``no_show`` |
+    #: ``cancelled``. Tolerate unknown values.
+    status: Optional[str]
+    #: ``None`` for fresh registrations and set-based bulk status updates.
+    previous_status: Optional[str]
+    registered_at: Optional[str]
+    attended_at: Optional[str]
+    unregistered_at: Optional[str]
+    #: Compact event snapshot — ``None`` when unavailable.
+    event: Optional[EventAttendanceEventSnapshot]
+
+
+class EventAttendanceChangedEvent(TypedDict):
+    """ONE event type for the whole attendance family — filter on
+    ``data["status"]``; ``data["previous_status"]`` carries the transition.
+    """
+
+    id: str
+    type: Literal["event.attendance.changed"]
+    created_at: str
+    data: EventAttendanceChangedEventData
+
+
+#: Known form-submission origins (the ``data["origin"]`` discriminator).
+FormSubmissionOrigin = Literal["form", "landing_page", "popup"]
+
+
+class FormSubmittedEventData(TypedDict):
+    form_id: str
+    form_name: str
+    #: Unique per submission — a secondary dedup key for your CRM.
+    submission_id: str
+    #: ``None`` when contact auto-creation is off and no contact matched.
+    contact_id: Optional[str]
+    origin: FormSubmissionOrigin
+    #: Set when ``origin`` is ``landing_page``, else ``None``.
+    landing_page_id: Optional[str]
+    #: Set when ``origin`` is ``popup``, else ``None``.
+    popup_id: Optional[str]
+    #: The submitted answers, keyed by form field ids.
+    fields: dict[str, Any]
+
+
+class FormSubmittedEvent(TypedDict):
+    """ONE event type for every submission surface — ``data["origin"]``
+    distinguishes standalone form / landing page / popup. Fires even when no
+    contact was resolved (``data["contact_id"]`` is then ``None``).
+    """
+
+    id: str
+    type: Literal["form.submitted"]
+    created_at: str
+    data: FormSubmittedEventData
+
+
 #: Any inbound webhook event. Discriminate on ``event["type"]``.
 OtokWebhookEvent = Union[
     EmailDeliveredEvent,
@@ -669,6 +1238,21 @@ OtokWebhookEvent = Union[
     PaymentRequestPaidEvent,
     PaymentRequestExpiredEvent,
     PaymentRequestCancelledEvent,
+    ContactCreatedEvent,
+    ContactUpdatedEvent,
+    ContactDeletedEvent,
+    ContactConsentChangedEvent,
+    MessageReceivedEvent,
+    DealCreatedEvent,
+    DealStageChangedEvent,
+    DealWonEvent,
+    DealLostEvent,
+    BookingCreatedEvent,
+    BookingRescheduledEvent,
+    BookingCancelledEvent,
+    BookingReassignedEvent,
+    EventAttendanceChangedEvent,
+    FormSubmittedEvent,
 ]
 
 # ─────────────────────────── Campaigns ───────────────────────────

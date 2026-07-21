@@ -59,6 +59,8 @@ This is the only idempotent create route whose **status code** also distinguishe
 
 If the recipient is on the workspace's suppression list (prior hard bounce, complaint, or unsubscribe), the API responds **2xx** (201 first time, 200 on replay) with `status: "suppressed"` and `reason: "suppressed"`. The reason is deliberately coarse — the API does not disclose *why* an address is suppressed. **Check `status` in the body; do not treat 2xx alone as "delivered to the provider".**
 
+The suppression list itself is manageable over the API — list, idempotently add, and remove rows via [`/v1/suppressions`](consent-and-suppressions.md#suppressions) (requires the `email_marketing` plan feature). Note that removing a suppression only lifts the send-time block; it never resubscribes anyone.
+
 ## Idempotency
 
 `idempotency_key` makes retries safe:

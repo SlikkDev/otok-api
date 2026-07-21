@@ -1,8 +1,8 @@
 # Webhooks
 
-Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), and **payment-request events** (lifecycle events for [pay-links](payment-requests.md)). Events are signed, retried, and deduplicable by event id.
+Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), **payment-request events** (lifecycle events for [pay-links](payment-requests.md)), **contact events** (lifecycle + [consent](consent-and-suppressions.md) changes), **message events** (inbound WhatsApp messages), **deal events** (lifecycle events for [deals](deals.md)), **booking events** (lifecycle events for [bookings](bookings.md)), **event-attendance events**, and **form-submission events**. Events are signed, retried, and deduplicable by event id.
 
-**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links.
+**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links. **Contact, message, deal, booking, attendance, and form events** fire for every intentional write source too — their quiet paths are documented per family below.
 
 All management endpoints require [authentication](getting-started.md#authentication). Errors use the structured envelope `{"error": {"code", "message"}}`.
 
@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — the engagement events `email.opened`/`email.clicked`, **all `order.*` events, and all `payment_request.*` events** are received only when explicitly listed. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
+| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -118,6 +118,81 @@ Four [payment-request](payment-requests.md) (pay-link) lifecycle events, mirrori
 | `payment_request.cancelled` | opt-in | The link was withdrawn — `POST /v1/payment-requests/:id/cancel` or an in-app cancel. A later `payment_request.paid` for the same request supersedes this event (late completion) |
 
 **Hosted pay-links only:** direct saved-card charges (`charge_kind: "token"`) and internal dunning-recovery links never emit `payment_request.*` events — the event stream is exactly the payer-facing links.
+
+### Contact events
+
+Four [contact](contacts.md) lifecycle + [consent](consent-and-suppressions.md) events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`).
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `contact.created` | opt-in | A contact was created at an intentional write seam — API upserts that create, in-app creates, form/lead capture, integration syncs. `data.duplicate` is always `false` (an upsert that matched an existing contact is an update, not a create) |
+| `contact.updated` | opt-in | A contact's fields changed in an intentional single-contact write. `data.changed_fields` names what changed — the same list the in-app Activity timeline records, including the `tags`/`groups` junction keys and `custom_fields.<key>` entries |
+| `contact.deleted` | opt-in | A contact was deleted — carries **last-known identifiers only** (the row is gone; key your mirror off `data.contact_id`). Bulk deletes emit one event per contact |
+| `contact.consent_changed` | opt-in | A channel's consent state changed — real transitions (opt-in / unsubscribe / resubscribe) plus deliverability-driven suppress escalations, from **every** consent surface (API, forms, unsubscribe pages, in-app edits) |
+
+**Quiet by design:** CSV imports and bulk contact edits emit nothing; **contact merges are fully silent** (a merge is not a deletion — the absorbed contact emits no `contact.deleted`); the creation-time consent seed does not emit `contact.consent_changed` (`contact.created` carries the initial state); same-state consent re-assertions, double-opt-in ceremony markers, and preference-center metadata updates do not emit.
+
+### Message events
+
+One inbound-message event. **Opt-in** (delivered only to endpoints that list it explicitly in `events`).
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `message.received` | opt-in | A real inbound WhatsApp message arrived — exactly once per WhatsApp message (post-dedup). Reactions, messages from blocked contacts, and WhatsApp **coexistence** echoes/history imports are all silent |
+
+Media rides as **metadata only** (`mime_type`, `filename`, `bytes`) — never presigned URLs, media URLs, or storage keys.
+
+### Deal events
+
+Four [deal](deals.md) lifecycle events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`). They fire for **every** write source — manual, API, automations, and Salesforce sync — `data.source` says which.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `deal.created` | opt-in | A deal was created |
+| `deal.stage_changed` | opt-in | The deal moved to another stage — `data.from_stage_id`/`from_stage_name` carry the origin (they are `null` on every other deal event) |
+| `deal.won` | opt-in | The deal was marked won (`data.closed_at` stamped; the deal keeps its last stage) |
+| `deal.lost` | opt-in | The deal was marked lost — `data.lost_reason` carries the stored reason (or `null`) |
+
+### Booking events
+
+Four [booking](bookings.md) lifecycle events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`).
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `booking.created` | opt-in | A booking was made — from the public booking page, in-app, the API, or an embed. `data.source` says which |
+| `booking.rescheduled` | opt-in | The booking moved to a new time — `data.start_at`/`end_at` are the NEW times |
+| `booking.cancelled` | opt-in | The booking was cancelled — `data.cancelled_by`/`cancel_reason` say who and why (when recorded) |
+| `booking.reassigned` | opt-in | The booking's host changed — `data.previous_host_name` carries the outgoing host (it is `null` on every other booking event) |
+
+`booking.completed` / `booking.no_show` deliberately do **not** exist as webhooks: those statuses are sweep-derived (a cron inferring the past, not a user action).
+
+### Event-attendance events
+
+**One** event type for the whole family — filter on `data.status` instead of subscribing per status. **Opt-in.**
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `event.attendance.changed` | opt-in | An attendee's status changed (`registered`, `attending`, `attended`, `no_show`, `cancelled`) — per attendance row, from single edits, bulk operations, and automation actions. `data.previous_status` carries the transition (`null` for fresh registrations and for set-based bulk status updates, which have no per-row prior state) |
+
+### Form events
+
+**One** event type for every submission surface — `data.origin` is the discriminator. **Opt-in.**
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `form.submitted` | opt-in | A form was submitted — a standalone embed (`origin: "form"`), a published landing page's form block (`"landing_page"`), or an on-site popup (`"popup"`). Fires post-persist even when no contact was resolved (`data.contact_id` is then `null`) |
+
+Registering an endpoint for a mix of the new families:
+
+```bash
+curl -X POST "https://app.otok.io/api/v1/webhook-endpoints" \
+  -H "Authorization: Bearer otok_live_abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://hooks.example.com/otok-crm",
+    "events": ["contact.created", "contact.updated", "contact.consent_changed", "deal.won", "form.submitted"]
+  }'
+```
 
 ## Delivery payload
 
@@ -264,6 +339,167 @@ All four payment-request events carry the same `data` fields (a snapshot of the 
 | `data.expires_at` / `data.paid_at` / `data.cancelled_at` / `data.created_at` | ISO 8601 UTC, or `null` |
 
 Provider correlation references and internal row metadata are deliberately excluded from the payload — read `GET /v1/payment-requests/:id` when you need them.
+
+### Contact event `data`
+
+`contact.created` / `contact.updated` share a compact core; `contact.deleted` and `contact.consent_changed` have their own shapes. Absent values are explicit `null`s.
+
+```json
+{
+  "id": "f6071829-3a4b-5c6d-7e8f-901234567890",
+  "type": "contact.updated",
+  "created_at": "2026-07-16T10:15:00.000Z",
+  "data": {
+    "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+    "changed_fields": ["lifecycle_stage", "tags", "custom_fields.plan"],
+    "contact": {
+      "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "phone": "+972505555555",
+      "email": "jane@example.com",
+      "name": "Jane Cohen",
+      "first_name": "Jane",
+      "last_name": "Cohen",
+      "lifecycle_stage": "customer",
+      "source": "form",
+      "block_state": "none",
+      "lead_score": 72
+    },
+    "source": "manual"
+  }
+}
+```
+
+| Field | Events | Meaning |
+|---|---|---|
+| `data.contact_id` | all four | The contact's `id` |
+| `data.contact` | created, updated | A **fixed compact projection** — `id`, `phone`, `email`, `name`, `first_name`, `last_name`, `lifecycle_stage`, `source`, `block_state`, `lead_score`. Never junction arrays (tags/groups), custom fields, or engine-maintained columns — fetch the full row with `GET /v1/contacts/:id` |
+| `data.source` | created, updated, consent_changed | Which surface performed the write (e.g. `manual`, `api`, `form`, `automation`, an integration name). Tolerate unknown values |
+| `data.duplicate` | created only | Always `false` — the event fires only for fresh inserts |
+| `data.changed_fields` | updated only | The changed field names — including `tags`/`groups` junction keys and `custom_fields.<key>` entries |
+| `data.phone` / `data.email` / `data.name` | deleted only | Last-known identifiers (the row is gone) |
+| `data.channel` | consent_changed only | `whatsapp` \| `email` |
+| `data.action` | consent_changed only | The consent-ledger action — e.g. `opt_in`, `double_opt_in_confirmed`, `unsubscribe`, `resubscribe`, `suppress`. Tolerate unknown values |
+| `data.consent_state` / `data.previous_state` | consent_changed only | The new and prior decision (`subscribed`/`unsubscribed`/`unknown`; `previous_state` is `null` when no prior decision was stored) |
+| `data.basis` | consent_changed only | Legal basis, or `null` |
+| `data.consent_event_id` | consent_changed only | The consent-evidence ledger row this change wrote |
+
+### Message event `data`
+
+```json
+{
+  "id": "d4e5f607-1829-3a4b-5c6d-7e8f90123456",
+  "type": "message.received",
+  "created_at": "2026-07-16T08:12:05.000Z",
+  "data": {
+    "message_id": "1a2b3c4d-5e6f-7081-92a3-b4c5d6e7f809",
+    "conversation_id": "2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a",
+    "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+    "channel": "whatsapp_api",
+    "type": "image",
+    "text": "Here is the signed form",
+    "media": {
+      "mime_type": "image/jpeg",
+      "filename": "signed-form.jpg",
+      "bytes": 482113
+    },
+    "wa_message_id": "wamid.HBgMOTcyNTA1NTU1NTU1FQIAEhg=",
+    "timestamp": "2026-07-16T08:12:03.000Z"
+  }
+}
+```
+
+| Field | Presence | Meaning |
+|---|---|---|
+| `data.message_id` / `data.conversation_id` / `data.contact_id` | always | oToK ids (`conversation_id`/`contact_id` may be `null`) |
+| `data.channel` | always | `whatsapp_api` (v1 fires for the WhatsApp channel only) |
+| `data.type` | always | Message type — `text`, `image`, `video`, `audio`, `document`, `location`, `contacts`, `button`, … Tolerate unknown values |
+| `data.text` | always | The message's human text: body text for text/button messages, the **caption** for captioned media, else `null` |
+| `data.media` | media messages only | **Omitted** on non-media messages. Metadata only — `{ mime_type, filename, bytes }`; never presigned URLs or storage keys |
+| `data.wa_message_id` | always | WhatsApp's own message id (`wamid.…`) |
+| `data.timestamp` | always | The Meta-provided message timestamp (ISO 8601 UTC), or `null` |
+
+### Deal event `data`
+
+All four deal events carry the same `data` fields (a snapshot of the deal at event time, full field set with explicit `null`s):
+
+```json
+{
+  "id": "e5f60718-293a-4b5c-6d7e-8f9012345678",
+  "type": "deal.stage_changed",
+  "created_at": "2026-07-16T09:00:00.000Z",
+  "data": {
+    "deal_id": "3c4d5e6f-7081-92a3-b4c5-d6e7f8091a2b",
+    "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+    "pipeline_id": "4d5e6f70-8192-a3b4-c5d6-e7f8091a2b3c",
+    "pipeline_name": "Sales",
+    "stage_id": "5e6f7081-92a3-b4c5-d6e7-f8091a2b3c4d",
+    "stage_name": "Negotiation",
+    "from_stage_id": "6f708192-a3b4-c5d6-e7f8-091a2b3c4d5e",
+    "from_stage_name": "Qualified",
+    "status": "open",
+    "title": "Onboarding package",
+    "amount": 3600,
+    "currency": "ILS",
+    "owner_user_id": "708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f",
+    "external_reference": "crm-9912",
+    "source": "api",
+    "expected_close_at": "2026-08-01T00:00:00.000Z",
+    "closed_at": null,
+    "lost_reason": null
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `data.deal_id` / `data.contact_id` | The deal and its contact |
+| `data.pipeline_id` / `data.pipeline_name` | The deal's pipeline |
+| `data.stage_id` / `data.stage_name` | The deal's **current** stage (the destination, on a move) |
+| `data.from_stage_id` / `data.from_stage_name` | **`deal.stage_changed` only** — the origin stage; `null` on every other deal event |
+| `data.status` | `open` / `won` / `lost` at event time |
+| `data.title` / `data.amount` / `data.currency` | `amount` is a **JSON number** in the deal's currency, or `null` |
+| `data.owner_user_id` | The owning agent, or `null` |
+| `data.external_reference` | The [`/v1/deals`](deals.md) idempotency reference, when set |
+| `data.source` | Which surface performed the write — `manual`, `api`, `automation`, `salesforce`. Tolerate unknown values |
+| `data.expected_close_at` / `data.closed_at` / `data.lost_reason` | ISO 8601 UTC or `null` |
+
+### Booking event `data`
+
+All four booking events carry the same `data` fields (full field set, explicit `null`s). The booking module is deliberately **multi-timezone**, so both the host and invitee timezones ride the payload. There is deliberately **no `manage_url`** — that is a capability token and never leaves through a webhook body (mint links from your own systems instead).
+
+| Field | Meaning |
+|---|---|
+| `data.booking_id` / `data.contact_id` | The booking and its invitee contact |
+| `data.meeting_type_id` / `data.meeting_type_name` | The meeting type |
+| `data.host_user_id` / `data.host_name` | The (current) host |
+| `data.previous_host_name` | **`booking.reassigned` only** — the outgoing host; `null` on every other booking event |
+| `data.start_at` / `data.end_at` | ISO 8601 UTC (the NEW times on `booking.rescheduled`) |
+| `data.host_timezone` / `data.invitee_timezone` | IANA timezones — the host's schedule tz and the tz the invitee booked in |
+| `data.status` | Booking status at event time (e.g. `confirmed`, `cancelled`). Tolerate unknown values |
+| `data.location_type` | The meeting type's location kind. Tolerate unknown values |
+| `data.cancelled_by` / `data.cancel_reason` | `booking.cancelled` — who cancelled (e.g. `host`, `invitee`) and why; `null` elsewhere |
+| `data.source` | How the booking was created — `public_page`, `manual`, `api`, or `embed`. Passed through verbatim: **tolerate unknown values**, new sources may appear without notice |
+
+### Event-attendance event `data`
+
+| Field | Meaning |
+|---|---|
+| `data.attendance_id` / `data.event_id` / `data.contact_id` | The attendance row, its event, and the attendee |
+| `data.status` | `registered`, `attending`, `attended`, `no_show`, `cancelled`. Tolerate unknown values |
+| `data.previous_status` | The prior status — `null` for fresh registrations and for set-based **bulk** status updates (whose single UPDATE has no per-row prior state) |
+| `data.registered_at` / `data.attended_at` / `data.unregistered_at` | ISO 8601 UTC or `null` |
+| `data.event` | Compact event snapshot `{ id, name, start_at }`, or `null` when unavailable |
+
+### Form event `data`
+
+| Field | Meaning |
+|---|---|
+| `data.form_id` / `data.form_name` | The submitted form |
+| `data.submission_id` | Unique per submission — a secondary dedup key for your CRM |
+| `data.contact_id` | The resolved/created contact — `null` when contact auto-creation is off and no contact matched |
+| `data.origin` | `form` (standalone embed) \| `landing_page` \| `popup` |
+| `data.landing_page_id` / `data.popup_id` | Set when `origin` is `landing_page` / `popup` respectively, else `null` |
+| `data.fields` | The submitted answers, keyed by form field ids |
 
 ## Request headers
 

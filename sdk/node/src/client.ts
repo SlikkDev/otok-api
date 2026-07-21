@@ -12,6 +12,8 @@ import {
   PaymentRequestsApi,
   PaymentsApi,
   PipelinesApi,
+  ProductsApi,
+  SuppressionsApi,
   TagsApi,
   TemplatesApi,
   WebhookEndpointsApi,
@@ -44,6 +46,8 @@ export class OtokClient {
   readonly contactGroups: ContactGroupsApi;
   readonly pipelines: PipelinesApi;
   readonly deals: DealsApi;
+  readonly products: ProductsApi;
+  readonly suppressions: SuppressionsApi;
   readonly emails: EmailsApi;
   readonly campaigns: CampaignsApi;
   readonly templates: TemplatesApi;
@@ -65,6 +69,8 @@ export class OtokClient {
     this.contactGroups = new ContactGroupsApi(this.http);
     this.pipelines = new PipelinesApi(this.http);
     this.deals = new DealsApi(this.http);
+    this.products = new ProductsApi(this.http);
+    this.suppressions = new SuppressionsApi(this.http);
     this.emails = new EmailsApi(this.http);
     this.campaigns = new CampaignsApi(this.http);
     this.templates = new TemplatesApi(this.http);

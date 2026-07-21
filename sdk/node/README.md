@@ -285,12 +285,14 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 | Namespace | Endpoints |
 |---|---|
-| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
+| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
 | `otok.tags` | `GET/POST /v1/tags`, `GET/PATCH /v1/tags/:id` |
 | `otok.contactGroups` | `GET/POST /v1/contact-groups`, `GET/PATCH /v1/contact-groups/:id` |
 | `otok.pipelines` | `GET /v1/pipelines` (with ordered stages) |
 | `otok.deals` | `GET/POST /v1/deals`, `GET/PATCH /v1/deals/:id`, `POST /v1/deals/:id/stage`, `POST /v1/deals/:id/status` |
+| `otok.products` | `GET/POST /v1/products`, `GET/PATCH /v1/products/:id` — the product catalog shared by deals and payments (POST = idempotent upsert by `external_id`; no delete — deactivate with `is_active: false`) |
 | `otok.emails` | `POST /v1/emails` (transactional, idempotent) |
+| `otok.suppressions` | `GET/POST /v1/suppressions`, `DELETE /v1/suppressions/:id` — the email suppression list (`email_marketing` feature; add is idempotent, and deliberately independent of consent) |
 | `otok.campaigns` | `GET/POST /v1/campaigns`, `GET/PATCH /v1/campaigns/:id`, `POST /v1/campaigns/:id/execute` |
 | `otok.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
 | `otok.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
@@ -303,12 +305,12 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier camelCase objects and maps them for you.
 
-Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — see [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
 
 ## Errors, timeouts, retries
 
 - Non-2xx responses throw **`OtokApiError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{ error: { code, message } }` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
-- **403 `FEATURE_NOT_INCLUDED_IN_PLAN`** — deals/pipelines, payments (`otok.payments` + `otok.contacts.listDocuments`), payment requests (`otok.paymentRequests`, gated by the separate `workspace_payments` feature), orders, campaigns, and bookings/meeting-types each require the matching feature on the workspace's plan. When the plan lacks it, **every** route in that group (reads and writes alike) throws this.
+- **403 `FEATURE_NOT_INCLUDED_IN_PLAN`** — deals/pipelines, payments (`otok.payments` + `otok.contacts.listDocuments`), payment requests (`otok.paymentRequests`, gated by the separate `workspace_payments` feature), orders, campaigns, bookings/meeting-types, and suppressions (`otok.suppressions`, gated by `email_marketing`) each require the matching feature on the workspace's plan. When the plan lacks it, **every** route in that group (reads and writes alike) throws this.
 - **409 `CONTACT_MERGE_REQUIRED`** — `otok.contacts.update` that would set a `phone`/`email` belonging to another contact (now or historically) is **not applied**; a merge request is parked for review in oToK instead. Its id is on the body — `(err.body as { merge_request_id?: string }).merge_request_id` — and non-identity fields from the same call are applied when the request is resolved.
 - **409 on duplicate names** — creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) throws `409 Conflict`.
 - **400 on invalid `filter` values** — list-endpoint `filter` values are type-checked against the target field (dates, UUIDs, enums, numbers, booleans); a mistyped value throws a 400 naming the field and expected kind.
@@ -353,9 +355,16 @@ npm test
 npm run build
 ```
 
-## Versioning & scope (v0.4)
+## Versioning & scope (v0.5)
 
-Covered: the e-commerce path end to end (contacts + notes + financial documents, tags/groups, pipelines/deals, orders with refunds, transactional email + webhooks, payments, payment requests), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+Covered: the e-commerce path end to end (contacts + consent + notes + financial documents, tags/groups, pipelines/deals, the product catalog, orders with refunds, transactional email + suppressions + webhooks, payments, payment requests), plus campaigns, WhatsApp templates, bookings, auto-paginating iterators on every paginated list endpoint, and bounded retries for transient network errors on safe/idempotency-keyed requests. Not covered yet: list-endpoint `$where` advanced filter helpers — planned for a later release.
+
+New in v0.5.0:
+
+- `otok.contacts.getConsent(contactId)` / `otok.contacts.setConsent(contactId, channel, params)` — per-channel marketing consent (`whatsapp`/`email`): read the stored decision + provider-owned deliverability (email adds the composed send-time `suppressed` verdict), and record subscribed/unsubscribed decisions with provenance. Subscribing a channel with a spam complaint on record throws 409 `consent_sticky_complained`
+- `otok.products` — the Products API (`/v1/products`): `list`/`iter` (standard pages of 500), `get`, `create` (idempotent upsert via `external_id` — the result carries `duplicate: true` on a match; 409 `product_conflict` on a `sku`/`external_id` clash), and `update` (no delete — deactivate with `is_active: false`)
+- `otok.suppressions` — the Suppressions API (`/v1/suppressions`, requires the `email_marketing` plan feature): `list`/`iter`, `create` (idempotent add — `duplicate: true` when the address was already suppressed), and `delete`. Suppression is deliberately independent of consent: adding never unsubscribes a contact, removing never resubscribes one
+- Fifteen new webhook event types across six opt-in families — contact lifecycle + consent (`contact.created`, `contact.updated`, `contact.deleted`, `contact.consent_changed`), inbound messages (`message.received` — real WhatsApp inbound only; media as metadata, never URLs), deals (`deal.created`, `deal.stage_changed`, `deal.won`, `deal.lost`), bookings (`booking.created`, `booking.rescheduled`, `booking.cancelled`, `booking.reassigned`), event attendance (`event.attendance.changed`), and form submissions (`form.submitted`) — registrable on webhook endpoints (opt-in by listing; `CONTACT_WEBHOOK_EVENT_TYPES`, `MESSAGE_WEBHOOK_EVENT_TYPES`, `DEAL_WEBHOOK_EVENT_TYPES`, `BOOKING_WEBHOOK_EVENT_TYPES`, `EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES`, `FORM_WEBHOOK_EVENT_TYPES`) and typed as inbound events for `constructEvent`. The default subscription is unchanged
 
 New in v0.4.0:
 

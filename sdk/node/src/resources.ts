@@ -10,7 +10,10 @@ import type {
   CampaignCreateParams,
   CampaignExecuteResult,
   CampaignUpdateParams,
+  ConsentChannel,
   Contact,
+  ContactConsent,
+  ContactConsentChannel,
   ContactDocumentsOptions,
   ContactDocumentsResult,
   ContactGroup,
@@ -51,7 +54,17 @@ import type {
   PaymentRequestListParams,
   PaymentUpdateParams,
   Pipeline,
+  Product,
+  ProductCreateParams,
+  ProductListParams,
+  ProductUpdateParams,
+  ProductUpsertResult,
+  SetConsentParams,
   SlotsParams,
+  Suppression,
+  SuppressionCreateParams,
+  SuppressionCreateResult,
+  SuppressionListParams,
   Tag,
   TagCreateParams,
   TagUpdateParams,
@@ -176,6 +189,41 @@ export class ContactsApi {
     return this.http.request("GET", `/v1/contacts/${contactId}/documents`, {
       query: { live: options.live },
     });
+  }
+
+  // ── Consent ──
+
+  /**
+   * Get the contact's per-channel marketing consent — both channels at
+   * once. A channel without a stored decision reads
+   * `consent_state`/`deliverability` "unknown" — treat unknown as not
+   * sendable. The email channel additionally carries the composed send-time
+   * `suppressed` verdict (suppression list + blacklist + deliverability),
+   * which is independent of the consent decision.
+   */
+  getConsent(contactId: string): Promise<ContactConsent> {
+    return this.http.request("GET", `/v1/contacts/${contactId}/consent`);
+  }
+
+  /**
+   * Record a subscribed/unsubscribed decision on one channel, with its
+   * provenance (evidence trail included) — the same path every in-app
+   * consent change takes. "unknown" is a system state and cannot be set;
+   * `deliverability` is provider-owned and not writable. Subscribing a
+   * channel with a spam complaint on record throws 409
+   * `consent_sticky_complained`. Returns the resulting channel object in
+   * the same shape `getConsent` uses.
+   */
+  setConsent(
+    contactId: string,
+    channel: ConsentChannel,
+    params: SetConsentParams,
+  ): Promise<ContactConsentChannel> {
+    return this.http.request(
+      "PUT",
+      `/v1/contacts/${contactId}/consent/${channel}`,
+      { body: params },
+    );
   }
 
   // ── Notes ──
@@ -361,6 +409,118 @@ export class DealsApi {
   /** Mark a deal won/lost, or reopen it with status "open". */
   setStatus(id: string, params: DealSetStatusParams): Promise<Deal> {
     return this.http.request("POST", `/v1/deals/${id}/status`, { body: params });
+  }
+}
+
+// ─────────────────────────── Products ───────────────────────────
+
+/**
+ * The workspace product catalog shared by deals and customer payments.
+ * Ungated (plan-wide API access only). There is deliberately no delete —
+ * deactivate with `update(id, { is_active: false })` so existing
+ * deals/payments keep resolving their attached product.
+ */
+export class ProductsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  list(params: ProductListParams = {}): Promise<Paginated<Product>> {
+    return this.http.request("GET", "/v1/products", { query: { ...params } });
+  }
+
+  /**
+   * Iterate every matching product, auto-paginating GET /v1/products
+   * (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(params: ProductListParams = {}): AsyncGenerator<Product, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  get(id: string): Promise<Product> {
+    return this.http.request("GET", `/v1/products/${id}`);
+  }
+
+  /**
+   * Create a product. Idempotent when `external_id` is set: a repeat POST
+   * with the same value updates that product instead of creating a
+   * duplicate — the result then carries `duplicate: true`. A `sku`/
+   * `external_id` clash with a DIFFERENT product throws 409
+   * `product_conflict`; `vat_mode` + `vat_rate` travel as one
+   * both-or-neither pair (400 when only one leg is sent).
+   */
+  create(params: ProductCreateParams): Promise<ProductUpsertResult> {
+    return this.http.request("POST", "/v1/products", { body: params });
+  }
+
+  /**
+   * Partial update — only the fields you send change. Deactivate with
+   * `{ is_active: false }` (there is no DELETE).
+   */
+  update(id: string, params: ProductUpdateParams): Promise<Product> {
+    return this.http.request("PATCH", `/v1/products/${id}`, { body: params });
+  }
+}
+
+// ─────────────────────────── Suppressions ───────────────────────────
+
+/**
+ * The workspace's email suppression list — a send-time overlay deliberately
+ * separate from consent: adding a row does NOT change any contact's consent
+ * state, and removing one resubscribes no one; every email send checks both.
+ *
+ * Requires the Email marketing feature (`email_marketing`) on the
+ * workspace's plan — every route throws 403 `FEATURE_NOT_INCLUDED_IN_PLAN`
+ * otherwise.
+ */
+export class SuppressionsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * List the workspace's suppression rows, newest first. Workspace-scoped
+   * rows only — the HQ-managed global list is enforced at send time but is
+   * never returned here.
+   */
+  list(params: SuppressionListParams = {}): Promise<Paginated<Suppression>> {
+    return this.http.request("GET", "/v1/suppressions", {
+      query: { ...params },
+    });
+  }
+
+  /**
+   * Iterate every matching suppression, auto-paginating GET
+   * /v1/suppressions (`limit` cap 500). Accepts the same params as `list`.
+   */
+  iter(
+    params: SuppressionListParams = {},
+  ): AsyncGenerator<Suppression, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      STANDARD_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /**
+   * Suppress an email address (idempotent): re-adding an already-suppressed
+   * address returns the existing row with `duplicate: true` — 201 either
+   * way. Adding a suppression does NOT change the contact's consent state.
+   */
+  create(params: SuppressionCreateParams): Promise<SuppressionCreateResult> {
+    return this.http.request("POST", "/v1/suppressions", { body: params });
+  }
+
+  /**
+   * Remove a suppression (204). Lifts this workspace's suppression only —
+   * it does NOT resubscribe anyone, and HQ-managed global rows cannot be
+   * removed (404 `suppression_not_found`).
+   */
+  async delete(id: string): Promise<void> {
+    await this.http.request("DELETE", `/v1/suppressions/${id}`);
   }
 }
 

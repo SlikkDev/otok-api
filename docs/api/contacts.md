@@ -10,11 +10,15 @@ All endpoints require [authentication](getting-started.md#authentication). There
 | GET | `/api/v1/contacts/:id` | Get one contact |
 | POST | `/api/v1/contacts` | **Upsert** a contact by phone/email |
 | PATCH | `/api/v1/contacts/:id` | Update a contact by id |
+| GET | `/api/v1/contacts/:id/consent` | Read per-channel marketing consent — see [Consent & Suppressions](consent-and-suppressions.md) |
+| PUT | `/api/v1/contacts/:id/consent/:channel` | Record a consent decision — see [Consent & Suppressions](consent-and-suppressions.md) |
 | GET | `/api/v1/contacts/:id/documents` | List a contact's financial documents (requires the **Payments** feature) |
 | GET | `/api/v1/contacts/:id/notes` | List a contact's notes |
 | POST | `/api/v1/contacts/:id/notes` | Add a note |
 | PATCH | `/api/v1/notes/:id` | Edit / pin a note |
 | DELETE | `/api/v1/notes/:id` | Delete a note |
+
+> **Consent lives on its own page.** A contact's WhatsApp/email marketing consent — the recorded decision, its legal basis, deliverability, and the composed send-time suppression verdict — is read and written through the consent endpoints, documented in [Consent & Suppressions](consent-and-suppressions.md).
 
 ## The contact object
 

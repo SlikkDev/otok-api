@@ -9,8 +9,14 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from otok import (
+    BOOKING_WEBHOOK_EVENT_TYPES,
+    CONTACT_WEBHOOK_EVENT_TYPES,
+    DEAL_WEBHOOK_EVENT_TYPES,
     DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES,
     EMAIL_WEBHOOK_EVENT_TYPES,
+    EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES,
+    FORM_WEBHOOK_EVENT_TYPES,
+    MESSAGE_WEBHOOK_EVENT_TYPES,
     ORDER_WEBHOOK_EVENT_TYPES,
     PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
     OtokAPIError,
@@ -388,6 +394,293 @@ class TestEmailsAndWebhookEndpoints:
             "url": "https://hooks.example.com/otok",
             "events": ["order.created", "order.paid", "order.refunded"],
         }
+
+    def test_new_family_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert CONTACT_WEBHOOK_EVENT_TYPES == (
+            "contact.created",
+            "contact.updated",
+            "contact.deleted",
+            "contact.consent_changed",
+        )
+        assert MESSAGE_WEBHOOK_EVENT_TYPES == ("message.received",)
+        assert DEAL_WEBHOOK_EVENT_TYPES == (
+            "deal.created",
+            "deal.stage_changed",
+            "deal.won",
+            "deal.lost",
+        )
+        assert BOOKING_WEBHOOK_EVENT_TYPES == (
+            "booking.created",
+            "booking.rescheduled",
+            "booking.cancelled",
+            "booking.reassigned",
+        )
+        assert EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES == ("event.attendance.changed",)
+        assert FORM_WEBHOOK_EVENT_TYPES == ("form.submitted",)
+        # Every new family is opt-in by listing: an endpoint registered
+        # without an explicit `events` list gets only the email delivery
+        # defaults.
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        new_family_types: tuple[str, ...] = (
+            CONTACT_WEBHOOK_EVENT_TYPES
+            + MESSAGE_WEBHOOK_EVENT_TYPES
+            + DEAL_WEBHOOK_EVENT_TYPES
+            + BOOKING_WEBHOOK_EVENT_TYPES
+            + EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES
+            + FORM_WEBHOOK_EVENT_TYPES
+        )
+        assert len(new_family_types) == 15
+        for event_type in new_family_types:
+            assert event_type not in defaults
+
+    def test_new_family_events_are_listed_verbatim_at_registration(self) -> None:
+        client, transport = make_client(json_response(201, {"id": "we-2", "secret": "whsec_y"}))
+        client.webhook_endpoints.create(
+            {
+                "url": "https://hooks.example.com/otok",
+                "events": [
+                    "contact.created",
+                    "message.received",
+                    "deal.won",
+                    "booking.created",
+                    "event.attendance.changed",
+                    "form.submitted",
+                ],
+            }
+        )
+        assert transport.request_body() == {
+            "url": "https://hooks.example.com/otok",
+            "events": [
+                "contact.created",
+                "message.received",
+                "deal.won",
+                "booking.created",
+                "event.attendance.changed",
+                "form.submitted",
+            ],
+        }
+
+
+class TestProducts:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 50, "offset": 0})
+        )
+        client.products.list(
+            {
+                "q": "onboarding",
+                "sku": "SKU-1",
+                "external_id": "prod-9",
+                "is_active": True,
+                "limit": 10,
+                "offset": 20,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/products"
+        assert query_of(request) == {
+            "q": ["onboarding"],
+            "sku": ["SKU-1"],
+            "external_id": ["prod-9"],
+            "is_active": ["true"],
+            "limit": ["10"],
+            "offset": ["20"],
+        }
+
+    def test_create_surfaces_the_upsert_duplicate_marker(self) -> None:
+        # 201 in both outcomes; duplicate=True means the external_id matched
+        # an existing product that was updated instead of created.
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "product-1",
+                    "name": "Onboarding package",
+                    "external_id": "prod-9",
+                    "duplicate": True,
+                },
+            )
+        )
+        product = client.products.create(
+            {"name": "Onboarding package", "external_id": "prod-9", "price": 249.9}
+        )
+        assert product["duplicate"] is True
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/products",
+        )
+        assert transport.request_body() == {
+            "name": "Onboarding package",
+            "external_id": "prod-9",
+            "price": 249.9,
+        }
+
+    def test_get_and_update(self) -> None:
+        client, transport = make_client(json_response(200, {"id": "product-1"}))
+        client.products.get("product-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/products/product-1",
+        )
+        client.products.update("product-1", {"is_active": False})
+        assert (last_request(transport).method, transport.request_path()) == (
+            "PATCH",
+            "/api/v1/products/product-1",
+        )
+        assert transport.request_body() == {"is_active": False}
+
+    def test_conflict_raises_a_coded_409(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "product_conflict",
+                        "message": "A product with this sku or external_id already exists",
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.products.create({"name": "P", "sku": "SKU-1"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "product_conflict"
+
+
+class TestSuppressions:
+    def test_list_serializes_the_email_filter_and_paging(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 50, "offset": 0})
+        )
+        client.suppressions.list({"email": "jane@example.com", "limit": 5})
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/suppressions"
+        assert query_of(request) == {"email": ["jane@example.com"], "limit": ["5"]}
+
+    def test_create_is_an_idempotent_add_with_a_duplicate_marker(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "sup-1",
+                    "email": "jane@example.com",
+                    "reason": "manual",
+                    "duplicate": True,
+                },
+            )
+        )
+        row = client.suppressions.create(
+            {"email": "jane@example.com", "reason": "manual", "note": "asked by phone"}
+        )
+        assert row["duplicate"] is True
+        assert transport.request_body() == {
+            "email": "jane@example.com",
+            "reason": "manual",
+            "note": "asked by phone",
+        }
+
+    def test_delete_returns_none_on_204(self) -> None:
+        client, transport = make_client(json_response(204))
+        client.suppressions.delete("sup-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "DELETE",
+            "/api/v1/suppressions/sup-1",
+        )
+
+    def test_missing_email_marketing_feature_raises_a_coded_403(self) -> None:
+        client, _ = make_client(
+            json_response(
+                403,
+                {
+                    "message": (
+                        "Your current plan does not include access to this feature: "
+                        "email_marketing. Please upgrade your plan."
+                    ),
+                    "error_code": "FEATURE_NOT_INCLUDED_IN_PLAN",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.suppressions.list()
+        assert exc_info.value.status == 403
+        assert exc_info.value.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
+
+
+class TestContactConsent:
+    def test_get_consent_reads_both_channels(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "contact_id": "c-1",
+                    "block_state": "none",
+                    "channels": {
+                        "whatsapp": {"consent_state": "unknown", "deliverability": "unknown"},
+                        "email": {
+                            "consent_state": "subscribed",
+                            "deliverability": "deliverable",
+                            "suppressed": False,
+                            "suppression_reason": None,
+                        },
+                    },
+                },
+            )
+        )
+        consent = client.contacts.get_consent("c-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/contacts/c-1/consent",
+        )
+        assert consent["channels"]["email"]["suppressed"] is False
+
+    def test_set_consent_puts_the_decision_to_the_channel_route(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "consent_state": "subscribed",
+                    "consent_source": "api:crm-sync",
+                    "deliverability": "deliverable",
+                },
+            )
+        )
+        channel = client.contacts.set_consent(
+            "c-1",
+            "email",
+            {"state": "subscribed", "basis": "express_opt_in", "source": "crm-sync"},
+        )
+        assert (last_request(transport).method, transport.request_path()) == (
+            "PUT",
+            "/api/v1/contacts/c-1/consent/email",
+        )
+        assert transport.request_body() == {
+            "state": "subscribed",
+            "basis": "express_opt_in",
+            "source": "crm-sync",
+        }
+        assert channel["consent_state"] == "subscribed"
+
+    def test_complained_channel_raises_the_sticky_409(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "error": {
+                        "code": "consent_sticky_complained",
+                        "message": (
+                            "This channel has a spam complaint on record; consent "
+                            "cannot be re-subscribed via the API."
+                        ),
+                    }
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.contacts.set_consent("c-1", "email", {"state": "subscribed"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "consent_sticky_complained"
 
 
 class TestCampaignsAndTemplates:

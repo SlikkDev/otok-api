@@ -31,7 +31,7 @@ const DEFAULT_MAX_RETRIES = 2;
 /** Base backoff delay; grows exponentially per retry with full jitter. */
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30_000;
-const SDK_VERSION = "0.4.0";
+const SDK_VERSION = "0.5.0";
 
 export type QueryValue = string | number | boolean | undefined;
 
@@ -172,7 +172,7 @@ export class HttpClient {
   }
 
   async request<T>(
-    method: "GET" | "POST" | "PATCH" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
     path: string,
     options: RequestOptions = {},
   ): Promise<T> {
