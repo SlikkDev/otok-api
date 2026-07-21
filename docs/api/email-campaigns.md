@@ -131,7 +131,9 @@ Tokens work in all three content sources, and also inside the campaign `subject`
 
 ### Snippets
 
-Snippets are reusable content blocks from the workspace library (managed in the app under **Settings → Snippets**). Reference one by UUID or by **case-insensitive exact name** — via the `::snippet[…]` markdown directive or a `snippet` block. A reference that matches no workspace snippet returns `400 unknown_snippet`, with the available snippet names listed in the message. The stored document keeps the *reference*, so later snippet edits reach future sends.
+Snippets are reusable content blocks from the workspace library (managed in the app under **Settings → Snippets**). Reference one by UUID or by **case-insensitive exact name** — via the `::snippet[…]` markdown directive or a `snippet` block. A reference that matches no workspace snippet returns `400 unknown_snippet`, with the available snippet names listed in the message.
+
+The stored document keeps the *reference*, but the two surfaces resolve it at different moments: **email campaigns** re-expand snippet references at launch, so a snippet edited after the campaign was written still reaches the send; **newsletter issues** bake snippet content into the compiled document at save — re-save the issue (PATCH, or an `external_reference` create replay) to pick up later snippet edits.
 
 ### Compile feedback
 

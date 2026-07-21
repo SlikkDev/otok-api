@@ -1382,9 +1382,9 @@ class ContentInput(TypedDict, total=False):
     markdown: str
     #: Typed block array (see :class:`ContentBlock`).
     blocks: list[ContentBlock]
-    #: A raw Maily document (as the in-app editor submits), passed through
-    #: with a structural sanity check only — snippets resolve by id, not
-    #: name, in this form.
+    #: A raw editor document (the native design JSON the in-app email editor
+    #: submits), passed through with a structural sanity check only —
+    #: snippets resolve by id, not name, in this form.
     design_json: dict[str, Any]
 
 

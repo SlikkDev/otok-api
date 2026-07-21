@@ -118,7 +118,8 @@ Content-bearing tools accept one shared `content` parameter: `{ direction?, mark
 # From the repo root
 npm --prefix sdk/node ci
 npm --prefix sdk/node run build
-npm --prefix sdk/node pack --pack-destination mcp/.local
+mkdir -p mcp/.local   # npm pack does not create a missing destination directory
+npm pack ./sdk/node --pack-destination mcp/.local   # positional spec — npm pack ignores --prefix
 
 cd mcp
 npm install --no-save ./.local/otok-node-*.tgz   # installs the tarball + all other deps

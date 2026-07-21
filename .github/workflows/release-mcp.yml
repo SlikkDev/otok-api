@@ -55,6 +55,7 @@ jobs:
         run: |
           npm ci
           npm run build
+          mkdir -p ../../mcp/.local
           npm pack --pack-destination ../../mcp/.local
       - name: Install (tarball satisfies @otok/node ^0.6.0)
         run: npm install --no-save ./.local/otok-node-*.tgz
