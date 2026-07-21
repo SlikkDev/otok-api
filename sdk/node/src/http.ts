@@ -150,6 +150,17 @@ export function isNetworkRetrySafe(method: string, body: unknown): boolean {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /**
+ * Trim trailing `/` characters in one linear pass. Deliberately not a
+ * `/\/+$/` regex replace, whose backtracking is superlinear on adversarial
+ * input (CodeQL js/polynomial-redos).
+ */
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47 /* "/" */) end--;
+  return end === value.length ? value : value.slice(0, end);
+}
+
+/**
  * Minimal HTTP layer over native fetch: auth header injection, JSON
  * (de)serialization, per-attempt timeout via AbortController, and
  * exponential-backoff retries — on 429/5xx respecting `Retry-After`, and on
@@ -165,7 +176,7 @@ export class HttpClient {
   constructor(options: HttpClientOptions) {
     if (!options.apiKey) throw new Error("@otok/node: apiKey is required");
     this.apiKey = options.apiKey;
-    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
+    this.baseUrl = trimTrailingSlashes(options.baseUrl ?? DEFAULT_BASE_URL);
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.fetchImpl = options.fetch ?? fetch;

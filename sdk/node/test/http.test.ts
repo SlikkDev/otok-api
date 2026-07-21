@@ -532,3 +532,43 @@ describe("computeBackoffMs", () => {
     expect(computeBackoffMs(0, "soon", () => 1)).toBe(500);
   });
 });
+
+describe("baseUrl trailing-slash trimming", () => {
+  async function requestedUrl(baseUrl: string): Promise<string> {
+    let seen = "";
+    const fetchMock = vi.fn(async (url: any) => {
+      seen = String(url);
+      return jsonResponse(200, { ok: true });
+    });
+    const client = new HttpClient({
+      apiKey: "otok_live_testkey",
+      baseUrl,
+      fetch: fetchMock as any,
+    });
+    await client.request("GET", "/v1/contacts");
+    return seen;
+  }
+
+  it("leaves a baseUrl without a trailing slash untouched", async () => {
+    expect(await requestedUrl("https://example.test/api")).toBe(
+      "https://example.test/api/v1/contacts",
+    );
+  });
+
+  it("trims a single trailing slash", async () => {
+    expect(await requestedUrl("https://example.test/api/")).toBe(
+      "https://example.test/api/v1/contacts",
+    );
+  });
+
+  it("trims many trailing slashes — including 10k of them — instantly", async () => {
+    expect(await requestedUrl("https://example.test/api///")).toBe(
+      "https://example.test/api/v1/contacts",
+    );
+    // Regression guard for the former /\/+$/ regex trim (superlinear
+    // backtracking): a pathological run of slashes must still be linear.
+    expect(await requestedUrl(`https://example.test/api${"/".repeat(10_000)}`)).toBe(
+      "https://example.test/api/v1/contacts",
+    );
+  });
+});
