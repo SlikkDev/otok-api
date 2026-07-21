@@ -7,7 +7,8 @@ info:
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
     per-channel marketing consent), tags and groups, WhatsApp campaigns and templates, deals
     and pipelines, the product catalog, payments, payment requests (pay-links), orders,
-    transactional email, email suppressions, outbound webhooks, and bookings.
+    transactional email, broadcast email campaigns, newsletters, email suppressions,
+    outbound webhooks, and bookings.
 
     ## Authentication
 
@@ -24,7 +25,8 @@ info:
     Endpoint groups that mirror a plan-gated product area additionally require that feature on
     the workspace's plan — deals/pipelines (`deals`), payments and contact documents
     (`payments`), payment requests (`workspace_payments`), orders (`orders`), campaigns
-    (`campaigns`), bookings/meeting-types (`booking`). Every route in a gated group answers
+    (`campaigns`), email campaigns (`email_marketing`), newsletters (`newsletters`),
+    bookings/meeting-types (`booking`). Every route in a gated group answers
     `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` (a body **without** a `statusCode`
     field) when the plan lacks the feature. Note the two distinct payment gates:
     `/v1/payments*` and `GET /v1/contacts/{id}/documents` require the **`payments`** feature
@@ -39,9 +41,9 @@ info:
 
     The API uses **two error body shapes**:
 
-    1. **Domain errors** (email, webhook-endpoint, consent, suppression, and product APIs, and
-       `POST /v1/campaigns/{id}/execute`
-       failures) use a structured envelope: `{"error": {"code", "message"}}` — key on `error.code`.
+    1. **Domain errors** (email, email-campaign, newsletter, webhook-endpoint, consent,
+       suppression, and product APIs, and `POST /v1/campaigns/{id}/execute` failures) use a
+       structured envelope: `{"error": {"code", "message"}}` — key on `error.code`.
     2. **Framework errors** (validation, auth, rate limiting, most resource errors) use
        `{"statusCode", "message", "error"}`, where `message` is a string or an array of
        per-field validation messages. Some 4xx responses extend this shape with a
@@ -56,9 +58,10 @@ info:
     The API never deletes customer data — contacts, deals, products, payments, orders,
     campaigns, tags, and contact groups have no DELETE routes (deactivate a product with
     `is_active: false` instead). The only DELETE endpoints are for resources the API
-    owns: `DELETE /v1/notes/{id}`, `DELETE /v1/webhook-endpoints/{id}`, and
+    owns: `DELETE /v1/notes/{id}`, `DELETE /v1/webhook-endpoints/{id}`,
     `DELETE /v1/suppressions/{id}` (which lifts a send-time block — it deletes no
-    contact data and resubscribes no one).
+    contact data and resubscribes no one), and `DELETE /v1/newsletter-issues/{id}`
+    (drafts and scheduled issues only — published issues are never deletable).
 
     ## Rate limits
 
@@ -75,20 +78,24 @@ info:
 
     Most list endpoints return `{ "data", "total", "limit", "offset" }` with `limit`
     default 50 (hard cap 500). `GET /v1/deals`, `GET /v1/payments`,
-    `GET /v1/payment-requests`, and `GET /v1/orders`
-    use dedicated query parameters with `limit` default 25 (cap 100); absent or empty
-    `limit`/`offset` values default. On deals, payments, and payment requests, malformed
-    values return `400`
+    `GET /v1/payment-requests`, `GET /v1/orders`, and the email-campaign/newsletter
+    lists use dedicated query parameters with `limit` default 25 (cap 100); absent or
+    empty `limit`/`offset` values default. On deals, payments, payment requests, and
+    the email-campaign/newsletter lists, malformed values return `400`
     (`"Invalid limit: must be a non-negative integer"`); on orders, paging **never**
     returns 400 — malformed or zero values silently default and out-of-range values are
     clamped. Unrecognized enum filter values on deals/payments/orders are silently
-    ignored; `GET /v1/payment-requests` instead rejects an unknown `status` with 400.
+    ignored; `GET /v1/payment-requests`, `GET /v1/email-campaigns`, and
+    `GET /v1/newsletters/{id}/issues` instead reject an unknown `status` with 400.
 
     ## Idempotency
 
     - Contacts upsert by `phone`/`email`.
     - Deals, payments, and orders upsert by `external_reference`; products upsert by
       `external_id`.
+    - Email campaigns and newsletter issues upsert by `external_reference` — a replay
+      updates content/fields while the record is still editable and never touches
+      `status`, `scheduled_at`, or an issue's number.
     - Suppression adds are idempotent per address (re-adding answers `duplicate: true`).
     - Order refunds are idempotent per `external_refund_id` — only when you supply one.
     - Emails require an explicit `idempotency_key`.
@@ -104,6 +111,25 @@ info:
     `GET /v1/orders?external_reference=...`); the order **refund** endpoint does return
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
     `POST /v1/emails`, which answers 201 fresh / 200 replay.
+
+    ## Changes in 1.5.0
+
+    - New **Email campaigns** resource group (`/v1/email-campaigns*`) — author, estimate,
+      launch, and schedule broadcast email campaigns: idempotent create via
+      `external_reference`, PATCH while draft/scheduled, `GET …/estimate` through the
+      send path's audience resolver, and `send`/`schedule`/`unschedule` riding the exact
+      in-app launch gates. Requires the `email_marketing` plan feature. A/B testing is
+      deliberately not exposed — create A/B campaigns in-app.
+    - New **Newsletters** resource group (`/v1/newsletters*` + `/v1/newsletter-issues*`) —
+      list/create newsletters (rows carry active subscriber counts) and author their
+      issues: idempotent issue create via `external_reference`,
+      publish/schedule/unschedule with publish-time issue numbering, and deletion for
+      never-published issues. Requires the `newsletters` plan feature.
+    - Shared **`content` authoring contract** on both new surfaces: exactly one of
+      `markdown` (CommonMark subset + `::button[Label](https://url)` /
+      `::snippet[name-or-uuid]` directives + `[[…]]` personalization tokens), typed
+      `blocks`, or a raw `design_json` document — compiled at write time, with the
+      result reported in the response's `compile: {ok, errors, warnings}` envelope.
 
     ## Changes in 1.4.0
 
@@ -202,6 +228,10 @@ tags:
     description: "`POST /v1/emails` — idempotent raw transactional sends with opt-in tracking."
   - name: Suppressions
     description: The workspace's email suppression list — a send-time overlay deliberately separate from consent. List, idempotent add, remove. Requires the `email_marketing` feature.
+  - name: Email campaigns
+    description: Broadcast email campaigns — author (`markdown` / `blocks` / `design_json`), estimate, launch, schedule. Idempotent create via `external_reference`. Requires the `email_marketing` feature.
+  - name: Newsletters
+    description: Smart newsletters and their sequenced issues — create, author, publish, schedule. Idempotent issue create via `external_reference`; issue numbers are assigned at publish. Requires the `newsletters` feature.
   - name: Webhook endpoints
     description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, plus the opt-in `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` families.
   - name: Meeting types
@@ -3217,6 +3247,999 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  # ───────────────────────────── Email campaigns ─────────────────────────────
+  /v1/email-campaigns:
+    get:
+      operationId: listEmailCampaigns
+      tags: [Email campaigns]
+      summary: List email campaigns
+      description: |
+        Newest first. **List rows omit the content columns** (`design_json`,
+        `compiled_html`, `compiled_styles`, `plain_text`) and the in-app-only A/B fields —
+        fetch a single campaign for the content. Delivery counters are included on list
+        rows. An empty `status` value (`?status=`) is treated as absent; an unknown value
+        returns 400.
+      parameters:
+        - name: status
+          in: query
+          description: |
+            Exact status filter. Unknown values return 400 (`"Invalid status: must be one
+            of draft, scheduled, sending, paused, sent, failed, cancelled"`); empty is
+            treated as absent.
+          schema:
+            type: string
+            enum: [draft, scheduled, sending, paused, sent, failed, cancelled]
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated campaign list (rows omit the content columns).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/EmailCampaign"
+        "400":
+          description: |
+            An unknown `status`, or a malformed `limit`/`offset`
+            (`"Invalid limit: must be a non-negative integer"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertEmailCampaign
+      tags: [Email campaigns]
+      summary: Create a draft campaign (idempotent upsert via `external_reference`)
+      description: |
+        Creates a **draft** broadcast email campaign. `content` (see the **Content
+        input** schema) maps to the campaign's email
+        body and **compiles immediately** through the same pipeline the in-app launch
+        gate runs — the response's `compile: {ok, errors, warnings}` envelope reports the
+        result up front, not at send time. The campaign does not send until you call
+        `POST /v1/email-campaigns/{id}/send` or `…/schedule`.
+
+        Targeting is optional and validated at write time: `audience_id` must belong to
+        your workspace, `audience_filters` is structurally validated and test-compiled
+        (failures return 400 with an `errors` array). At send time the audience can only
+        **narrow** the built-in email send-eligibility baseline (opted in, not
+        suppressed) — never widen it. With no targeting at all, the campaign goes to
+        every eligible contact — check `GET /v1/email-campaigns/{id}/estimate` before
+        sending.
+
+        **Idempotency:** when `external_reference` matches an existing campaign in the
+        workspace, the response carries `duplicate: true` and:
+
+        - while the campaign is still `draft`/`scheduled`, the call **updates** its
+          fields exactly as a PATCH would — never `status` or `scheduled_at`;
+        - once the launch has claimed it (`sending`/`sent`/`failed`/…), the campaign is
+          returned **verbatim** — nothing is mutated, nothing is recompiled, and the
+          response carries no `compile` envelope.
+
+        The response is **201 in both cases**. One reference maps to one campaign per
+        workspace. A/B testing is deliberately not exposed on the public API — create
+        A/B campaigns in-app.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailCampaignCreate"
+      responses:
+        "201":
+          description: |
+            The campaign (created — `duplicate: false` — or matched by
+            `external_reference` — `duplicate: true`), with the `compile` envelope
+            (omitted only on a post-launch verbatim replay).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailCampaignWriteResult"
+        "400":
+          description: |
+            Request-shape violations (standard validation body), `"Invalid
+            audience_filters definition"` (body includes an `errors` array), or a coded
+            domain error (`{"error": {"code", "message"}}`): `invalid_content` (zero or
+            two-plus content sources, malformed markdown/blocks/design_json, oversized
+            content), `unknown_snippet` (a `::snippet[…]` reference or snippet block that
+            matched no workspace snippet — the message lists the available snippet
+            names), or `sender_profile_not_found`.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/DomainError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Audience not found"` — `audience_id` not in this workspace.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/email-campaigns/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getEmailCampaign
+      tags: [Email campaigns]
+      summary: Get one campaign
+      responses:
+        "200":
+          description: |
+            The full campaign — including `design_json`, the compiled content columns,
+            and the delivery counters. No `compile` envelope on plain reads.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailCampaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`campaign_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: campaign_not_found
+                  message: Email campaign not found
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateEmailCampaign
+      tags: [Email campaigns]
+      summary: Update a draft/scheduled campaign
+      description: |
+        Same field set as create minus `external_reference`; only present fields are
+        touched, and the nullable fields clear on an explicit `null`. A `content` change
+        recompiles (the response carries a fresh `compile` envelope) and **detaches any
+        in-app template** the campaign referenced — the patched content is what sends.
+        Campaigns the launch already claimed (`sending`/`sent`/`failed`/…) answer 409
+        `campaign_not_editable`; a scheduled campaign stays scheduled (PATCH never
+        touches `status` or `scheduled_at` — use `…/schedule` to move the launch time).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EmailCampaignUpdate"
+      responses:
+        "200":
+          description: "The updated campaign, with the `compile` envelope (`ok: true, errors: [], warnings: []` when `content` was not part of the patch)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailCampaignWriteResult"
+        "400":
+          description: |
+            Same as create: request-shape violations, `"Invalid audience_filters
+            definition"`, or the coded `invalid_content` / `unknown_snippet` /
+            `sender_profile_not_found` domain errors.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/DomainError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`campaign_not_found` — or `"Audience not found"` (framework shape) for a patched `audience_id` not in this workspace.'
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: "`campaign_not_editable` — the campaign is no longer draft/scheduled."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: campaign_not_editable
+                  message: "Campaign status is 'sent' — only draft or scheduled campaigns can be edited"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/email-campaigns/{id}/estimate:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: estimateEmailCampaign
+      tags: [Email campaigns]
+      summary: Estimate the campaign's audience size
+      description: |
+        Runs the campaign's **stored** targeting through the same resolver pipeline the
+        send path uses — the email consent + suppression baseline, then the saved
+        audience or ad-hoc filters, contact-group narrowing, and `topic_key` opt-outs —
+        so the estimate always matches send-time resolution (minus recipients already
+        claimed mid-flight). Update targeting first (PATCH), then re-estimate.
+      responses:
+        "200":
+          description: The estimated recipient count.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AudienceEstimate"
+              example:
+                estimated_recipients: 1284
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`campaign_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/email-campaigns/{id}/send:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: sendEmailCampaign
+      tags: [Email campaigns]
+      summary: Launch the campaign now
+      description: |
+        Draft/scheduled campaigns only. No request body. Marks the campaign scheduled
+        for now and drives the launch **synchronously through the exact in-app launch
+        gates** — sender readiness (verified domain + legal footer fields), inline
+        content compile, and the content lint. On success the response is the campaign
+        with its post-launch status (typically `sending`; poll
+        `GET /v1/email-campaigns/{id}` for counter progress). A gate failure answers
+        **422** with the gate's message and the campaign's final status — the gate marks
+        the campaign `failed` as a side effect, so `error.campaign_status` tells you
+        where it landed.
+      responses:
+        "200":
+          description: The campaign, with its post-launch status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailCampaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`campaign_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: "`campaign_not_sendable` — the campaign is not draft/scheduled."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: campaign_not_sendable
+                  message: "Campaign status is 'sent' — only draft or scheduled campaigns can be sent"
+        "422":
+          description: |
+            `launch_failed` — a launch gate rejected the campaign. The error object
+            additionally carries `campaign_status` (the campaign's final status after the
+            gate ran — normally `failed`). Fix the reported problem (verify the sending
+            domain, complete the sender profile's footer fields, repair the content) and
+            send again.
+          content:
+            application/json:
+              schema:
+                type: object
+                title: Launch-failed error envelope
+                description: The domain envelope extended with the campaign's final status.
+                required: [error]
+                properties:
+                  error:
+                    type: object
+                    required: [code, message, campaign_status]
+                    properties:
+                      code:
+                        type: string
+                        const: launch_failed
+                      message:
+                        type: string
+                        description: The failing gate's message.
+                      campaign_status:
+                        type: string
+                        description: The campaign's status after the failed launch.
+              example:
+                error:
+                  code: launch_failed
+                  message: "Sender profile's domain is not verified"
+                  campaign_status: failed
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/email-campaigns/{id}/schedule:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: scheduleEmailCampaign
+      tags: [Email campaigns]
+      summary: Schedule (or reschedule) a future launch
+      description: |
+        Draft/scheduled campaigns only. `scheduled_at` is an ISO 8601 UTC instant in the
+        future; the every-minute sweep launches the campaign when due (running the same
+        launch gates as `…/send`). Calling it again while still scheduled moves the
+        launch time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleAtRequest"
+      responses:
+        "200":
+          description: "The scheduled campaign (`status: scheduled`, `scheduled_at` set)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailCampaign"
+        "400":
+          description: |
+            `invalid_scheduled_at` (domain envelope) — `scheduled_at` parses but is not a
+            future instant — or a standard validation body for a value that is not ISO
+            8601 at all.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+              examples:
+                notFuture:
+                  summary: Not a future instant
+                  value:
+                    error:
+                      code: invalid_scheduled_at
+                      message: scheduled_at must be a future instant
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`campaign_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: "`campaign_not_schedulable` — the campaign is not draft/scheduled."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/email-campaigns/{id}/unschedule:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: unscheduleEmailCampaign
+      tags: [Email campaigns]
+      summary: Cancel a scheduled launch (back to draft)
+      description: |
+        No request body. Conditional on status `scheduled` — when the minute sweep has
+        already claimed the campaign for sending, the call answers 409 `already_sending`
+        rather than silently no-opping, so you know the sends are going out.
+      responses:
+        "200":
+          description: "The campaign, back in `draft` with `scheduled_at` cleared."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailCampaign"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`campaign_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: |
+            `already_sending` — the send sweep already claimed this campaign — or
+            `campaign_not_scheduled` — the campaign is not currently scheduled.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              examples:
+                alreadySending:
+                  summary: Claimed by the send sweep
+                  value:
+                    error:
+                      code: already_sending
+                      message: The send sweep already claimed this campaign — it is sending
+                notScheduled:
+                  summary: Not currently scheduled
+                  value:
+                    error:
+                      code: campaign_not_scheduled
+                      message: "Campaign status is 'draft' — only scheduled campaigns can be unscheduled"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ───────────────────────────── Newsletters ─────────────────────────────
+  /v1/newsletters:
+    get:
+      operationId: listNewsletters
+      tags: [Newsletters]
+      summary: List newsletters
+      description: |
+        Newest first. Each row carries its computed `active_subscriber_count`. List rows
+        return the documented summary fields only — fetch a single newsletter for the
+        full stored configuration.
+      parameters:
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated newsletter list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Newsletter"
+        "400":
+          description: 'A malformed `limit`/`offset` (`"Invalid limit: must be a non-negative integer"`).'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createNewsletter
+      tags: [Newsletters]
+      summary: Create a newsletter
+      description: |
+        A `name` alone suffices — cadence, enrollment policy, and archive settings take
+        their in-app defaults (adjust them in the app). Omit `sender_profile_id` to fall
+        back to the workspace default profile at send time. Newsletter names are unique
+        per workspace (case-insensitive) — a duplicate answers 409 `duplicate_name`.
+        Subject to the plan's newsletter cap (403 `PLAN_LIMIT_EXCEEDED` when reached).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewsletterCreate"
+      responses:
+        "201":
+          description: "The created newsletter (`active_subscriber_count: 0`)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Newsletter"
+        "400":
+          description: |
+            Request-shape violations (standard validation body) or
+            `sender_profile_not_found` (domain envelope).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/DomainError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            Plan-wide API access, `error_code: FEATURE_NOT_INCLUDED_IN_PLAN` — the plan
+            lacks the Newsletters feature — or `error_code: PLAN_LIMIT_EXCEEDED` — the
+            plan's newsletter cap is reached.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/FeatureGateError"
+        "409":
+          description: "`duplicate_name` — a newsletter with this name already exists (case-insensitive)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: duplicate_name
+                  message: A newsletter with this name already exists
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/newsletters/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getNewsletter
+      tags: [Newsletters]
+      summary: Get one newsletter
+      responses:
+        "200":
+          description: |
+            The full stored newsletter (enrollment policy, catch-up cadence, archive
+            settings — see the schema note) plus its computed `active_subscriber_count`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Newsletter"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`newsletter_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: newsletter_not_found
+                  message: Newsletter not found
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/newsletters/{id}/issues:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: listNewsletterIssues
+      tags: [Newsletters]
+      summary: List a newsletter's issues
+      description: |
+        Newest first. **List rows omit the content columns** (`design_json`,
+        `compiled_html`, `compiled_styles`, `plain_text`) — fetch a single issue for
+        those. An empty `status` value (`?status=`) is treated as absent; an unknown
+        value returns 400 (`"Invalid status: must be draft, scheduled or published"`).
+      parameters:
+        - name: status
+          in: query
+          description: Exact status filter. Unknown values return 400; empty is treated as absent.
+          schema:
+            type: string
+            enum: [draft, scheduled, published]
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated issue list (rows omit the content columns).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/NewsletterIssue"
+        "400":
+          description: An unknown `status`, or a malformed `limit`/`offset`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`newsletter_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertNewsletterIssue
+      tags: [Newsletters]
+      summary: Create a draft issue (idempotent upsert via `external_reference`)
+      description: |
+        Creates a **draft** issue. All fields are optional — an issue can start as an
+        empty placeholder — but publishing/scheduling later requires a subject and
+        compiled content. `content` (see the **Content input**
+        schema) maps to the issue's email
+        body and compiles immediately; the response's `compile: {ok, errors, warnings}`
+        envelope reports the result.
+
+        **Idempotency:** when `external_reference` matches an existing issue in the
+        workspace, the call **updates** that issue's content/fields instead of creating
+        a new one and answers `duplicate: true` — a replay never touches `status`,
+        `scheduled_at`, or `issue_number`, so re-running an export pipeline can refresh
+        a draft's content without re-publishing anything. One reference maps to one
+        issue per workspace; a reference that belongs to an issue of a **different**
+        newsletter answers 409 `external_reference_in_use`. The response is **201 in
+        both cases**.
+
+        Issue numbers are assigned **at publish** (`issue_number` stays `null` on
+        drafts): issue #N always means the Nth published issue.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewsletterIssueCreate"
+      responses:
+        "201":
+          description: |
+            The issue (created — `duplicate: false` — or matched by
+            `external_reference` and updated — `duplicate: true`), with the `compile`
+            envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsletterIssueWriteResult"
+        "400":
+          description: |
+            Request-shape violations (standard validation body) or a coded domain error:
+            `invalid_content` (zero or two-plus content sources, malformed
+            markdown/blocks/design_json, oversized content) or `unknown_snippet` (the
+            message lists the available snippet names).
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/DomainError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`newsletter_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: "`external_reference_in_use` — the reference already belongs to an issue of a different newsletter."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: external_reference_in_use
+                  message: external_reference already belongs to an issue of a different newsletter
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/newsletter-issues/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getNewsletterIssue
+      tags: [Newsletters]
+      summary: Get one issue
+      responses:
+        "200":
+          description: |
+            The full issue — including `design_json`, `compiled_html`,
+            `compiled_styles`, and `plain_text`. No `compile` envelope on plain reads.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsletterIssue"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`issue_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: issue_not_found
+                  message: Issue not found
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateNewsletterIssue
+      tags: [Newsletters]
+      summary: Update an issue
+      description: |
+        Only present fields are touched; `subject`/`preheader` clear on an explicit
+        `null`. A `content` change recompiles (fresh `compile` envelope). **Published
+        issues stay editable** — a typo fix recompiles for future catch-up deliveries;
+        already-delivered copies are naturally immutable. Content cannot be cleared
+        through the API (`content: null` fails validation) — replace it with new
+        content, or manage that in-app.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewsletterIssueUpdate"
+      responses:
+        "200":
+          description: "The updated issue, with the `compile` envelope (`ok: true, errors: [], warnings: []` when `content` was not part of the patch)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsletterIssueWriteResult"
+        "400":
+          description: |
+            Request-shape violations, or the coded `invalid_content` /
+            `unknown_snippet` domain errors.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/FrameworkError"
+                  - $ref: "#/components/schemas/DomainError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`issue_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    delete:
+      operationId: deleteNewsletterIssue
+      tags: [Newsletters]
+      summary: Delete a draft/scheduled issue
+      description: |
+        Published issues can never be deleted — deleting one would free its issue number
+        and corrupt subscriber catch-up cursors. Hide one from the public archive with
+        `include_in_archive: false` instead.
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+                    const: true
+        "400":
+          description: "`issue_published` — published issues cannot be deleted."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: issue_published
+                  message: Published issues cannot be deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`issue_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/newsletter-issues/{id}/publish:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: publishNewsletterIssue
+      tags: [Newsletters]
+      summary: Publish an issue now
+      description: |
+        No request body. Assigns the next `issue_number` (per-newsletter, monotonic) and
+        wakes caught-up subscribers — delivery behaves exactly like an in-app publish:
+        caught-up subscribers receive the issue on the next delivery sweep, while new or
+        behind subscribers reach it through their catch-up drip. Requires a subject and
+        compiled content (409 `issue_missing_content` otherwise). **Idempotent** — an
+        already-published issue is returned as-is with a 200.
+      responses:
+        "200":
+          description: "The published issue, with its assigned `issue_number` and `published_at`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsletterIssue"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`issue_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: "`issue_missing_content` — the issue has no subject or no compiled content."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: issue_missing_content
+                  message: An issue needs a subject and content before it can be published
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/newsletter-issues/{id}/schedule:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: scheduleNewsletterIssue
+      tags: [Newsletters]
+      summary: Schedule (or reschedule) a future publish
+      description: |
+        `scheduled_at` is an ISO 8601 UTC instant in the future; the every-minute sweep
+        publishes the issue when due (same effects as `…/publish`). Requires a subject
+        and compiled content up front, so the sweep can't hit a content check failure
+        later. Calling it again while still scheduled moves the publish time.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScheduleAtRequest"
+      responses:
+        "200":
+          description: "The scheduled issue (`status: scheduled`, `scheduled_at` set)."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsletterIssue"
+        "400":
+          description: |
+            `invalid_scheduled_at` (domain envelope) — `scheduled_at` parses but is not a
+            future instant — or a standard validation body for a value that is not ISO
+            8601 at all.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+              examples:
+                notFuture:
+                  summary: Not a future instant
+                  value:
+                    error:
+                      code: invalid_scheduled_at
+                      message: scheduled_at must be a future instant
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`issue_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: |
+            `issue_already_published` — published issues cannot be scheduled — or
+            `issue_missing_content` — the issue has no subject or no compiled content.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              examples:
+                alreadyPublished:
+                  summary: Already published
+                  value:
+                    error:
+                      code: issue_already_published
+                      message: Issue is already published — published issues cannot be scheduled
+                missingContent:
+                  summary: No subject or content
+                  value:
+                    error:
+                      code: issue_missing_content
+                      message: An issue needs a subject and content before it can be scheduled
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/newsletter-issues/{id}/unschedule:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: unscheduleNewsletterIssue
+      tags: [Newsletters]
+      summary: Cancel a scheduled publish (back to draft)
+      description: No request body. Only currently scheduled issues can be unscheduled.
+      responses:
+        "200":
+          description: "The issue, back in `draft` with `scheduled_at` cleared."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NewsletterIssue"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`issue_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: "`issue_not_scheduled` — the issue is not currently scheduled."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+              example:
+                error:
+                  code: issue_not_scheduled
+                  message: "Issue status is 'draft' — only scheduled issues can be unscheduled"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
   # ───────────────────────────── Webhook endpoints ─────────────────────────────
   /v1/webhook-endpoints:
     get:
@@ -4801,7 +5824,8 @@ components:
       description: |
         The workspace's plan lacks the feature this resource group requires — deals,
         payments (payments + contact documents), workspace_payments (payment requests),
-        orders, campaigns, or booking — and answers with the
+        orders, campaigns, email_marketing (email campaigns + suppressions),
+        newsletters, or booking — and answers with the
         `FEATURE_NOT_INCLUDED_IN_PLAN` body (note: no `statusCode` field; the message
         embeds the lowercase feature id, so key on `error_code`). A plan without API
         access at all (Growth or higher required) answers with the standard shape instead.
@@ -4910,7 +5934,8 @@ components:
         Returned with `403` when the workspace's plan lacks the feature a gated resource
         group requires (deals/pipelines → `deals`, payments and contact documents →
         `payments`, payment requests → `workspace_payments`, orders →
-        `orders`, campaigns → `campaigns`, bookings/meeting-types → `booking`). Unlike
+        `orders`, campaigns → `campaigns`, email campaigns → `email_marketing`,
+        newsletters → `newsletters`, bookings/meeting-types → `booking`). Unlike
         the standard framework
         shape there is **no `statusCode` field**. The message embeds the lowercase
         plan-feature id, not the product display name — key on `error_code`, not on the
@@ -7682,6 +8707,612 @@ components:
           type: string
           maxLength: 500
           description: Free-form note stored with the row.
+
+    # ── Email campaigns & newsletters ──
+    ContentInput:
+      type: object
+      title: Content input
+      description: |
+        The shared authoring contract for email-campaign bodies and newsletter issues: an
+        optional `direction` plus **exactly one** of `markdown`, `blocks`, or
+        `design_json` — zero or two-plus sources return 400 `invalid_content`. Whichever
+        source you send is converted to the same internal email document the in-app
+        editor produces and **compiled immediately**; the write response's `compile`
+        envelope reports errors and warnings up front, not at send time.
+
+        Total content size is capped at 512,000 characters (measured on the source and
+        again on the built document) — an oversized body returns 400 `invalid_content`.
+
+        **Variable tokens** work in all three sources: any `[[…]]` token in text becomes
+        a personalization pill resolved per recipient at send time. The token grammar is
+        `[[path]]`, `[[path : fallback]]`, or `[[path | modifier(arg) : fallback]]` —
+        `path` is a contact field (`first_name`, `email`, custom field keys, or the
+        explicit `contact.` prefix), the optional `fallback` renders when the value is
+        empty, and optional modifiers format the value (e.g. `upper`, `date`). Example:
+        `Hi [[first_name : there]]!`. Tokens also work inside the campaign `subject` and
+        `preheader`.
+
+        **Snippets** (reusable content blocks from the workspace library, managed in
+        Settings → Snippets) can be spliced in by UUID or by case-insensitive exact
+        name — via the `::snippet[…]` markdown directive or a `snippet` block. A
+        reference that matches no workspace snippet returns 400 `unknown_snippet` with
+        the available names listed in the message. The stored document keeps the
+        reference, so later snippet edits reach future sends.
+      properties:
+        direction:
+          type: string
+          enum: [ltr, rtl]
+          default: ltr
+          description: |
+            Text direction applied to the produced blocks (`rtl` for
+            right-to-left languages). Any other value returns 400 `invalid_content`.
+        markdown:
+          type: string
+          description: |
+            A CommonMark subset, converted block-by-block:
+
+            - **Headings** `#`–`###` (deeper levels clamp to level 3 with a warning).
+            - **Paragraphs** with `**bold**`, `*italic*`, `~~strikethrough~~`, `` `code` ``,
+              and `[links](https://example.com)` (link/button URLs must be absolute
+              http(s) — anything else is replaced with a safe placeholder).
+            - **Bullet and numbered lists** (nesting supported), `> blockquotes`, and
+              `---` horizontal dividers.
+            - **Images** on their own line: `![alt](https://…)` — the URL must be
+              absolute `https` (otherwise the image is dropped with a warning); an image
+              inside a paragraph degrades to its alt text with a warning.
+            - **Raw HTML is never passed through** — tags are stripped to their text
+              content with a warning. Fenced code blocks degrade to a code-styled
+              paragraph.
+
+            Two **directive lines** (each on its own line) extend the grammar:
+
+            - `::button[Label](https://url)` — a real call-to-action button block, themed
+              with the workspace's primary color. A directive without a label is dropped
+              with a warning.
+            - `::snippet[name-or-uuid]` — splices a workspace snippet (see the schema
+              description). Unknown references return 400 `unknown_snippet`.
+
+            Any other `::directive` is kept as literal paragraph text with a warning.
+          example: |
+            # Big news, [[first_name : friend]]!
+
+            We just shipped **three** features you asked for.
+
+            ::button[See what's new](https://example.com/changelog)
+
+            ::snippet[Footer]
+        blocks:
+          type: array
+          description: |
+            A typed block array for callers that prefer structure over text — each item
+            is one block (see the Content block schema). Blocks render in order.
+          items:
+            $ref: "#/components/schemas/ContentBlock"
+        design_json:
+          type: object
+          description: |
+            A raw editor document (the native design JSON the in-app email editor
+            submits), passed through as-is after a structural sanity check — it must be
+            an object with a string `type` and an array `content`. Use this to replay a
+            document exported from the app (e.g. a `GET` issue/campaign's `design_json`);
+            authoring from scratch is easier with `markdown` or `blocks`.
+      example:
+        direction: ltr
+        markdown: |
+          # Hello [[first_name : there]]!
+
+          Welcome to our July update.
+
+          ::button[Read the full story](https://example.com/blog/july)
+    ContentBlock:
+      type: object
+      title: Content block
+      description: |
+        One block of the `blocks` content source. `kind` selects the shape; the other
+        fields apply per kind. An unknown `kind` or a mistyped field returns 400
+        `invalid_content`. Text fields (`text`, `items` entries, button `label`) may
+        embed `[[…]]` variable tokens.
+
+        | kind | fields | notes |
+        |---|---|---|
+        | `heading` | `text`, `level` | `level` 1–3 (out of range clamps; omitted → 2). Empty text drops the block. |
+        | `paragraph` | `text` | Empty text drops the block. |
+        | `button` | `label`, `url` | Themed CTA button. A button without a label is dropped. Non-http(s) URLs are replaced with a safe placeholder. |
+        | `bullets` | `items` | Bullet list; empty items are skipped. |
+        | `spacer` | — | Fixed vertical spacing. |
+        | `image` | `url`, `alt` | `url` must be absolute `https` — otherwise 400 `invalid_content`. |
+        | `divider` | — | Horizontal rule. |
+        | `snippet` | `id` **or** `name` | Splices a workspace snippet (id wins when both are sent). Neither → 400 `invalid_content`; no match → 400 `unknown_snippet`. |
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [heading, paragraph, button, bullets, spacer, image, divider, snippet]
+        text:
+          type: string
+          description: "`heading` / `paragraph` text."
+        level:
+          type: integer
+          minimum: 1
+          maximum: 3
+          description: "`heading` only."
+        label:
+          type: string
+          description: "`button` only — the button text."
+        url:
+          type: string
+          description: "`button` link / `image` source."
+        items:
+          type: array
+          items:
+            type: string
+          description: "`bullets` only."
+        alt:
+          type: string
+          description: "`image` only — alt text."
+        id:
+          type: string
+          format: uuid
+          description: "`snippet` only — resolve by snippet UUID."
+        name:
+          type: string
+          description: "`snippet` only — resolve by case-insensitive exact name."
+      example:
+        kind: button
+        label: Book a demo
+        url: https://example.com/demo
+    CompileResult:
+      type: object
+      title: Compile result
+      description: |
+        Present on every campaign/issue **write** response (create, PATCH, and
+        idempotent replays that updated the record — never on plain GETs). The content
+        compiles at write time through the same pipeline the send path uses, so problems
+        surface here instead of at launch/publish. `errors` are render problems you
+        should fix before sending; `warnings` are lossy-but-accepted conversions
+        (stripped raw HTML, a dropped non-https image, clamped heading levels, an
+        unknown `::directive` kept as text). `ok` is `true` when `errors` is empty. A
+        write with no `content` in the payload reports `ok: true` with empty arrays.
+      required: [ok, errors, warnings]
+      properties:
+        ok:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          items:
+            type: string
+      example:
+        ok: true
+        errors: []
+        warnings: ["Headings deeper than level 3 were clamped to level 3"]
+    ScheduleAtRequest:
+      type: object
+      title: Schedule request
+      required: [scheduled_at]
+      properties:
+        scheduled_at:
+          type: string
+          format: date-time
+          description: |
+            ISO 8601 UTC instant; must be in the future (otherwise 400
+            `invalid_scheduled_at`). A non-ISO-8601 value fails request validation with
+            the standard body.
+          example: "2026-08-01T09:00:00Z"
+    AudienceEstimate:
+      type: object
+      title: Audience estimate
+      required: [estimated_recipients]
+      properties:
+        estimated_recipients:
+          type: integer
+          description: Recipients the stored targeting resolves to right now.
+    EmailCampaign:
+      type: object
+      title: Email campaign
+      description: |
+        A broadcast email campaign. The stored subject/preheader override columns are
+        read and written under the names `subject`/`preheader` — a GET → tweak → PATCH
+        round-trip echoes cleanly. **List rows omit** `template_id`, `design_json`,
+        `compiled_html`, `compiled_styles`, and `plain_text`; single reads include them.
+        In-app-only fields (A/B configuration and results, warming state) are not
+        documented here but may appear on single reads.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        status:
+          type: string
+          enum: [draft, scheduled, sending, paused, sent, failed, cancelled]
+          description: |
+            The API mutates only `draft`/`scheduled` campaigns; everything from the
+            launch claim onward (`sending`, `paused`, `sent`, `failed`, `cancelled`) is
+            system-managed.
+        sender_profile_id:
+          type: string
+          format: uuid
+        subject:
+          type: [string, "null"]
+          description: May embed `[[…]]` variable tokens, resolved per recipient.
+        preheader:
+          type: [string, "null"]
+        direction:
+          type: [string, "null"]
+          enum: [rtl, ltr, null]
+        topic_key:
+          type: [string, "null"]
+          description: Preference-center topic — opted-out contacts are excluded at send.
+        contact_group_ids:
+          type: [array, "null"]
+          items:
+            type: string
+            format: uuid
+        audience_id:
+          type: [string, "null"]
+          format: uuid
+        audience_filters:
+          type: [object, "null"]
+          description: A `$where` condition tree (same grammar as the contacts filter `$where`).
+        template_id:
+          type: [string, "null"]
+          format: uuid
+          description: |
+            In-app template reference. Always `null` for API-authored content; a PATCH
+            with `content` clears it (the patched content is what sends). Omitted on
+            list rows.
+        design_json:
+          type: [object, "null"]
+          description: The stored editor document. Omitted on list rows.
+        compiled_html:
+          type: [string, "null"]
+          description: Compiled body fragment. Omitted on list rows.
+        compiled_styles:
+          type: [string, "null"]
+          description: Compiled head styles. Omitted on list rows.
+        plain_text:
+          type: [string, "null"]
+          description: Compiled plain-text part. Omitted on list rows.
+        scheduled_at:
+          type: [string, "null"]
+          format: date-time
+        timezone:
+          type: [string, "null"]
+        started_at:
+          type: [string, "null"]
+          format: date-time
+        completed_at:
+          type: [string, "null"]
+          format: date-time
+        total_recipients:
+          type: [integer, "null"]
+        sent_count:
+          type: [integer, "null"]
+        delivered_count:
+          type: [integer, "null"]
+        open_count:
+          type: [integer, "null"]
+        click_count:
+          type: [integer, "null"]
+        bounce_count:
+          type: [integer, "null"]
+        complaint_count:
+          type: [integer, "null"]
+        unsubscribe_count:
+          type: [integer, "null"]
+        failed_count:
+          type: [integer, "null"]
+        skipped_count:
+          type: [integer, "null"]
+          description: Terminal-but-not-failed recipients (suppression/eligibility skips).
+        pending_retry_count:
+          type: [integer, "null"]
+        external_reference:
+          type: [string, "null"]
+          description: Your idempotency reference (unique per workspace).
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+      additionalProperties: true
+    EmailCampaignCreate:
+      type: object
+      title: Email campaign create payload
+      description: Unknown properties are rejected with 400.
+      additionalProperties: false
+      required: [name, subject, sender_profile_id, content]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        subject:
+          type: string
+          minLength: 1
+          maxLength: 400
+          description: May embed `[[…]]` variable tokens.
+          example: "Big news, [[first_name : there]]!"
+        preheader:
+          type: string
+          maxLength: 400
+          description: The inbox preview line rendered after the subject.
+        sender_profile_id:
+          type: string
+          format: uuid
+          description: |
+            A sender profile in this workspace (unknown → 400
+            `sender_profile_not_found`). Send-readiness — verified domain + legal footer
+            fields — is asserted at launch, not here.
+        external_reference:
+          type: string
+          maxLength: 255
+          description: |
+            Idempotency key: a repeat POST with the same value updates the matched
+            campaign (while draft/scheduled) instead of creating a duplicate, and the
+            response carries `duplicate: true`.
+        content:
+          $ref: "#/components/schemas/ContentInput"
+        audience_id:
+          type: string
+          format: uuid
+          description: A saved audience; wins over `audience_filters`. Must belong to your workspace (404 otherwise).
+        audience_filters:
+          type: object
+          description: |
+            An ad-hoc `$where` condition tree; validated structurally and test-compiled
+            at write time (failures return 400 with an `errors` array). Ignored when
+            `audience_id` is set.
+        contact_group_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Additional contact-group targeting (OR semantics), narrowing the audience.
+        topic_key:
+          type: string
+          maxLength: 200
+          description: Preference-center topic key — contacts who opted out of it are excluded.
+    EmailCampaignUpdate:
+      type: object
+      title: Email campaign update payload
+      description: |
+        Same field set as create minus `external_reference`, all optional — only present
+        fields are touched. Nullable fields (`subject`, `preheader`, `audience_id`,
+        `audience_filters`, `contact_group_ids`, `topic_key`) clear on an explicit
+        `null`; `name`, `sender_profile_id`, and `content` do not accept `null`.
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        subject:
+          type: [string, "null"]
+          minLength: 1
+          maxLength: 400
+          description: "`null` clears it; an empty string is rejected."
+        preheader:
+          type: [string, "null"]
+          maxLength: 400
+        sender_profile_id:
+          type: string
+          format: uuid
+        content:
+          $ref: "#/components/schemas/ContentInput"
+        audience_id:
+          type: [string, "null"]
+          format: uuid
+        audience_filters:
+          type: [object, "null"]
+        contact_group_ids:
+          type: [array, "null"]
+          items:
+            type: string
+            format: uuid
+        topic_key:
+          type: [string, "null"]
+          maxLength: 200
+    EmailCampaignWriteResult:
+      title: Email campaign write result
+      description: |
+        A campaign write response: the campaign plus the `compile` envelope. `duplicate`
+        appears only on `POST /v1/email-campaigns` (`false` on a fresh create, `true`
+        when `external_reference` matched); on a **post-launch** verbatim replay the
+        `compile` envelope is omitted (nothing was recompiled).
+      allOf:
+        - $ref: "#/components/schemas/EmailCampaign"
+        - type: object
+          properties:
+            duplicate:
+              type: boolean
+              description: Present on POST only.
+            compile:
+              $ref: "#/components/schemas/CompileResult"
+    Newsletter:
+      type: object
+      title: Newsletter
+      description: |
+        A smart newsletter (a sequence of issues with per-subscriber catch-up). List
+        rows carry the summary fields documented here; `GET /v1/newsletters/{id}`
+        additionally returns the full stored configuration — enrollment policy
+        (`start_policy`, `start_issue_number`, `first_send_mode`,
+        `remember_window_days`), catch-up cadence (`catchup_interval_days`,
+        `catchup_send_time`), tag auto-subscribe, header/footer snippet assignments, and
+        public-archive settings (`archive_enabled`, `slug`, `archive_mode`) — which are
+        managed in-app and not exhaustively documented here.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [active, paused, archived]
+        sender_profile_id:
+          type: [string, "null"]
+          format: uuid
+          description: "`null` = the workspace default profile is used at send time."
+        active_subscriber_count:
+          type: integer
+          description: Computed — subscriptions currently in `active` status.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    NewsletterCreate:
+      type: object
+      title: Newsletter create payload
+      description: |
+        A `name` alone suffices — everything else takes its in-app default. Unknown
+        properties are rejected with 400.
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+          description: Unique per workspace, case-insensitive (409 `duplicate_name`).
+        description:
+          type: string
+          maxLength: 2000
+        sender_profile_id:
+          type: string
+          format: uuid
+          description: |
+            Omit to fall back to the workspace default profile at send time. Unknown →
+            400 `sender_profile_not_found`.
+    NewsletterIssue:
+      type: object
+      title: Newsletter issue
+      description: |
+        One issue in a newsletter's sequence. `issue_number` is assigned **at publish**
+        (`null` on drafts/scheduled issues) — issue #N always means the Nth published
+        issue. **List rows omit** `design_json`, `compiled_html`, `compiled_styles`, and
+        `plain_text`; single reads include them.
+      properties:
+        id:
+          type: string
+          format: uuid
+        newsletter_id:
+          type: string
+          format: uuid
+        issue_number:
+          type: [integer, "null"]
+          description: Assigned at publish; `null` until then.
+        subject:
+          type: [string, "null"]
+          description: May embed `[[…]]` variable tokens, resolved per recipient.
+        preheader:
+          type: [string, "null"]
+        status:
+          type: string
+          enum: [draft, scheduled, published]
+        design_json:
+          type: [object, "null"]
+          description: The stored editor document. Omitted on list rows.
+        compiled_html:
+          type: [string, "null"]
+          description: Compiled body fragment. Omitted on list rows.
+        compiled_styles:
+          type: [string, "null"]
+          description: Compiled head styles. Omitted on list rows.
+        plain_text:
+          type: [string, "null"]
+          description: Compiled plain-text part. Omitted on list rows.
+        scheduled_at:
+          type: [string, "null"]
+          format: date-time
+        published_at:
+          type: [string, "null"]
+          format: date-time
+        include_in_archive:
+          type: boolean
+          description: Whether the issue appears in the newsletter's public archive (when enabled).
+        external_reference:
+          type: [string, "null"]
+          description: Your idempotency reference (unique per workspace).
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    NewsletterIssueCreate:
+      type: object
+      title: Newsletter issue create payload
+      description: |
+        All fields optional — an issue can start as an empty placeholder, but publishing
+        or scheduling requires a subject and compiled content. Unknown properties are
+        rejected with 400.
+      additionalProperties: false
+      properties:
+        subject:
+          type: string
+          maxLength: 400
+          description: May embed `[[…]]` variable tokens.
+        preheader:
+          type: string
+          maxLength: 400
+        include_in_archive:
+          type: boolean
+          default: true
+        external_reference:
+          type: string
+          maxLength: 255
+          description: |
+            Idempotency key: a repeat POST with the same value updates the matched
+            issue's content/fields instead of creating a duplicate (`duplicate: true` in
+            the response) — never its `status`, `scheduled_at`, or `issue_number`.
+        content:
+          $ref: "#/components/schemas/ContentInput"
+    NewsletterIssueUpdate:
+      type: object
+      title: Newsletter issue update payload
+      description: |
+        Only present fields are touched. `subject`/`preheader` clear on an explicit
+        `null`; `include_in_archive` and `content` do not accept `null`.
+      additionalProperties: false
+      properties:
+        subject:
+          type: [string, "null"]
+          maxLength: 400
+        preheader:
+          type: [string, "null"]
+          maxLength: 400
+        include_in_archive:
+          type: boolean
+        content:
+          $ref: "#/components/schemas/ContentInput"
+    NewsletterIssueWriteResult:
+      title: Newsletter issue write result
+      description: |
+        An issue write response: the full issue (content columns included) plus the
+        `compile` envelope. `duplicate` appears only on
+        `POST /v1/newsletters/{id}/issues` (`false` on a fresh create, `true` when
+        `external_reference` matched an existing issue).
+      allOf:
+        - $ref: "#/components/schemas/NewsletterIssue"
+        - type: object
+          properties:
+            duplicate:
+              type: boolean
+              description: Present on POST only.
+            compile:
+              $ref: "#/components/schemas/CompileResult"
 
     # ── Webhook endpoints ──
     WebhookEventType:
