@@ -8,7 +8,7 @@ info:
     per-channel marketing consent), tags and groups, WhatsApp campaigns and templates, deals
     and pipelines, the product catalog, payments, payment requests (pay-links), orders,
     transactional email, broadcast email campaigns, newsletters, email suppressions,
-    outbound webhooks, and bookings.
+    read-only audience and sender-profile discovery, outbound webhooks, and bookings.
 
     ## Authentication
 
@@ -33,9 +33,10 @@ info:
     (the payments ledger), while `/v1/payment-requests*` requires **`workspace_payments`**
     (collecting money through the workspace's own connected payment provider) — a workspace
     can hold either feature without the other, and the 403 message embeds whichever feature
-    id is missing. The suppression list (`/v1/suppressions*`) requires the
-    **`email_marketing`** feature. Contacts (including consent), notes, tags, contact groups,
-    templates, products, emails, and webhook endpoints require only plan-wide API access.
+    id is missing. The suppression list (`/v1/suppressions*`) and the sender-profile
+    listing (`GET /v1/sender-profiles`) require the **`email_marketing`** feature.
+    Contacts (including consent), notes, tags, contact groups, templates, products,
+    audiences, emails, and webhook endpoints require only plan-wide API access.
 
     ## Error shapes
 
@@ -78,15 +79,18 @@ info:
 
     Most list endpoints return `{ "data", "total", "limit", "offset" }` with `limit`
     default 50 (hard cap 500). `GET /v1/deals`, `GET /v1/payments`,
-    `GET /v1/payment-requests`, `GET /v1/orders`, and the email-campaign/newsletter
-    lists use dedicated query parameters with `limit` default 25 (cap 100); absent or
+    `GET /v1/payment-requests`, `GET /v1/orders`, and the
+    email-campaign/newsletter/audience/sender-profile lists use dedicated query
+    parameters with `limit` default 25 (cap 100); absent or
     empty `limit`/`offset` values default. On deals, payments, payment requests, and
-    the email-campaign/newsletter lists, malformed values return `400`
+    the email-campaign/newsletter/audience/sender-profile lists, malformed values
+    return `400`
     (`"Invalid limit: must be a non-negative integer"`); on orders, paging **never**
     returns 400 — malformed or zero values silently default and out-of-range values are
     clamped. Unrecognized enum filter values on deals/payments/orders are silently
     ignored; `GET /v1/payment-requests`, `GET /v1/email-campaigns`, and
-    `GET /v1/newsletters/{id}/issues` instead reject an unknown `status` with 400.
+    `GET /v1/newsletters/{id}/issues` instead reject an unknown `status` with 400
+    (as does `GET /v1/audiences` for an unknown `kind`).
 
     ## Idempotency
 
@@ -130,6 +134,13 @@ info:
       `::snippet[name-or-uuid]` directives + `[[…]]` personalization tokens), typed
       `blocks`, or a raw `design_json` document — compiled at write time, with the
       result reported in the response's `compile: {ok, errors, warnings}` envelope.
+    - Two new read-only **targeting-selector discovery** endpoints: `GET /v1/audiences`
+      lists the saved audiences campaigns accept as `audience_id` (rows carry the
+      summary columns and advisory size cache — never the stored `definition`), and
+      `GET /v1/sender-profiles` lists the email from-identities email campaigns accept
+      as `sender_profile_id`, each with a `verified` send-readiness signal (requires
+      the `email_marketing` plan feature; audiences need only plan-wide API access).
+      Neither resource is writable through the public API.
 
     ## Changes in 1.5.0
 
@@ -235,6 +246,10 @@ tags:
     description: "`POST /v1/emails` — idempotent raw transactional sends with opt-in tracking."
   - name: Suppressions
     description: The workspace's email suppression list — a send-time overlay deliberately separate from consent. List, idempotent add, remove. Requires the `email_marketing` feature.
+  - name: Audiences
+    description: Read-only discovery of the workspace's saved audiences — the reusable targeting selectors campaigns and email campaigns accept as `audience_id`. Rows never include the stored definition; audiences are managed in-app and are not writable through the API.
+  - name: Sender profiles
+    description: Read-only discovery of the workspace's email from-identities — the selectors email campaigns accept as `sender_profile_id`, each with its sending domain's verification status. Managed in-app; requires the `email_marketing` feature.
   - name: Email campaigns
     description: Broadcast email campaigns — author (`markdown` / `blocks` / `design_json`), estimate, launch, schedule. Idempotent create via `external_reference`. Requires the `email_marketing` feature.
   - name: Newsletters
@@ -3254,6 +3269,106 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  # ───────────────────────────── Audiences ─────────────────────────────
+  /v1/audiences:
+    get:
+      operationId: listAudiences
+      tags: [Audiences]
+      summary: List audiences
+      description: |
+        Read-only discovery of the workspace's saved audiences — the reusable targeting
+        selectors `POST /v1/campaigns` and `POST /v1/email-campaigns` accept as
+        `audience_id`. Newest first. Rows carry the summary columns plus the advisory
+        `last_count`/`last_counted_at` size cache — **never the stored `definition`**
+        (see the schema). Audiences are managed in-app and are not writable through the
+        public API. An empty `kind` value (`?kind=`) is treated as absent; an unknown
+        value returns 400.
+      parameters:
+        - name: kind
+          in: query
+          description: |
+            Exact kind filter. Unknown values return 400 (`"Invalid kind: must be one
+            of dynamic, static"`); empty is treated as absent.
+          schema:
+            type: string
+            enum: [dynamic, static]
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated audience list (rows never include the definition).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/AudienceSummary"
+        "400":
+          description: |
+            An unknown `kind`, or a malformed `limit`/`offset`
+            (`"Invalid limit: must be a non-negative integer"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  # ─────────────────────────── Sender profiles ───────────────────────────
+  /v1/sender-profiles:
+    get:
+      operationId: listSenderProfiles
+      tags: [Sender profiles]
+      summary: List email sender profiles
+      description: |
+        Read-only discovery of the workspace's email from-identities — the selectors
+        `POST /v1/email-campaigns` accepts as `sender_profile_id`. Newest first. Each
+        row carries the from identity (`from_name`, the composed `from_email`,
+        `reply_to`), the delivery provider, the default flag, and the sending-domain
+        linkage with its verification status — prefer profiles with `verified: true`
+        when creating campaigns (see the schema). DKIM/DNS material is never returned.
+        Profiles are managed in-app and are not writable through the public API.
+      parameters:
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated sender-profile list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/SenderProfile"
+        "400":
+          description: |
+            A malformed `limit`/`offset`
+            (`"Invalid limit: must be a non-negative integer"`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
   # ───────────────────────────── Email campaigns ─────────────────────────────
   /v1/email-campaigns:
     get:
@@ -5831,8 +5946,8 @@ components:
       description: |
         The workspace's plan lacks the feature this resource group requires — deals,
         payments (payments + contact documents), workspace_payments (payment requests),
-        orders, campaigns, email_marketing (email campaigns + suppressions),
-        newsletters, or booking — and answers with the
+        orders, campaigns, email_marketing (email campaigns + suppressions + sender
+        profiles), newsletters, or booking — and answers with the
         `FEATURE_NOT_INCLUDED_IN_PLAN` body (note: no `statusCode` field; the message
         embeds the lowercase feature id, so key on `error_code`). A plan without API
         access at all (Growth or higher required) answers with the standard shape instead.
@@ -8714,6 +8829,95 @@ components:
           type: string
           maxLength: 500
           description: Free-form note stored with the row.
+
+    # ── Audiences & sender profiles ──
+    AudienceSummary:
+      type: object
+      title: Audience (summary)
+      description: |
+        A saved workspace audience, as returned by `GET /v1/audiences`. The stored
+        `definition` (the `$where` condition tree behind a dynamic audience) is
+        **deliberately never exposed** through the public API — rows carry these
+        summary columns only. `last_count` is an advisory size cache stamped when the
+        audience was last counted or snapshotted in-app, never a live resolution —
+        estimate a campaign's real reach with `GET /v1/email-campaigns/{id}/estimate`.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [dynamic, static]
+          description: |
+            `dynamic` — a stored condition tree re-evaluated live at every use;
+            `static` — a frozen membership list.
+        last_count:
+          type: [integer, "null"]
+          description: Advisory size cache — may be stale or `null` (never counted).
+        last_counted_at:
+          type: [string, "null"]
+          format: date-time
+          description: When `last_count` was stamped.
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+      additionalProperties: true
+    SenderProfile:
+      type: object
+      title: Sender profile
+      description: |
+        An email from-identity, as returned by `GET /v1/sender-profiles`. `from_email`
+        is the composed sending address (the profile's local part @ its sending
+        domain). `verified` is the send-readiness signal — `true` exactly when the
+        linked sending domain's status is `verified`, the same gate in-app sends
+        assert. DKIM/DNS verification material is never returned. Profiles are
+        managed in-app (Settings → Email).
+      properties:
+        id:
+          type: string
+          format: uuid
+        from_name:
+          type: string
+          description: Display name recipients see.
+        from_email:
+          type: string
+          format: email
+          description: The composed sending address (`local-part@domain`).
+        reply_to:
+          type: [string, "null"]
+          description: Reply-to address, when it differs from `from_email`.
+        provider:
+          type: string
+          enum: [smtp, ses]
+          description: Email delivery backend behind this profile.
+        is_default:
+          type: boolean
+          description: Whether this is the workspace's default sender profile.
+        sending_domain_id:
+          type: string
+          format: uuid
+        domain:
+          type: string
+          description: The sending domain (the part after `@` in `from_email`).
+        domain_status:
+          type: string
+          enum: [pending, verifying, verified, failed, disabled]
+          description: The sending domain's verification state.
+        verified:
+          type: boolean
+          description: "`true` exactly when `domain_status` is `verified` — sends from this profile can pass the launch gate."
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        updated_at:
+          type: [string, "null"]
+          format: date-time
+      additionalProperties: true
 
     # ── Email campaigns & newsletters ──
     ContentInput:
