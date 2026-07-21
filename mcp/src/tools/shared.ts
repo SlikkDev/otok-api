@@ -2,6 +2,8 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { OtokApiError } from "@otok/node";
 import type {
   AudienceEstimate,
+  AudienceListParams,
+  AudienceSummary,
   ContentInput,
   EmailCampaign,
   EmailCampaignCreateParams,
@@ -19,6 +21,8 @@ import type {
   NewsletterIssueUpdateResult,
   NewsletterListParams,
   Paginated,
+  SenderProfile,
+  SenderProfileListParams,
 } from "@otok/node";
 import { z } from "zod";
 
@@ -28,6 +32,12 @@ import { z } from "zod";
  * private `http` field, which nominal typing would force onto mocks).
  */
 export interface ToolClient {
+  audiences: {
+    list(params?: AudienceListParams): Promise<Paginated<AudienceSummary>>;
+  };
+  senderProfiles: {
+    list(params?: SenderProfileListParams): Promise<Paginated<SenderProfile>>;
+  };
   emailCampaigns: {
     list(params?: EmailCampaignListParams): Promise<Paginated<EmailCampaign>>;
     get(id: string): Promise<EmailCampaign>;

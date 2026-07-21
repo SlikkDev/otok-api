@@ -15,6 +15,8 @@ import {
 } from "./shared";
 
 export const EMAIL_CAMPAIGN_TOOL_NAMES = [
+  "list_audiences",
+  "list_sender_profiles",
   "list_email_campaigns",
   "get_email_campaign",
   "create_email_campaign",
@@ -29,12 +31,47 @@ const campaignId = z
   .uuid()
   .describe("The email campaign's id (from list_email_campaigns or a create result).");
 
-const TARGETING_GUIDE = `TARGETING: "audience_id" references a saved workspace audience (wins over audience_filters); "audience_filters" is an ad-hoc $where condition tree (the contacts list filter grammar); "contact_group_ids" adds contact-group targeting. Whatever you target, the send pipeline always applies the email consent + suppression baseline — an audience can only narrow it. "topic_key" scopes the send to a preference-center topic (opted-out contacts are excluded).`;
+const TARGETING_GUIDE = `TARGETING: "audience_id" references a saved workspace audience (discover ids with list_audiences; wins over audience_filters); "audience_filters" is an ad-hoc $where condition tree (the contacts list filter grammar); "contact_group_ids" adds contact-group targeting. Whatever you target, the send pipeline always applies the email consent + suppression baseline — an audience can only narrow it. "topic_key" scopes the send to a preference-center topic (opted-out contacts are excluded).`;
 
 export function registerEmailCampaignTools(
   server: McpServer,
   { client }: ToolContext,
 ): void {
+  server.registerTool(
+    "list_audiences",
+    {
+      title: "List audiences",
+      description:
+        "List the workspace's saved audiences — the reusable targeting selectors campaigns accept as audience_id. Use this BEFORE create_email_campaign to discover the audience the user means by name and pass its id. READ-ONLY: rows carry id, name, kind (dynamic = live condition tree, static = frozen membership) and an advisory last_count size cache — never the audience's stored definition, and audiences cannot be created or edited here (they are managed in oToK). last_count may be stale; the send_email_campaign dry run shows the live recipient estimate. Pages with limit (default 25, max 100) + offset; optionally filter by kind.",
+      inputSchema: {
+        kind: z
+          .enum(["dynamic", "static"])
+          .optional()
+          .describe("Only audiences of this kind."),
+        limit: z.number().int().min(1).max(100).optional().describe("Page size (default 25, max 100)."),
+        offset: z.number().int().min(0).optional().describe("Rows to skip (for paging)."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (args) => runTool(async () => jsonResult(await client.audiences.list(args))),
+  );
+
+  server.registerTool(
+    "list_sender_profiles",
+    {
+      title: "List email sender profiles",
+      description:
+        'List the workspace\'s email sender profiles (from-identities) — the selectors campaigns accept as sender_profile_id. Use this BEFORE create_email_campaign to pick the sender: prefer a profile with verified: true (its sending domain passed verification, so the launch gate will accept it); when the user does not name one, the is_default: true profile is the natural choice. READ-ONLY: rows carry from_name, the composed from_email, reply_to, provider, is_default, and the sending domain\'s verification status — profiles are managed in oToK (Settings → Email) and cannot be created or edited here. Pages with limit (default 25, max 100) + offset.',
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).optional().describe("Page size (default 25, max 100)."),
+        offset: z.number().int().min(0).optional().describe("Rows to skip (for paging)."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async (args) =>
+      runTool(async () => jsonResult(await client.senderProfiles.list(args))),
+  );
+
   server.registerTool(
     "list_email_campaigns",
     {
@@ -76,6 +113,7 @@ export function registerEmailCampaignTools(
     {
       title: "Create an email campaign",
       description: `Create a DRAFT broadcast email campaign — nothing is sent until send_email_campaign or schedule_email_campaign. The response carries compile: {ok, errors, warnings}; fix compile errors before launching.
+DISCOVERY FIRST: call list_sender_profiles to pick the sender_profile_id (prefer verified: true) and list_audiences to resolve a saved audience the user names into its audience_id — do not guess ids.
 IDEMPOTENCY: pass "external_reference" (your own stable key) to make the create replay-safe — a repeat call with the same reference updates that campaign's fields while it is still draft/scheduled (response has duplicate: true); once launched, replays return the campaign verbatim.
 ${TARGETING_GUIDE}
 ${CONTENT_GUIDE}`,
@@ -93,11 +131,11 @@ ${CONTENT_GUIDE}`,
         sender_profile_id: z
           .string()
           .uuid()
-          .describe("A verified sender profile id belonging to the workspace (400 sender_profile_not_found otherwise)."),
+          .describe("A verified sender profile id belonging to the workspace (400 sender_profile_not_found otherwise) — discover ids with list_sender_profiles."),
         content: contentInputSchema.describe(
           "The campaign body — see the content contract in this tool's description.",
         ),
-        audience_id: z.string().uuid().optional().describe("Saved audience id; wins over audience_filters."),
+        audience_id: z.string().uuid().optional().describe("Saved audience id (from list_audiences); wins over audience_filters."),
         audience_filters: z
           .record(z.unknown())
           .optional()
@@ -172,7 +210,7 @@ ${CONTENT_GUIDE}`,
     {
       title: "Send an email campaign",
       description:
-        "Launch a draft/scheduled campaign NOW — this emails real recipients and cannot be recalled. SAFETY: without confirm: true this tool performs NO action; it returns a dry-run summary (live audience estimate, subject, sender, status, content preview) to show the user. Only after the user explicitly approves, call again with confirm: true. A failed launch gate answers 422 launch_failed with the campaign's final status in the error details.",
+        "Launch a draft/scheduled campaign NOW — this emails real recipients and cannot be recalled. SAFETY: without confirm: true this tool performs NO action; it returns a dry-run summary (live audience estimate, subject, sender, status, content preview) to show the user. Only after the user explicitly approves, call again with confirm: true. A failed launch gate answers 422 launch_failed with the campaign's final status in the error details — an unverified sender is a common cause: check the campaign's sender against list_sender_profiles (verified: true) and fix targeting via list_audiences + update_email_campaign before retrying.",
       inputSchema: { campaign_id: campaignId, confirm: confirmSchema },
       annotations: { destructiveHint: true },
     },

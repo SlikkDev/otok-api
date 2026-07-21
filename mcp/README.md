@@ -89,6 +89,8 @@ npx -y @otok/mcp --http --port 3001
 
 | Tool | What it does |
 |---|---|
+| `list_audiences` | Read-only targeting discovery — saved audiences (`audience_id` selectors); never returns the stored definition |
+| `list_sender_profiles` | Read-only sender discovery — from-identities with the `verified` send-readiness signal |
 | `list_email_campaigns` | List campaigns (status filter, paging, delivery counters) |
 | `get_email_campaign` | One campaign, with a `plain_text` rendering of its content |
 | `create_email_campaign` | Create a draft campaign (idempotent via `external_reference`) |

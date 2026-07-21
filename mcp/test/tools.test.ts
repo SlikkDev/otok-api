@@ -19,6 +19,12 @@ const SENDER_ID = "5f9f1b9b-0000-4000-8000-000000000004";
 
 function makeMockClient() {
   return {
+    audiences: {
+      list: vi.fn(),
+    },
+    senderProfiles: {
+      list: vi.fn(),
+    },
     emailCampaigns: {
       list: vi.fn(),
       get: vi.fn(),
@@ -89,7 +95,7 @@ describe("tool registry", () => {
     const { tools } = await client.listTools();
     const registered = tools.map((t) => t.name).sort();
     expect(registered).toEqual([...ALL_TOOL_NAMES].sort());
-    expect(ALL_TOOL_NAMES).toHaveLength(18);
+    expect(ALL_TOOL_NAMES).toHaveLength(20);
     expect(new Set(ALL_TOOL_NAMES).size).toBe(ALL_TOOL_NAMES.length);
     expect(TOOL_DOMAINS.map((d) => d.domain)).toEqual([
       "email-campaigns",
@@ -121,6 +127,22 @@ describe("tool registry", () => {
     expect(properties).not.toHaveProperty("confirm");
     expect(tool.description).toMatch(/NEVER-PUBLISHED/);
     expect(tool.description).toMatch(/issue_published/);
+  });
+
+  it("discovery tools are read-only-annotated and wire into the authoring flow", async () => {
+    const client = await connect(makeMockClient());
+    const { tools } = await client.listTools();
+    for (const name of ["list_audiences", "list_sender_profiles"]) {
+      const tool = tools.find((t) => t.name === name)!;
+      expect(tool.annotations?.readOnlyHint, name).toBe(true);
+      expect(tool.description, name).toContain("create_email_campaign");
+    }
+    // The authoring/launch tools point back at the discovery tools.
+    const create = tools.find((t) => t.name === "create_email_campaign")!;
+    expect(create.description).toContain("list_sender_profiles");
+    expect(create.description).toContain("list_audiences");
+    const send = tools.find((t) => t.name === "send_email_campaign")!;
+    expect(send.description).toContain("list_sender_profiles");
   });
 
   it("content-authoring tools teach the directives and variable tokens", async () => {
@@ -186,6 +208,60 @@ describe("input validation", () => {
 });
 
 describe("reads and writes", () => {
+  it("list_audiences forwards the kind filter, returns the page, and performs zero writes", async () => {
+    const mock = makeMockClient();
+    mock.audiences.list.mockResolvedValue({
+      data: [
+        {
+          id: "5f9f1b9b-0000-4000-8000-00000000000a",
+          name: "Active leads",
+          kind: "dynamic",
+          last_count: 812,
+          last_counted_at: "2026-07-01T09:00:00Z",
+        },
+      ],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    });
+    const client = await connect(mock);
+    const result = await call(client, "list_audiences", { kind: "dynamic" });
+    expect(mock.audiences.list).toHaveBeenCalledWith({ kind: "dynamic" });
+    for (const fn of allWriteFns(mock)) expect(fn).not.toHaveBeenCalled();
+    expect(result.isError).toBeFalsy();
+    expect(result.text).toContain("Active leads");
+    expect(result.text).toContain("812");
+  });
+
+  it("list_sender_profiles surfaces the verified signal and performs zero writes", async () => {
+    const mock = makeMockClient();
+    mock.senderProfiles.list.mockResolvedValue({
+      data: [
+        {
+          id: SENDER_ID,
+          from_name: "Acme",
+          from_email: "news@mail.example.com",
+          reply_to: null,
+          provider: "ses",
+          is_default: true,
+          domain: "mail.example.com",
+          domain_status: "verified",
+          verified: true,
+        },
+      ],
+      total: 1,
+      limit: 25,
+      offset: 0,
+    });
+    const client = await connect(mock);
+    const result = await call(client, "list_sender_profiles", {});
+    expect(mock.senderProfiles.list).toHaveBeenCalledWith({});
+    for (const fn of allWriteFns(mock)) expect(fn).not.toHaveBeenCalled();
+    expect(result.isError).toBeFalsy();
+    expect(result.text).toContain("news@mail.example.com");
+    expect(result.text).toContain('"verified": true');
+  });
+
   it("list_email_campaigns forwards filters and returns the page", async () => {
     const mock = makeMockClient();
     mock.emailCampaigns.list.mockResolvedValue({
