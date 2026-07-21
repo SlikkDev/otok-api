@@ -1923,3 +1923,26 @@ SlotsParams = TypedDict(
         "to": str,
     },
 )
+
+
+class MeetingTypeEmbed(TypedDict):
+    """Response of ``GET /v1/meeting-types/:id/embed`` — everything needed
+    to put the booking calendar on your own website.
+
+    ``embed_key`` is the workspace's **publishable** embed key (``bk_…``) —
+    safe to ship in page HTML by design, and NOT the secret API key.
+    Rotation, the origin allowlist, and the embed on/off switch live in the
+    oToK app under Settings → Booking. Bookings made through the embed
+    carry ``source: "embed"``.
+    """
+
+    #: The workspace's public ref used in hosted booking URLs.
+    workspace_ref: str
+    #: The meeting type's slug.
+    slug: str
+    #: Publishable workspace embed key (``bk_…``) — NOT the secret API key.
+    embed_key: str
+    #: The hosted booking page URL for this meeting type.
+    page_url: str
+    #: Ready-to-paste two-line HTML embed snippet.
+    snippet_html: str
