@@ -32,6 +32,7 @@ import type {
   EmailSendResult,
   ListParams,
   MeetingType,
+  MeetingTypeEmbed,
   MessageTemplate,
   Note,
   NoteUpdateParams,
@@ -941,6 +942,18 @@ export class MeetingTypesApi {
     return this.http.request("GET", `/v1/meeting-types/${id}/slots`, {
       query: { from: params.from, to: params.to },
     });
+  }
+
+  /**
+   * Website-embed material for the meeting type: the hosted booking
+   * `page_url`, the publishable `embed_key` (`bk_…` — NOT the secret API
+   * key; rotation, the origin allowlist, and the embed on/off switch live
+   * in the app under Settings → Booking), and a ready-to-paste
+   * `snippet_html`. Bookings made through the embed carry
+   * `source: "embed"`.
+   */
+  embed(id: string): Promise<MeetingTypeEmbed> {
+    return this.http.request("GET", `/v1/meeting-types/${id}/embed`);
   }
 }
 
