@@ -50,9 +50,9 @@ claude mcp add otok -e OTOK_API_KEY=otok_live_… -- npx -y @otok/mcp
 
 ### claude.ai (remote connector)
 
-Host this package yourself to use it as a remote connector: run it with `--http` (see [Stateless Streamable HTTP](#stateless-streamable-http)) behind your own TLS-terminating proxy, then add a custom connector in claude.ai (**Settings → Connectors → Add custom connector**) pointing at that URL, supplying your API key as the Bearer token (`Authorization: Bearer otok_live_…`). Every request authenticates with the caller's own key — the server holds no credentials of its own.
+To use this package as a remote connector, run it on your own infrastructure with `--http` (see [Stateless Streamable HTTP](#stateless-streamable-http)) behind your own TLS-terminating proxy, then add a custom connector in claude.ai (**Settings → Connectors → Add custom connector**) pointing at that URL, supplying your API key as the Bearer token (`Authorization: Bearer otok_live_…`). Every request authenticates with the caller's own key — the server holds no credentials of its own.
 
-> **Not the `/mcp` path on an oToK domain.** That hosted endpoint serves a *different* server — oToK's built-in agent MCP, which authenticates per-member agent tokens (`otok_agent_…`) and covers the in-app surface rather than the public `/v1` API. A workspace API key sent there is rejected with a clean 401. See the oToK **AI Agents** guide for that route; this package remains the `/v1` connector, run locally over stdio or self-hosted as above.
+> **Not `https://app.otok.io/mcp`.** That endpoint is a *different* server — oToK's built-in agent MCP, which authenticates per-member agent tokens (`otok_agent_…`) and covers the in-app surface rather than the public `/v1` API. A workspace API key sent there is rejected with a clean 401. See the **AI Agents** guide in oToK for that route; this package is the `/v1` connector, run over stdio or hosted on your own infrastructure as above.
 
 ## Transports
 
