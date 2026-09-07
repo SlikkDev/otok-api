@@ -413,3 +413,11 @@ New in v0.2.0:
 
 - `iter()` generators on all paginated list endpoints, honoring each resource's documented page-size cap (500 standard; 100 for deals/payments)
 - Transient network errors (connection reset/refused, DNS failure, socket timeout) now retry with the existing bounded backoff — GET/HEAD and idempotency-keyed writes only; other writes still surface the error immediately
+
+## Contact marketing metadata (v0.8.0)
+
+Contact create/update parameters now include `source_page_url`,
+`source_page_title`, `referrer`, `user_agent`, and `affiliate`. These are native
+Marketing fields; send them as top-level properties. See the
+[contact API reference](https://slikkdev.github.io/otok-api/api/contacts.html#marketing-metadata)
+for descriptions, length limits, and an example.
