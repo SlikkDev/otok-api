@@ -110,6 +110,34 @@ Every field is optional. Unknown fields → 400.
 | `tags` | string[] | Tag **names**, each 1–100 chars. Missing tags are auto-created. |
 | `groups` | string[] | Group **names**, each 1–100 chars. Missing groups are auto-created. |
 
+### Marketing metadata
+
+The following native fields appear in the contact's **Marketing** section. They
+are optional strings accepted by both `POST /api/v1/contacts` and
+`PATCH /api/v1/contacts/:id`, and returned with contact records (nullable when
+unset). Supply them as top-level properties, alongside the UTM fields.
+
+| Field | Maximum length | Description |
+|---|---|---|
+| `source_page_url` | 2048 | URL of the source page associated with the contact. |
+| `source_page_title` | 500 | Title of the source page associated with the contact. |
+| `referrer` | 2048 | Referring URL or source associated with the contact. |
+| `user_agent` | 2048 | Browser or client user-agent string associated with the contact. |
+| `affiliate` | 200 | Affiliate name or identifier associated with the contact. |
+
+Example request body:
+
+```json
+{
+  "email": "jane@example.com",
+  "source_page_url": "https://example.com/signup",
+  "source_page_title": "Newsletter signup",
+  "referrer": "https://example.com/blog",
+  "user_agent": "Mozilla/5.0",
+  "affiliate": "partner-123"
+}
+```
+
 ### Upsert resolution
 
 1. `phone` and `email` are normalized.

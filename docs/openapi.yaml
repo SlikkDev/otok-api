@@ -6189,6 +6189,31 @@ components:
           format: date
         language:
           type: [string, "null"]
+        source_page_url:
+          type: [string, "null"]
+          maxLength: 2048
+          description: Marketing metadata. URL of the source page associated with the contact.
+          example: "https://example.com/signup"
+        source_page_title:
+          type: [string, "null"]
+          maxLength: 500
+          description: Marketing metadata. Title of the source page associated with the contact.
+          example: "Newsletter signup"
+        referrer:
+          type: [string, "null"]
+          maxLength: 2048
+          description: Marketing metadata. Referring URL or source associated with the contact.
+          example: "https://example.com/blog"
+        user_agent:
+          type: [string, "null"]
+          maxLength: 2048
+          description: Marketing metadata. Browser or client user-agent string associated with the contact.
+          example: "Mozilla/5.0"
+        affiliate:
+          type: [string, "null"]
+          maxLength: 200
+          description: Marketing metadata. Affiliate name or identifier associated with the contact.
+          example: "partner-123"
         utm_source:
           type: [string, "null"]
         utm_medium:
@@ -6397,6 +6422,31 @@ components:
         language:
           type: string
           maxLength: 12
+        source_page_url:
+          type: string
+          maxLength: 2048
+          description: Marketing metadata. URL of the source page associated with the contact.
+          example: "https://example.com/signup"
+        source_page_title:
+          type: string
+          maxLength: 500
+          description: Marketing metadata. Title of the source page associated with the contact.
+          example: "Newsletter signup"
+        referrer:
+          type: string
+          maxLength: 2048
+          description: Marketing metadata. Referring URL or source associated with the contact.
+          example: "https://example.com/blog"
+        user_agent:
+          type: string
+          maxLength: 2048
+          description: Marketing metadata. Browser or client user-agent string associated with the contact.
+          example: "Mozilla/5.0"
+        affiliate:
+          type: string
+          maxLength: 200
+          description: Marketing metadata. Affiliate name or identifier associated with the contact.
+          example: "partner-123"
         utm_source:
           type: string
           maxLength: 200

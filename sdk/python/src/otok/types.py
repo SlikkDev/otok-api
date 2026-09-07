@@ -94,6 +94,16 @@ class ContactUpsertParams(TypedDict, total=False):
     #: ISO date, e.g. "1990-05-21".
     date_of_birth: str
     language: str
+    #: Marketing: URL of the source page associated with the contact. Maximum 2048 characters.
+    source_page_url: str
+    #: Marketing: Title of the source page associated with the contact. Maximum 500 characters.
+    source_page_title: str
+    #: Marketing: Referring URL or source associated with the contact. Maximum 2048 characters.
+    referrer: str
+    #: Marketing: Browser or client user-agent string associated with the contact. Maximum 2048 characters.
+    user_agent: str
+    #: Marketing: Affiliate name or identifier associated with the contact. Maximum 200 characters.
+    affiliate: str
     utm_source: str
     utm_medium: str
     utm_campaign: str

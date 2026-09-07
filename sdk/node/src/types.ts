@@ -95,6 +95,16 @@ export interface ContactUpsertParams {
   /** ISO date, e.g. "1990-05-21". */
   date_of_birth?: string;
   language?: string;
+  /** Marketing: URL of the source page associated with the contact. Maximum 2048 characters. */
+  source_page_url?: string;
+  /** Marketing: Title of the source page associated with the contact. Maximum 500 characters. */
+  source_page_title?: string;
+  /** Marketing: Referring URL or source associated with the contact. Maximum 2048 characters. */
+  referrer?: string;
+  /** Marketing: Browser or client user-agent string associated with the contact. Maximum 2048 characters. */
+  user_agent?: string;
+  /** Marketing: Affiliate name or identifier associated with the contact. Maximum 200 characters. */
+  affiliate?: string;
   utm_source?: string;
   utm_medium?: string;
   utm_campaign?: string;
