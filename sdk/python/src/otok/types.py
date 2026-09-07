@@ -100,7 +100,8 @@ class ContactUpsertParams(TypedDict, total=False):
     source_page_title: str
     #: Marketing: Referring URL or source associated with the contact. Maximum 2048 characters.
     referrer: str
-    #: Marketing: Browser or client user-agent string associated with the contact. Maximum 2048 characters.
+    #: Marketing: Browser or client user-agent string associated with the contact.
+    #: Maximum 2048 characters.
     user_agent: str
     #: Marketing: Affiliate name or identifier associated with the contact. Maximum 200 characters.
     affiliate: str
