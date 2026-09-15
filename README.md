@@ -25,6 +25,9 @@ Quick links:
 - [Consent & Suppressions](docs/api/consent-and-suppressions.md) — per-channel consent + the email suppression list
 - [Bookings & Meeting Types](docs/api/bookings.md)
 
+- [Product cycles](docs/api/product-cycles.md) — cohorts, scheduling and capacity
+- [Shared reports](docs/api/reports.md) — discover and run workspace reports
+
 ## At a glance
 
 ```bash

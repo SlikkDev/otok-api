@@ -1,14 +1,15 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.6.0"
+  version: "1.7.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
     per-channel marketing consent), tags and groups, WhatsApp campaigns and templates, deals
     and pipelines, the product catalog, payments, payment requests (pay-links), orders,
     transactional email, broadcast email campaigns, newsletters, email suppressions,
-    read-only audience and sender-profile discovery, outbound webhooks, and bookings.
+    read-only audience and sender-profile discovery, product cycles, shared saved reports,
+    outbound webhooks, and bookings.
 
     ## Authentication
 
@@ -36,7 +37,8 @@ info:
     id is missing. The suppression list (`/v1/suppressions*`) and the sender-profile
     listing (`GET /v1/sender-profiles`) require the **`email_marketing`** feature.
     Contacts (including consent), notes, tags, contact groups, templates, products,
-    audiences, emails, and webhook endpoints require only plan-wide API access.
+    audiences, product cycles, shared report listing, emails, and webhook endpoints require only plan-wide API access.
+    Report runs additionally check the dataset feature.
 
     ## Error shapes
 
@@ -58,7 +60,7 @@ info:
 
     The API never deletes customer data — contacts, deals, products, payments, orders,
     campaigns, tags, and contact groups have no DELETE routes (deactivate a product with
-    `is_active: false` instead). The only DELETE endpoints are for resources the API
+    `manual_status: "archived"` instead). The only DELETE endpoints are for resources the API
     owns: `DELETE /v1/notes/{id}`, `DELETE /v1/webhook-endpoints/{id}`,
     `DELETE /v1/suppressions/{id}` (which lifts a send-time block — it deletes no
     contact data and resubscribes no one), and `DELETE /v1/newsletter-issues/{id}`
@@ -216,6 +218,10 @@ servers:
 security:
   - bearerAuth: []
 tags:
+  - name: Product cycles
+    description: Product cohorts, runs and versions.
+  - name: Reports
+    description: Discover and run shared saved reports.
   - name: Contacts
     description: Contact upsert & update, plus the merge-conflict contract. There is no DELETE endpoint for contacts.
   - name: Contact notes
@@ -262,11 +268,263 @@ tags:
     description: Booking lifecycle — create, cancel, reschedule, reassign host.
 
 paths:
+  /v1/reports/{id}/run:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: runSavedReport
+      tags:
+        - Reports
+      summary: Run a shared saved report
+      description: >-
+        Runs a shared, unarchived report with workspace-wide data. Private, archived or unknown
+        reports return 404. The dataset plan feature is checked on each run. Configure and share
+        reports in the app; inline definitions are not accepted.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportRunRequest"
+      responses:
+        "201":
+          description: Table or summary result. Check meta.truncated and currencyWarnings.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportRunResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/reports:
+    get:
+      operationId: listSavedReports
+      tags:
+        - Reports
+      summary: List shared saved reports
+      description: >-
+        Only shared, unarchived reports in the workspace. Returns metadata, never the report
+        definition. Most recently updated first. Requires API access.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 25
+            maximum: 100
+          description: Page size; larger values are clamped.
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Paginated shared reports.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/SavedReport"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/product-cycles/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getProductCycle
+      tags:
+        - Product cycles
+      summary: Get a product cycle
+      responses:
+        "200":
+          description: Cycle with seat counts.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCycle"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateProductCycle
+      tags:
+        - Product cycles
+      summary: Update or archive a product cycle
+      description: >-
+        Partial update; archive with is_archived: true. No DELETE endpoint. Invalid date ranges or
+        status overrides return 400.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductCycleWrite"
+      responses:
+        "200":
+          description: Updated cycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCycle"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cycle name already taken (CYCLE_NAME_TAKEN).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/products/{productId}/cycles:
+    parameters:
+      - name: productId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: listProductCycles
+      tags:
+        - Product cycles
+      summary: List a product's cycles
+      description: >-
+        Includes archived cycles unless is_archived is specified. Ordered by start date (undated
+        last), then creation time. Includes sales_count and units_taken.
+      parameters:
+        - name: is_archived
+          in: query
+          schema:
+            type: boolean
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+            maximum: 500
+          description: Page size; larger values are clamped.
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Paginated cycles.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ProductCycle"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertProductCycle
+      tags:
+        - Product cycles
+      summary: Create or update a cycle by name
+      description: >-
+        Case-insensitive name match within this product updates only supplied fields and returns
+        duplicate: true. A new cycle returns duplicate: false. Both return 201.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProductCycleCreate"
+      responses:
+        "201":
+          description: Created or matched cycle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProductCycleUpsertResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Cycle name conflict (CYCLE_NAME_TAKEN).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   # ───────────────────────────── Contacts ─────────────────────────────
   /v1/contacts:
     get:
       operationId: listContacts
-      tags: [Contacts]
+      tags:
+        - Contacts
       summary: List contacts
       description: |
         Standard list conventions apply. `search` matches `name`, `first_name`, `last_name`,
@@ -308,28 +566,34 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
     post:
       operationId: upsertContact
-      tags: [Contacts]
-      summary: Upsert a contact by phone/email
-      description: |
-        Creates a contact, or updates the existing contact that the given `phone`/`email`
-        resolves to. Resolution is history-aware and **phone wins** over email. On a match,
-        scalar fields overwrite, `custom_fields` shallow-merge, and `tags`/`groups` are
-        **added** to the existing set (never removed by this route).
+      tags:
+        - Contacts
+      summary: Upsert a contact by phone, email or national ID
+      description: >-
+        Creates or updates a contact. Identifier matching is history-aware, with precedence phone,
+        email, then national_id. Scalar fields overwrite, custom_fields shallow-merge, and tag/group
+        names are added. Both outcomes return 201; duplicate indicates whether an existing contact was
+        updated.
 
-        The response is **201 in both cases** (create and update) and carries a top-level
-        boolean `duplicate` field — `false` when this request created the contact, `true`
-        when it matched and updated an existing one.
 
-        If the phone resolves to one existing contact and the email to a *different* one, the
-        API does not write: it opens a merge request and returns
-        **409 `CONTACT_MERGE_REQUIRED`**. The non-identity fields of the request are parked
-        with the merge request and applied when it is resolved.
+        When identifiers resolve to different current contacts whose identifiers are compatible, POST
+        can merge them automatically and update the surviving contact. Conflicting or historical split
+        matches require in-app review and return 409 CONTACT_MERGE_REQUIRED. Non-identity fields are
+        held for resolution. Use the id returned by the API.
+
+
+        Use acquisition for a genuine submission, including for a returning contact. Reuse
+        acquisition.event_id when retrying that submission for the same contact. Plain updates with
+        top-level marketing fields do not create new acquisition events. Capture is best-effort; a
+        successful profile write does not guarantee attribution capture. inquiry defaults to create
+        (new contact or explicit acquisition); always includes ordinary updates, and never disables
+        inquiry capture. Neither option is accepted by PATCH.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ContactWrite"
+              $ref: "#/components/schemas/ContactCreate"
       responses:
         "201":
           description: |
@@ -361,7 +625,8 @@ paths:
       - $ref: "#/components/parameters/UuidPathId"
     get:
       operationId: getContact
-      tags: [Contacts]
+      tags:
+        - Contacts
       summary: Get one contact
       responses:
         "200":
@@ -382,24 +647,40 @@ paths:
           $ref: "#/components/responses/TooManyRequests"
     patch:
       operationId: updateContact
-      tags: [Contacts]
+      tags:
+        - Contacts
       summary: Update a contact by id
-      description: |
+      description: >
         Same field set and validation as the POST upsert (all optional), with different
+
         semantics:
 
+
         - `tags`/`groups` **replace** the full set (empty array clears; names auto-create).
+
         - `custom_fields` still shallow-merge — set a key to `null` to remove it.
+
         - `name` and `first_name`/`last_name` stay in sync.
+
         - `block_state` changes route through the consent/blocking subsystem; global blocks
           cannot be lifted via the API.
 
-        Setting `phone`/`email` to an identifier that belongs to a *different* contact does
+        Setting `phone`/`email`/`national_id` to an identifier that belongs to a *different* contact
+        does
+
         not apply the write: like the POST upsert's conflict path, a merge request is opened
+
         and the response is **409 `CONTACT_MERGE_REQUIRED`**. Non-identity fields sent in the
+
         same PATCH are held on the merge request and applied when it is resolved. The
+
         conflict check is **history-aware**: an identifier no contact currently holds but
+
         that another contact previously held also parks a merge request and returns the 409.
+
+
+        PATCH rejects `acquisition` and `inquiry` with 400 and never opens an inquiry. Automatic
+        compatible-identifier merging belongs to POST upsert.
       requestBody:
         required: true
         content:
@@ -442,7 +723,10 @@ paths:
                 error: Conflict
                 error_code: CONTACT_MERGE_REQUIRED
                 merge_request_id: 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
-                message: "This change would give the contact a phone or email that already belongs to another contact. A merge request was opened — resolve it (merge or dismiss) to apply the change."
+                message: >-
+                  This change would give the contact a phone or email that already belongs to another
+                  contact. A merge request was opened — resolve it (merge or dismiss) to apply the
+                  change.
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/contacts/{id}/consent:
@@ -6006,6 +6290,681 @@ components:
             message: "The provided phone and email belong to two different existing contacts. A merge request has been opened — resolve it in the app, then retry."
 
   schemas:
+    ReportRunResult:
+      type: object
+      properties:
+        shape:
+          type: string
+          enum:
+            - table
+            - summary
+        columns:
+          type: array
+          items:
+            type: object
+            properties:
+              key:
+                type: string
+              kind:
+                type: string
+            additionalProperties: true
+        rows:
+          type: array
+          items:
+            type: object
+            properties: {}
+            additionalProperties: true
+        page:
+          type: object
+          properties:
+            size:
+              type: integer
+            offset:
+              type: integer
+            total:
+              type: integer
+          description: Present for table reports only. Counts result lines, which can repeat a root record id.
+        meta:
+          type: object
+          properties:
+            truncated:
+              type: boolean
+            dataset:
+              type: string
+            shape:
+              type: string
+              enum:
+                - table
+                - summary
+            currency:
+              type: string
+            currencyMode:
+              type:
+                - string
+                - "null"
+              enum:
+                - converted
+                - breakdown
+                - null
+            currencyWarnings:
+              type: array
+              items:
+                type: object
+                properties:
+                  currency:
+                    type: string
+            refusedRelations:
+              type: array
+              items:
+                type: string
+            timezone:
+              type: string
+            weekStart:
+              type: string
+            generatedAt:
+              type: string
+              format: date-time
+          additionalProperties: true
+      required:
+        - shape
+        - columns
+        - rows
+        - meta
+      additionalProperties: true
+    ReportRunRequest:
+      type: object
+      properties:
+        page:
+          type: object
+          properties:
+            size:
+              type: integer
+              minimum: 1
+              maximum: 200
+            offset:
+              type: integer
+              minimum: 0
+              maximum: 10000
+          required:
+            - size
+            - offset
+          additionalProperties: false
+        sort:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            properties:
+              by:
+                type: string
+                minLength: 1
+                maxLength: 200
+              dir:
+                type: string
+                enum:
+                  - asc
+                  - desc
+            required:
+              - by
+              - dir
+            additionalProperties: false
+      additionalProperties: false
+      description: Optional table-report paging and sorting overrides. No inline report definitions are accepted.
+    SavedReport:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type:
+            - string
+            - "null"
+        dataset:
+          type: string
+        shape:
+          type: string
+          enum:
+            - table
+            - summary
+        chart_type:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ProductCycleUpsertResult:
+      allOf:
+        - $ref: "#/components/schemas/ProductCycle"
+        - type: object
+          properties:
+            duplicate:
+              type: boolean
+          required:
+            - duplicate
+    ProductCycle:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Case-insensitive per-product upsert key.
+        starts_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar start date. Must be a real YYYY-MM-DD date.
+          format: date
+        ends_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar end date, not before starts_on.
+          format: date
+        duration_unit:
+          type: string
+          enum:
+            - days
+            - weeks
+            - months
+            - years
+          default: days
+        manual_status:
+          type:
+            - string
+            - "null"
+          enum:
+            - open
+            - ongoing
+            - ended
+            - undated
+            - cancelled
+            - null
+          description: With either date set, only cancelled or null is accepted; null resumes automatic status.
+        price:
+          type:
+            - number
+            - string
+            - "null"
+          description: Decimal amount; may be serialized as a string.
+        capacity:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          maximum: 1000000
+          description: Seat cap in units sold; null means uncapped.
+        is_archived:
+          type: boolean
+          default: false
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        product_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        sales_count:
+          type: integer
+        units_taken:
+          type: number
+      additionalProperties: true
+    ProductCycleCreate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Case-insensitive per-product upsert key.
+        starts_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar start date. Must be a real YYYY-MM-DD date.
+          format: date
+        ends_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar end date, not before starts_on.
+          format: date
+        duration_unit:
+          type: string
+          enum:
+            - days
+            - weeks
+            - months
+            - years
+          default: days
+        manual_status:
+          type:
+            - string
+            - "null"
+          enum:
+            - open
+            - ongoing
+            - ended
+            - undated
+            - cancelled
+            - null
+          description: With either date set, only cancelled or null is accepted; null resumes automatic status.
+        price:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 1000000000
+          multipleOf: 0.01
+          description: Workspace-currency cycle price override; null uses product price.
+        capacity:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          maximum: 1000000
+          description: Seat cap in units sold; null means uncapped.
+        is_archived:
+          type: boolean
+          default: false
+      required:
+        - name
+      additionalProperties: false
+    ProductCycleWrite:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Case-insensitive per-product upsert key.
+        starts_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar start date. Must be a real YYYY-MM-DD date.
+          format: date
+        ends_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar end date, not before starts_on.
+          format: date
+        duration_unit:
+          type: string
+          enum:
+            - days
+            - weeks
+            - months
+            - years
+          default: days
+        manual_status:
+          type:
+            - string
+            - "null"
+          enum:
+            - open
+            - ongoing
+            - ended
+            - undated
+            - cancelled
+            - null
+          description: With either date set, only cancelled or null is accepted; null resumes automatic status.
+        price:
+          type:
+            - number
+            - "null"
+          minimum: 0
+          maximum: 1000000000
+          multipleOf: 0.01
+          description: Workspace-currency cycle price override; null uses product price.
+        capacity:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          maximum: 1000000
+          description: Seat cap in units sold; null means uncapped.
+        is_archived:
+          type: boolean
+          default: false
+      additionalProperties: false
+    ContactCreate:
+      type: object
+      properties:
+        phone:
+          type: string
+          maxLength: 32
+          description: >-
+            Normalized to E.164 using the workspace default country. An impossible incoming phone does
+            not replace an existing valid phone; an empty string explicitly clears it.
+        name:
+          type: string
+          maxLength: 200
+        first_name:
+          type: string
+          maxLength: 100
+        last_name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          format: email
+          maxLength: 255
+        avatar_url:
+          type: string
+          maxLength: 500
+        notes:
+          type: string
+          maxLength: 5000
+        lifecycle_stage:
+          type: string
+          enum:
+            - lead
+            - prospect
+            - customer
+            - inactive
+            - archived
+        source:
+          type: string
+          enum:
+            - manual
+            - import
+            - widget
+            - campaign
+            - api
+            - form
+        block_state:
+          type: string
+          enum:
+            - none
+            - workspace
+            - global
+          description: |
+            Changes route through the consent/blocking subsystem. Global blocks cannot be
+            lifted via the API. A non-`none` value without a blacklist match is recorded
+            with an import block source.
+        company_name:
+          type: string
+          maxLength: 200
+        vat_number:
+          type: string
+          maxLength: 40
+        job_title:
+          type: string
+          maxLength: 120
+        industry:
+          type: string
+          maxLength: 80
+        company_website:
+          type: string
+          maxLength: 500
+        annual_revenue:
+          type: number
+        employee_count:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        currency_preference:
+          type: string
+          maxLength: 8
+        address_line1:
+          type: string
+          maxLength: 200
+        address_line2:
+          type: string
+          maxLength: 200
+        city:
+          type: string
+          maxLength: 100
+        state:
+          type: string
+          maxLength: 100
+        country:
+          type: string
+          maxLength: 100
+        postal_code:
+          type: string
+          maxLength: 20
+        gender:
+          type: string
+          enum:
+            - male
+            - female
+            - other
+            - prefer_not_to_say
+        date_of_birth:
+          type: string
+          format: date
+          description: ISO 8601 date.
+        language:
+          type: string
+          maxLength: 12
+        source_page_url:
+          type: string
+          maxLength: 2048
+          description: Marketing metadata. URL of the source page associated with the contact.
+          example: https://example.com/signup
+        source_page_title:
+          type: string
+          maxLength: 500
+          description: Marketing metadata. Title of the source page associated with the contact.
+          example: Newsletter signup
+        referrer:
+          type: string
+          maxLength: 2048
+          description: Marketing metadata. Referring URL or source associated with the contact.
+          example: https://example.com/blog
+        user_agent:
+          type: string
+          maxLength: 2048
+          description: Marketing metadata. Browser or client user-agent string associated with the contact.
+          example: Mozilla/5.0
+        affiliate:
+          type: string
+          maxLength: 200
+          description: Marketing metadata. Affiliate name or identifier associated with the contact.
+          example: partner-123
+        utm_source:
+          type: string
+          maxLength: 200
+        utm_medium:
+          type: string
+          maxLength: 200
+        utm_campaign:
+          type: string
+          maxLength: 200
+        utm_term:
+          type: string
+          maxLength: 200
+        utm_content:
+          type: string
+          maxLength: 200
+        gclid:
+          type: string
+          maxLength: 200
+        fbclid:
+          type: string
+          maxLength: 200
+        lead_score:
+          type: number
+          description: |
+            **Engine-owned:** silently ignored while workspace lead scoring is enabled —
+            the response echoes the computed score. Writable only when scoring is disabled.
+        linkedin_url:
+          type: string
+          maxLength: 500
+        facebook_url:
+          type: string
+          maxLength: 500
+        instagram_handle:
+          type: string
+          maxLength: 100
+        twitter_handle:
+          type: string
+          maxLength: 100
+        custom_fields:
+          type: object
+          additionalProperties: true
+          description: |
+            Arbitrary keys; **shallow-merged** into the existing object on update. Set a
+            key to `null` to remove it.
+        tags:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+          description: Tag **names**. Missing tags are auto-created.
+        groups:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 100
+          description: Group **names**. Missing groups are auto-created.
+        national_id:
+          type: string
+          description: >-
+            Israeli national ID. Normalized to nine digits after check-digit validation; invalid values
+            are ignored. Matches after phone and email.
+          maxLength: 20
+        owner_email:
+          type: string
+          format: email
+          description: >-
+            Login email of an active workspace member; takes precedence over owner_user_id. Unknown or
+            inactive member returns 400 INVALID_CONTACT_OWNER.
+        owner_user_id:
+          type:
+            - string
+            - "null"
+          format: uuid
+          description: >-
+            Active workspace member id; null clears ownership. Reassignment also transfers eligible live
+            records owned by the previous owner.
+        msclkid:
+          type: string
+          description: Microsoft advertising click id.
+          maxLength: 500
+        gbraid:
+          type: string
+          description: Google advertising click id.
+          maxLength: 500
+        wbraid:
+          type: string
+          description: Google advertising click id.
+          maxLength: 500
+        ttclid:
+          type: string
+          description: TikTok click id.
+          maxLength: 500
+        li_fat_id:
+          type: string
+          description: LinkedIn click id.
+          maxLength: 500
+        acquisition:
+          $ref: "#/components/schemas/ContactAcquisition"
+        inquiry:
+          type: string
+          enum:
+            - create
+            - always
+            - never
+          default: create
+          description: >-
+            create opens an inquiry for a new contact or an explicit acquisition; always also opens one
+            on ordinary updates; never disables inquiry capture. POST only. For bulk backfills and CRM
+            syncs use never.
+      additionalProperties: false
+      description: >-
+        POST upsert profile plus optional intake controls. Acquisition event_id deduplicates the event
+        and inquiry per contact. These controls are not stored as profile fields.
+    ContactAcquisition:
+      type: object
+      properties:
+        event_id:
+          type: string
+          minLength: 1
+          maxLength: 180
+          description: >-
+            Stable submission id. Reuse for retries for the same contact; use a new id for a new
+            submission.
+        occurred_at:
+          type: string
+          format: date-time
+        visitor_id:
+          type: string
+          pattern: ^[A-Za-z0-9_-]{8,64}$
+        landing_url:
+          type: string
+          description: Landing page URL.
+          maxLength: 2048
+        referrer_url:
+          type: string
+          description: Referring URL.
+          maxLength: 2048
+        utm_source:
+          type: string
+          maxLength: 500
+        utm_medium:
+          type: string
+          maxLength: 500
+        utm_campaign:
+          type: string
+          maxLength: 500
+        utm_term:
+          type: string
+          maxLength: 500
+        utm_content:
+          type: string
+          maxLength: 500
+        gclid:
+          type: string
+          maxLength: 500
+        fbclid:
+          type: string
+          maxLength: 500
+        msclkid:
+          type: string
+          maxLength: 500
+        gbraid:
+          type: string
+          maxLength: 500
+        wbraid:
+          type: string
+          maxLength: 500
+        ttclid:
+          type: string
+          maxLength: 500
+        li_fat_id:
+          type: string
+          maxLength: 500
+        platform_campaign_id:
+          type: string
+          maxLength: 500
+        form_name:
+          type: string
+          maxLength: 500
+      required:
+        - event_id
+      additionalProperties: false
+      description: >-
+        An actual acquisition or submission, including for a returning contact. POST only. Nested source
+        values take precedence over the corresponding top-level values for the event.
     # ── Errors ──
     FrameworkError:
       type: object
@@ -6130,119 +7089,231 @@ components:
           type: string
           format: uuid
         phone:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           description: E.164-normalized.
         name:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         first_name:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         last_name:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         email:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         avatar_url:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         notes:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         lifecycle_stage:
-          type: [string, "null"]
-          enum: [lead, prospect, customer, inactive, archived, null]
+          type:
+            - string
+            - "null"
+          enum:
+            - lead
+            - prospect
+            - customer
+            - inactive
+            - archived
+            - null
         source:
-          type: [string, "null"]
-          enum: [manual, import, widget, campaign, api, form, null]
+          type:
+            - string
+            - "null"
+          enum:
+            - manual
+            - import
+            - widget
+            - campaign
+            - api
+            - form
+            - null
         block_state:
-          type: [string, "null"]
-          enum: [none, workspace, global, null]
+          type:
+            - string
+            - "null"
+          enum:
+            - none
+            - workspace
+            - global
+            - null
         company_name:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         vat_number:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         job_title:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         industry:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         company_website:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         annual_revenue:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
         employee_count:
-          type: [integer, "null"]
+          type:
+            - integer
+            - "null"
         currency_preference:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         address_line1:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         address_line2:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         city:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         state:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         country:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         postal_code:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         gender:
-          type: [string, "null"]
-          enum: [male, female, other, prefer_not_to_say, null]
+          type:
+            - string
+            - "null"
+          enum:
+            - male
+            - female
+            - other
+            - prefer_not_to_say
+            - null
         date_of_birth:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: date
         language:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         source_page_url:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 2048
           description: Marketing metadata. URL of the source page associated with the contact.
-          example: "https://example.com/signup"
+          example: https://example.com/signup
         source_page_title:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 500
           description: Marketing metadata. Title of the source page associated with the contact.
-          example: "Newsletter signup"
+          example: Newsletter signup
         referrer:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 2048
           description: Marketing metadata. Referring URL or source associated with the contact.
-          example: "https://example.com/blog"
+          example: https://example.com/blog
         user_agent:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 2048
           description: Marketing metadata. Browser or client user-agent string associated with the contact.
-          example: "Mozilla/5.0"
+          example: Mozilla/5.0
         affiliate:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 200
           description: Marketing metadata. Affiliate name or identifier associated with the contact.
-          example: "partner-123"
+          example: partner-123
         utm_source:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         utm_medium:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         utm_campaign:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         utm_term:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         utm_content:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         gclid:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         fbclid:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         lead_score:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
           description: |
             Engine-owned while workspace lead scoring is enabled — reads echo the computed
             score.
         linkedin_url:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         facebook_url:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         instagram_handle:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         twitter_handle:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         custom_fields:
-          type: [object, "null"]
+          type:
+            - object
+            - "null"
           additionalProperties: true
         tags:
           type: array
@@ -6274,13 +7345,19 @@ components:
               status:
                 type: string
               registered_at:
-                type: [string, "null"]
+                type:
+                  - string
+                  - "null"
                 format: date-time
               attended_at:
-                type: [string, "null"]
+                type:
+                  - string
+                  - "null"
                 format: date-time
               unregistered_at:
-                type: [string, "null"]
+                type:
+                  - string
+                  - "null"
                 format: date-time
         whatsapp_subscribed:
           type: boolean
@@ -6299,8 +7376,14 @@ components:
             Per-channel deliverability state. The public docs document `"unknown"` for
             contacts without a subscription record but do not enumerate the full value set.
         score_band:
-          type: [string, "null"]
-          enum: [cold, warm, hot, null]
+          type:
+            - string
+            - "null"
+          enum:
+            - cold
+            - warm
+            - hot
+            - null
           description: Read-only lead-scoring band.
         created_at:
           type: string
@@ -6308,6 +7391,69 @@ components:
         updated_at:
           type: string
           format: date-time
+        national_id:
+          type:
+            - string
+            - "null"
+          description: >-
+            Israeli national ID. Normalized to nine digits after check-digit validation; invalid values
+            are ignored. Matches after phone and email.
+          maxLength: 20
+        owner_user_id:
+          type:
+            - string
+            - "null"
+          format: uuid
+          description: >-
+            Active workspace member id; null clears ownership. Reassignment also transfers eligible live
+            records owned by the previous owner.
+        msclkid:
+          type:
+            - string
+            - "null"
+          description: Microsoft advertising click id.
+          maxLength: 500
+        gbraid:
+          type:
+            - string
+            - "null"
+          description: Google advertising click id.
+          maxLength: 500
+        wbraid:
+          type:
+            - string
+            - "null"
+          description: Google advertising click id.
+          maxLength: 500
+        ttclid:
+          type:
+            - string
+            - "null"
+          description: TikTok click id.
+          maxLength: 500
+        li_fat_id:
+          type:
+            - string
+            - "null"
+          description: LinkedIn click id.
+          maxLength: 500
+        owner:
+          type:
+            - object
+            - "null"
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type:
+                - string
+                - "null"
+            email:
+              type:
+                - string
+                - "null"
+          description: Owning workspace member, or null when unowned.
       additionalProperties: true
     ContactUpsertResult:
       title: Contact upsert result
@@ -6328,16 +7474,18 @@ components:
     ContactWrite:
       type: object
       title: Contact write payload
-      description: |
-        Payload for `POST /v1/contacts` (upsert — tags/groups **added**) and
-        `PATCH /v1/contacts/{id}` (tags/groups **replace** the full set). Every field is
-        optional; unknown fields → 400.
+      description: >-
+        Writable contact profile fields for POST (tags/groups added) and PATCH (tags/groups replaced).
+        All fields are optional. Unknown fields return 400. PATCH never opens an inquiry and rejects
+        acquisition and inquiry.
       additionalProperties: false
       properties:
         phone:
           type: string
           maxLength: 32
-          description: Normalized to E.164 (local numbers use the workspace default country).
+          description: >-
+            Normalized to E.164 using the workspace default country. An impossible incoming phone does
+            not replace an existing valid phone; an empty string explicitly clears it.
         name:
           type: string
           maxLength: 200
@@ -6359,13 +7507,27 @@ components:
           maxLength: 5000
         lifecycle_stage:
           type: string
-          enum: [lead, prospect, customer, inactive, archived]
+          enum:
+            - lead
+            - prospect
+            - customer
+            - inactive
+            - archived
         source:
           type: string
-          enum: [manual, import, widget, campaign, api, form]
+          enum:
+            - manual
+            - import
+            - widget
+            - campaign
+            - api
+            - form
         block_state:
           type: string
-          enum: [none, workspace, global]
+          enum:
+            - none
+            - workspace
+            - global
           description: |
             Changes route through the consent/blocking subsystem. Global blocks cannot be
             lifted via the API. A non-`none` value without a blacklist match is recorded
@@ -6414,7 +7576,11 @@ components:
           maxLength: 20
         gender:
           type: string
-          enum: [male, female, other, prefer_not_to_say]
+          enum:
+            - male
+            - female
+            - other
+            - prefer_not_to_say
         date_of_birth:
           type: string
           format: date
@@ -6426,27 +7592,27 @@ components:
           type: string
           maxLength: 2048
           description: Marketing metadata. URL of the source page associated with the contact.
-          example: "https://example.com/signup"
+          example: https://example.com/signup
         source_page_title:
           type: string
           maxLength: 500
           description: Marketing metadata. Title of the source page associated with the contact.
-          example: "Newsletter signup"
+          example: Newsletter signup
         referrer:
           type: string
           maxLength: 2048
           description: Marketing metadata. Referring URL or source associated with the contact.
-          example: "https://example.com/blog"
+          example: https://example.com/blog
         user_agent:
           type: string
           maxLength: 2048
           description: Marketing metadata. Browser or client user-agent string associated with the contact.
-          example: "Mozilla/5.0"
+          example: Mozilla/5.0
         affiliate:
           type: string
           maxLength: 200
           description: Marketing metadata. Affiliate name or identifier associated with the contact.
-          example: "partner-123"
+          example: partner-123
         utm_source:
           type: string
           maxLength: 200
@@ -6505,6 +7671,46 @@ components:
             minLength: 1
             maxLength: 100
           description: Group **names**. Missing groups are auto-created.
+        national_id:
+          type: string
+          description: >-
+            Israeli national ID. Normalized to nine digits after check-digit validation; invalid values
+            are ignored. Matches after phone and email.
+          maxLength: 20
+        owner_email:
+          type: string
+          format: email
+          description: >-
+            Login email of an active workspace member; takes precedence over owner_user_id. Unknown or
+            inactive member returns 400 INVALID_CONTACT_OWNER.
+        owner_user_id:
+          type:
+            - string
+            - "null"
+          format: uuid
+          description: >-
+            Active workspace member id; null clears ownership. Reassignment also transfers eligible live
+            records owned by the previous owner.
+        msclkid:
+          type: string
+          description: Microsoft advertising click id.
+          maxLength: 500
+        gbraid:
+          type: string
+          description: Google advertising click id.
+          maxLength: 500
+        wbraid:
+          type: string
+          description: Google advertising click id.
+          maxLength: 500
+        ttclid:
+          type: string
+          description: TikTok click id.
+          maxLength: 500
+        li_fat_id:
+          type: string
+          description: LinkedIn click id.
+          maxLength: 500
     ConsentChannelState:
       type: object
       title: Per-channel consent state
@@ -7162,46 +8368,75 @@ components:
           type: string
           format: uuid
         product_id:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: uuid
         owner_user_id:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: uuid
         title:
           type: string
           description: Derived from the product name while a product is attached.
         amount:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
           description: JSON number in responses, rounded to 2 decimals.
         currency:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         status:
           type: string
-          enum: [open, won, lost]
+          enum:
+            - open
+            - won
+            - lost
         lost_reason:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         expected_close_at:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: date-time
         closed_at:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: date-time
         stage_entered_at:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: date-time
         position:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
           description: Fractional Kanban position within the stage column.
         note:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         external_reference:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           description: Idempotency key, unique per workspace.
         source:
-          type: [string, "null"]
-          description: '`"api"` for API writes.'
+          type:
+            - string
+            - "null"
+          description: "`\"api\"` for API writes."
         created_by:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: uuid
         created_at:
           type: string
@@ -7210,14 +8445,28 @@ components:
           type: string
           format: date-time
         contact_name:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           description: Joined contact identity — absent on `/stage` and `/status` responses.
         contact_phone:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           description: Joined contact identity — absent on `/stage` and `/status` responses.
         contact_email:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           description: Joined contact identity — absent on `/stage` and `/status` responses.
+        cycle_id:
+          type:
+            - string
+            - "null"
+          format: uuid
+          description: >-
+            Cycle belonging to the attached product; mismatches return 400 CYCLE_PRODUCT_MISMATCH. PATCH
+            null clears the cycle.
       additionalProperties: true
     DealUpsertResult:
       title: Deal upsert result
@@ -7292,7 +8541,9 @@ components:
         stage_id:
           type: string
           format: uuid
-          description: Omitted → the pipeline's first stage. On an `external_reference` match, a different stage moves the deal.
+          description: >-
+            Omitted → the pipeline's first stage. On an `external_reference` match, a different stage
+            moves the deal.
         owner_user_id:
           type: string
           format: uuid
@@ -7307,6 +8558,12 @@ components:
           type: string
           maxLength: 255
           description: "**Idempotency key**, unique per workspace."
+        cycle_id:
+          type: string
+          format: uuid
+          description: >-
+            Cycle belonging to the attached product; mismatches return 400 CYCLE_PRODUCT_MISMATCH. PATCH
+            null clears the cycle.
     DealPatch:
       type: object
       title: Deal patch payload
@@ -7314,7 +8571,9 @@ components:
       additionalProperties: false
       properties:
         product_id:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: uuid
           description: |
             UUID attaches/replaces (must be active unless it's the already-attached
@@ -7337,19 +8596,31 @@ components:
           format: uuid
           description: Re-points the deal; 404 "Contact not found" if not in this workspace.
         owner_user_id:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: uuid
           description: "`null` unassigns; a UUID must be a workspace agent (400 INVALID_DEAL_OWNER)."
         expected_close_at:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: date-time
           description: "`null` clears."
         note:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 4000
           description: Trimmed; empty becomes `null`.
-
-    # ── Products ──
+        cycle_id:
+          type:
+            - string
+            - "null"
+          format: uuid
+          description: >-
+            Cycle belonging to the attached product; mismatches return 400 CYCLE_PRODUCT_MISMATCH. PATCH
+            null clears the cycle.
     Product:
       type: object
       title: Product
@@ -7370,30 +8641,50 @@ components:
         name:
           type: string
         sku:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           description: Per-workspace-unique product code (human-facing).
         external_id:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           description: |
             Per-workspace-unique id of this product in your system — the POST
             idempotency key.
         description:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
         price:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
           description: |
             Default price in the workspace payment currency, as a JSON number. `null` =
             dynamic pricing.
         vat_mode:
-          type: [string, "null"]
-          enum: [inclusive, exclusive, null]
+          type:
+            - string
+            - "null"
+          enum:
+            - inclusive
+            - exclusive
+            - null
         vat_rate:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
           description: VAT percent (0–100); paired with `vat_mode`.
         is_active:
           type: boolean
+          description: >-
+            Inactive products remain attached to existing records. For dated products use manual_status:
+            archived or cancelled; is_active: false alone returns 400.
         created_by:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           format: uuid
           description: "`null` for API creates."
         created_at:
@@ -7402,6 +8693,45 @@ components:
         updated_at:
           type: string
           format: date-time
+        starts_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar start date. Must be a real YYYY-MM-DD date.
+          format: date
+        ends_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar end date, not before starts_on.
+          format: date
+        duration_unit:
+          type: string
+          enum:
+            - days
+            - weeks
+            - months
+            - years
+          default: days
+        manual_status:
+          type:
+            - string
+            - "null"
+          enum:
+            - archived
+            - cancelled
+            - null
+          description: >-
+            Archive or cancel explicitly; null removes the override. Dated products cannot be
+            deactivated with is_active: false; set manual_status instead.
+        enforce_cycle_capacity:
+          type: boolean
+          default: false
+          description: Reject new sales into a full cycle with 409 CYCLE_FULL. Default is advisory capacity.
+        require_cycle:
+          type: boolean
+          default: false
+          description: Require a cycle on sales (400 CYCLE_REQUIRED). Deal cycles remain optional.
       additionalProperties: true
     ProductUpsertResult:
       title: Product upsert result
@@ -7435,43 +8765,95 @@ components:
           minLength: 1
           maxLength: 200
         sku:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 100
           description: Per-workspace-unique product code (human-facing).
         external_id:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 200
           description: |
             Per-workspace-unique id of this product in your system — the POST
             idempotency key (a repeat POST with the same value updates that product
             instead of creating a duplicate).
         description:
-          type: [string, "null"]
+          type:
+            - string
+            - "null"
           maxLength: 2000
         price:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
           minimum: 0
           description: |
             Default price in the workspace payment currency. `null` = dynamic pricing
             (deals fall back to an explicit amount).
         vat_mode:
-          type: [string, "null"]
-          enum: [inclusive, exclusive, null]
+          type:
+            - string
+            - "null"
+          enum:
+            - inclusive
+            - exclusive
+            - null
           description: |
             Per-product VAT override. Travels with `vat_rate` as one both-or-neither
             pair; send both `null` to clear the override.
         vat_rate:
-          type: [number, "null"]
+          type:
+            - number
+            - "null"
           minimum: 0
           maximum: 100
           description: VAT percent (0–100, max 2 decimals); paired with `vat_mode`.
         is_active:
           type: boolean
-          description: |
-            Inactive products stay on existing deals/payments but cannot be attached
-            to new ones.
-
-    # ── Payments ──
+          description: >-
+            Inactive products remain attached to existing records. For dated products use manual_status:
+            archived or cancelled; is_active: false alone returns 400.
+        starts_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar start date. Must be a real YYYY-MM-DD date.
+          format: date
+        ends_on:
+          type:
+            - string
+            - "null"
+          description: Workspace calendar end date, not before starts_on.
+          format: date
+        duration_unit:
+          type: string
+          enum:
+            - days
+            - weeks
+            - months
+            - years
+          default: days
+        manual_status:
+          type:
+            - string
+            - "null"
+          enum:
+            - archived
+            - cancelled
+            - null
+          description: >-
+            Archive or cancel explicitly; null removes the override. Dated products cannot be
+            deactivated with is_active: false; set manual_status instead.
+        enforce_cycle_capacity:
+          type: boolean
+          default: false
+          description: Reject new sales into a full cycle with 409 CYCLE_FULL. Default is advisory capacity.
+        require_cycle:
+          type: boolean
+          default: false
+          description: Require a cycle on sales (400 CYCLE_REQUIRED). Deal cycles remain optional.
     Payment:
       type: object
       title: Payment (header)
@@ -8080,7 +9462,8 @@ components:
         no idempotency key on this resource — a repeat POST mints a second, independently
         payable link.**
       additionalProperties: false
-      required: [amount]
+      required:
+        - amount
       properties:
         contact_id:
           type: string
@@ -8111,7 +9494,11 @@ components:
           description: Amount to collect, in major units (at most 2 decimal places).
         currency:
           type: string
-          enum: [ILS, USD, EUR, GBP]
+          enum:
+            - ILS
+            - USD
+            - EUR
+            - GBP
           description: Omitted → the workspace payment currency.
         title:
           type: string
@@ -8170,7 +9557,9 @@ components:
             the connected provider supports card capture at checkout.
         vat_mode:
           type: string
-          enum: [inclusive, exclusive]
+          enum:
+            - inclusive
+            - exclusive
           description: |
             Per-request VAT override — mode and rate travel as a PAIR (each required
             when the other is present; a lone leg returns 400). Omitted → the workspace
@@ -8182,8 +9571,12 @@ components:
           description: |
             VAT rate percent (0–100, at most 2 decimal places); see `vat_mode` — the
             pair travels together.
-
-    # ── Contact documents ──
+        terminal_number:
+          type: integer
+          minimum: 1
+          description: >-
+            Configured Cardcom terminal number. Omit for the workspace default. Unknown terminal or a
+            provider without terminals returns 400.
     ContactDocument:
       type: object
       title: Contact financial document

@@ -39,7 +39,7 @@ Response `201`:
   "url": "https://hooks.example.com/otok-events",
   "events": ["email.delivered", "email.bounced", "email.complained", "order.created", "order.paid"],
   "is_active": true,
-  "secret": "whsec_XkQ2mP9rT5vW8yZ1aB4cD7eF0gH3jK6nL9qS2uV5xY8",
+  "secret": "whsec_example_only_not_a_real_secret",
   "created_at": "2026-07-14T10:00:00.000Z"
 }
 ```

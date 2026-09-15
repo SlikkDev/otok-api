@@ -57,16 +57,52 @@ export type ContactSource =
   | "api"
   | "form";
 
+/** Submission context for POST /v1/contacts. Reuse event_id when retrying the same submission. */
+export interface ContactAcquisition {
+  /** Required, non-empty, at most 180 characters; deduplicated per contact. */
+  event_id: string;
+  occurred_at?: string;
+  /** 8–64 letters, digits, underscores or hyphens. */
+  visitor_id?: string;
+  landing_url?: string;
+  referrer_url?: string;
+  utm_source?: string;
+  utm_medium?: string;
+  utm_campaign?: string;
+  utm_term?: string;
+  utm_content?: string;
+  gclid?: string;
+  fbclid?: string;
+  msclkid?: string;
+  gbraid?: string;
+  wbraid?: string;
+  ttclid?: string;
+  li_fat_id?: string;
+  platform_campaign_id?: string;
+  form_name?: string;
+}
+
 /**
- * Writable contact fields for POST /v1/contacts (create-or-update) and
- * PATCH /v1/contacts/:id.
- *
- * POST upserts by phone (canonicalized to E.164), falling back to email when
- * no phone is provided. `tags` / `groups` are NAMES — missing ones are
- * created automatically. On POST (upsert) they are ADDED to the existing
- * contact's sets; on PATCH they REPLACE the full set.
+ * POST upsert matches by phone, then email, then national ID. Compatible
+ * current identifier owners can merge; use the returned contact id.
+ * Tag/group names are added on POST; PATCH replaces the supplied sets.
  */
 export interface ContactUpsertParams {
+  /** POST only: actual submission, including for an existing contact. */
+  acquisition?: ContactAcquisition;
+  /** POST only. Default create: new contact or explicit acquisition. Use never for backfills. */
+  inquiry?: "create" | "always" | "never";
+  /** Israeli national ID; normalized to nine digits. Invalid check digits are ignored. */
+  national_id?: string;
+  /** Active workspace member's login email; takes precedence over owner_user_id. */
+  owner_email?: string;
+  /** Active workspace member id; null clears ownership. */
+  owner_user_id?: string | null;
+  msclkid?: string;
+  gbraid?: string;
+  wbraid?: string;
+  ttclid?: string;
+  li_fat_id?: string;
   phone?: string;
   name?: string;
   first_name?: string;
@@ -129,6 +165,9 @@ export interface ContactUpsertParams {
   groups?: string[];
 }
 
+/** PATCH is a profile edit; acquisition and inquiry are rejected by the API. */
+export type ContactUpdateParams = Omit<ContactUpsertParams, "acquisition" | "inquiry">;
+
 export interface Contact {
   id: string;
   workspace_id: string;
@@ -145,6 +184,9 @@ export interface Contact {
   custom_fields: Record<string, unknown> | null;
   created_at: string;
   updated_at: string | null;
+  national_id?: string | null;
+  owner_user_id?: string | null;
+  owner?: { id: string; name: string | null; email: string | null } | null;
   [key: string]: unknown;
 }
 
@@ -350,6 +392,7 @@ export type DealStatus = "open" | "won" | "lost";
  * a duplicate; status is never changed on a match.
  */
 export interface DealCreateParams {
+  cycle_id?: string;
   contact_id?: string;
   phone?: string;
   email?: string;
@@ -377,6 +420,7 @@ export interface DealCreateParams {
 
 export interface DealUpdateParams {
   product_id?: string | null;
+  cycle_id?: string | null;
   /** Ignored while a product is attached. */
   title?: string;
   amount?: number;
@@ -434,6 +478,7 @@ export interface Deal {
   external_reference: string | null;
   created_at: string;
   updated_at: string | null;
+  cycle_id?: string | null;
   [key: string]: unknown;
 }
 
@@ -471,6 +516,12 @@ export interface Product {
   created_by: string | null;
   created_at: string;
   updated_at: string;
+  starts_on?: string | null;
+  ends_on?: string | null;
+  duration_unit?: DurationUnit;
+  manual_status?: "archived" | "cancelled" | null;
+  enforce_cycle_capacity?: boolean;
+  require_cycle?: boolean;
   [key: string]: unknown;
 }
 
@@ -481,6 +532,12 @@ export interface Product {
  */
 export interface ProductCreateParams {
   name: string;
+  starts_on?: string | null;
+  ends_on?: string | null;
+  duration_unit?: DurationUnit;
+  manual_status?: "archived" | "cancelled" | null;
+  enforce_cycle_capacity?: boolean;
+  require_cycle?: boolean;
   /** Per-workspace-unique (409 `product_conflict` on a clash). Max 100 chars. */
   sku?: string | null;
   /** Per-workspace-unique idempotency key. Max 200 chars. */
@@ -2071,6 +2128,8 @@ export type PaymentDocumentKind =
  * this call on transient network errors.
  */
 export interface PaymentRequestCreateParams {
+  /** Configured Cardcom terminal number; omitted uses the default. */
+  terminal_number?: number;
   contact_id?: string;
   phone?: string;
   email?: string;
@@ -2663,3 +2722,95 @@ export interface MeetingTypeEmbed {
   /** Ready-to-paste two-line HTML embed snippet. */
   snippet_html: string;
 }
+
+// Product cycles and shared saved reports.
+export type DurationUnit = "days" | "weeks" | "months" | "years";
+export type CycleManualStatus = "open" | "ongoing" | "ended" | "undated" | "cancelled";
+
+export interface ProductCycleCreateParams {
+  /** Case-insensitive, per-product upsert key; 1–200 characters. */
+  name: string;
+  starts_on?: string | null;
+  ends_on?: string | null;
+  duration_unit?: DurationUnit;
+  /** Dated cycles accept only cancelled or null (automatic). */
+  manual_status?: CycleManualStatus | null;
+  price?: number | null;
+  capacity?: number | null;
+  is_archived?: boolean;
+}
+export type ProductCycleUpdateParams = Partial<ProductCycleCreateParams>;
+export interface ProductCycleListParams {
+  is_archived?: boolean;
+  /** Default 50, maximum 500. */
+  limit?: number;
+  offset?: number;
+}
+export interface ProductCycle {
+  id: string;
+  workspace_id: string;
+  product_id: string;
+  name: string;
+  starts_on: string | null;
+  ends_on: string | null;
+  duration_unit: DurationUnit;
+  manual_status: CycleManualStatus | null;
+  /** Decimal amount; may be serialized as a string. */
+  price: string | number | null;
+  capacity: number | null;
+  is_archived: boolean;
+  sales_count: number;
+  units_taken: number;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+export interface ProductCycleUpsertResult extends ProductCycle { duplicate: boolean; }
+
+export interface ReportListParams {
+  /** Default 25, maximum 100. */
+  limit?: number;
+  offset?: number;
+}
+export interface SavedReport {
+  id: string;
+  name: string;
+  description: string | null;
+  dataset: string;
+  shape: "table" | "summary";
+  chart_type: string;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+export interface ReportRunParams {
+  /** Table reports only: size 1–200, offset 0–10000. */
+  page?: { size: number; offset: number };
+  /** Table reports only: at most three sort keys. */
+  sort?: Array<{ by: string; dir: "asc" | "desc" }>;
+}
+export interface ReportRunMeta {
+  dataset: string;
+  shape: "table" | "summary";
+  truncated: boolean;
+  currency: string;
+  currencyMode: "converted" | "breakdown" | null;
+  currencyWarnings: Array<{ currency: string }>;
+  refusedRelations: string[];
+  timezone: string;
+  weekStart: string;
+  generatedAt: string;
+  [key: string]: unknown;
+}
+interface ReportResultBase {
+  columns: Array<{ key: string; kind: string; [key: string]: unknown }>;
+  rows: Array<Record<string, unknown>>;
+  meta: ReportRunMeta;
+  [key: string]: unknown;
+}
+export interface ReportTableResult extends ReportResultBase {
+  shape: "table";
+  page: { size: number; offset: number; total: number };
+}
+export interface ReportSummaryResult extends ReportResultBase { shape: "summary"; }
+export type ReportRunResult = ReportTableResult | ReportSummaryResult;

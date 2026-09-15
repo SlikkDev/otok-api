@@ -26,7 +26,9 @@ from .resources import (
     PaymentRequestsApi,
     PaymentsApi,
     PipelinesApi,
+    ProductCyclesApi,
     ProductsApi,
+    ReportsApi,
     SenderProfilesApi,
     SuppressionsApi,
     TagsApi,
@@ -90,6 +92,8 @@ class OtokClient:
         self.pipelines = PipelinesApi(self._http)
         self.deals = DealsApi(self._http)
         self.products = ProductsApi(self._http)
+        self.product_cycles = ProductCyclesApi(self._http)
+        self.reports = ReportsApi(self._http)
         self.suppressions = SuppressionsApi(self._http)
         self.emails = EmailsApi(self._http)
         self.campaigns = CampaignsApi(self._http)

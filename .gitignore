@@ -1,2 +1,17 @@
 node_modules/
 _site/
+
+# Local credentials, test output and package artifacts stay out of this public repository.
+.env
+.env.*
+!.env.example
+*.log
+*.tgz
+dist/
+.local/
+.venv/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/

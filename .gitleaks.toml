@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exact documentation/test placeholders and a receipt idempotency key, not credentials"
+regexTarget = "secret"
+regexes = [
+  '''^otok_live_(abc123)?\.\.\.$''',
+  '''^bk_live_abc123$''',
+  '''^order-88123-receipt$''',
+  '''^whsec_example_only_not_a_real_secret$''',
+]
