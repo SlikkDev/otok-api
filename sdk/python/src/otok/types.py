@@ -56,16 +56,24 @@ BlockState = Literal["none", "workspace", "global"]
 Gender = Literal["male", "female", "other", "prefer_not_to_say"]
 
 
-class ContactUpsertParams(TypedDict, total=False):
+class ContactUpdateParams(TypedDict, total=False):
     """Writable contact fields for ``POST /v1/contacts`` (create-or-update)
     and ``PATCH /v1/contacts/:id``.
 
-    POST upserts by phone (canonicalized to E.164), falling back to email
-    when no phone is provided. ``tags`` / ``groups`` are NAMES — missing ones
+    POST matches by phone, then email, then national ID. Compatible current
+    identifier owners can merge; use the returned id. ``tags`` / ``groups`` are NAMES — missing ones
     are created automatically. On POST (upsert) they are ADDED to the
     existing contact's sets; on PATCH they REPLACE the full set.
     """
 
+    national_id: str
+    owner_email: str
+    owner_user_id: Optional[str]
+    msclkid: str
+    gbraid: str
+    wbraid: str
+    ttclid: str
+    li_fat_id: str
     phone: str
     name: str
     first_name: str
@@ -125,6 +133,40 @@ class ContactUpsertParams(TypedDict, total=False):
     tags: list[str]
     #: Contact group NAMES (max 100 chars each).
     groups: list[str]
+
+
+class _ContactAcquisitionRequired(TypedDict):
+    event_id: str
+
+
+class ContactAcquisition(_ContactAcquisitionRequired, total=False):
+    """Submission context. Reuse event_id when retrying the same submission for a contact."""
+
+    occurred_at: str
+    visitor_id: str
+    landing_url: str
+    referrer_url: str
+    utm_source: str
+    utm_medium: str
+    utm_campaign: str
+    utm_term: str
+    utm_content: str
+    gclid: str
+    fbclid: str
+    msclkid: str
+    gbraid: str
+    wbraid: str
+    ttclid: str
+    li_fat_id: str
+    platform_campaign_id: str
+    form_name: str
+
+
+class ContactUpsertParams(ContactUpdateParams, total=False):
+    """POST fields; acquisition and inquiry are rejected on PATCH."""
+
+    acquisition: ContactAcquisition
+    inquiry: Literal["create", "always", "never"]
 
 
 #: Contact record as returned by the API (open — servers may add fields).
@@ -257,6 +299,7 @@ class DealCreateParams(TypedDict, total=False):
     carries ``duplicate: true`` when an existing deal was matched.
     """
 
+    cycle_id: str
     contact_id: str
     phone: str
     email: str
@@ -284,6 +327,7 @@ class DealCreateParams(TypedDict, total=False):
 
 class DealUpdateParams(TypedDict, total=False):
     product_id: Optional[str]
+    cycle_id: Optional[str]
     #: Ignored while a product is attached.
     title: str
     amount: float
@@ -338,6 +382,10 @@ Deal = dict[str, Any]
 # ─────────────────────────── Products ───────────────────────────
 
 
+DurationUnit = Literal["days", "weeks", "months", "years"]
+CycleManualStatus = Literal["open", "ongoing", "ended", "undated", "cancelled"]
+
+
 class _ProductCreateRequired(TypedDict):
     name: str
 
@@ -364,6 +412,12 @@ class ProductCreateParams(_ProductCreateRequired, total=False):
     vat_rate: Optional[float]
     #: Inactive products stay on existing records but can't attach to new ones.
     is_active: bool
+    starts_on: Optional[str]
+    ends_on: Optional[str]
+    duration_unit: DurationUnit
+    manual_status: Optional[Literal["archived", "cancelled"]]
+    enforce_cycle_capacity: bool
+    require_cycle: bool
 
 
 class ProductUpdateParams(TypedDict, total=False):
@@ -379,6 +433,12 @@ class ProductUpdateParams(TypedDict, total=False):
     vat_mode: Optional[PaymentVatMode]
     vat_rate: Optional[float]
     is_active: bool
+    starts_on: Optional[str]
+    ends_on: Optional[str]
+    duration_unit: DurationUnit
+    manual_status: Optional[Literal["archived", "cancelled"]]
+    enforce_cycle_capacity: bool
+    require_cycle: bool
 
 
 class ProductListParams(TypedDict, total=False):
@@ -1812,6 +1872,7 @@ class PaymentRequestCreateParams(_PaymentRequestCreateRequired, total=False):
     auto-retries this call on transient network errors.
     """
 
+    terminal_number: int
     contact_id: str
     phone: str
     email: str
@@ -2248,3 +2309,64 @@ class MeetingTypeEmbed(TypedDict):
     page_url: str
     #: Ready-to-paste two-line HTML embed snippet.
     snippet_html: str
+
+
+class _ProductCycleCreateRequired(TypedDict):
+    name: str
+
+
+class ProductCycleUpdateParams(TypedDict, total=False):
+    name: str
+    starts_on: Optional[str]
+    ends_on: Optional[str]
+    duration_unit: DurationUnit
+    manual_status: Optional[CycleManualStatus]
+    price: Optional[float]
+    capacity: Optional[int]
+    is_archived: bool
+
+
+class ProductCycleCreateParams(_ProductCycleCreateRequired, total=False):
+    """Upsert a cycle by case-insensitive name within its product."""
+
+    starts_on: Optional[str]
+    ends_on: Optional[str]
+    duration_unit: DurationUnit
+    manual_status: Optional[CycleManualStatus]
+    price: Optional[float]
+    capacity: Optional[int]
+    is_archived: bool
+
+
+class ProductCycleListParams(TypedDict, total=False):
+    is_archived: bool
+    limit: int
+    offset: int
+
+
+#: Open response record; price may be a decimal string, number or None.
+ProductCycle = dict[str, Any]
+SavedReport = dict[str, Any]
+ReportRunResult = dict[str, Any]
+
+
+class ReportListParams(TypedDict, total=False):
+    limit: int
+    offset: int
+
+
+class ReportPageParams(TypedDict):
+    size: int
+    offset: int
+
+
+class ReportSortParams(TypedDict):
+    by: str
+    dir: Literal["asc", "desc"]
+
+
+class ReportRunParams(TypedDict, total=False):
+    """Table report overrides: size 1–200, offset 0–10000, at most three sort keys."""
+
+    page: ReportPageParams
+    sort: list[ReportSortParams]

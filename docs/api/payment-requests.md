@@ -188,3 +188,7 @@ Response `201` — the cancelled row (`status: "cancelled"`, `cancelled_at` stam
 ## Webhooks
 
 The four lifecycle events — `payment_request.created` / `paid` / `expired` / `cancelled` — are **opt-in by listing** at [`POST /v1/webhook-endpoints`](webhooks.md): an endpoint registered without an explicit `events` list receives none of them. Payloads follow the order-event conventions (full field set, explicit `null`s, `test_mode` always present) — see [payment-request event `data`](webhooks.md#payment-request-event-data).
+
+### Choosing a payment terminal
+
+`POST /api/v1/payment-requests` accepts optional `terminal_number` (positive integer). With Cardcom, use a terminal configured in the workspace settings; omission uses the default terminal. An unknown terminal, or a provider without terminal selection, returns 400.

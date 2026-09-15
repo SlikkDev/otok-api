@@ -22,6 +22,7 @@ import type {
   ContactGroup,
   ContactGroupCreateParams,
   ContactGroupUpdateParams,
+  ContactUpdateParams,
   ContactUpsertParams,
   ContactUpsertResult,
   Deal,
@@ -73,6 +74,15 @@ import type {
   PaymentRequestListParams,
   PaymentUpdateParams,
   Pipeline,
+  ProductCycle,
+  ProductCycleCreateParams,
+  ProductCycleUpdateParams,
+  ProductCycleListParams,
+  ProductCycleUpsertResult,
+  ReportListParams,
+  SavedReport,
+  ReportRunParams,
+  ReportRunResult,
   Product,
   ProductCreateParams,
   ProductListParams,
@@ -184,7 +194,7 @@ export class ContactsApi {
    * id is on the error body (`merge_request_id`), and non-identity fields
    * from the same call are applied when the request is resolved.
    */
-  update(id: string, params: ContactUpsertParams): Promise<Contact> {
+  update(id: string, params: ContactUpdateParams): Promise<Contact> {
     return this.http.request("PATCH", `/v1/contacts/${id}`, { body: params });
   }
 
@@ -1403,5 +1413,40 @@ export class BookingsApi {
     return this.http.request("POST", `/v1/bookings/${id}/reassign`, {
       body: params,
     });
+  }
+}
+
+/** Cohorts, runs or versions of a product. Archive a cycle with update; no DELETE. */
+export class ProductCyclesApi {
+  constructor(private readonly http: HttpClient) {}
+  list(productId: string, params: ProductCycleListParams = {}): Promise<Paginated<ProductCycle>> {
+    return this.http.request("GET", `/v1/products/${productId}/cycles`, { query: { ...params } });
+  }
+  iter(productId: string, params: ProductCycleListParams = {}): AsyncGenerator<ProductCycle, void, undefined> {
+    return paginate((limit, offset) => this.list(productId, { ...params, limit, offset }), STANDARD_PAGE_CAP, params.limit, params.offset);
+  }
+  get(id: string): Promise<ProductCycle> {
+    return this.http.request("GET", `/v1/product-cycles/${id}`);
+  }
+  /** Upsert by case-insensitive name within this product. Both outcomes return 201. */
+  create(productId: string, params: ProductCycleCreateParams): Promise<ProductCycleUpsertResult> {
+    return this.http.request("POST", `/v1/products/${productId}/cycles`, { body: params });
+  }
+  update(id: string, params: ProductCycleUpdateParams): Promise<ProductCycle> {
+    return this.http.request("PATCH", `/v1/product-cycles/${id}`, { body: params });
+  }
+}
+
+/** Only shared, unarchived reports are available. Runs use workspace-wide data. */
+export class ReportsApi {
+  constructor(private readonly http: HttpClient) {}
+  list(params: ReportListParams = {}): Promise<Paginated<SavedReport>> {
+    return this.http.request("GET", "/v1/reports", { query: { ...params } });
+  }
+  iter(params: ReportListParams = {}): AsyncGenerator<SavedReport, void, undefined> {
+    return paginate((limit, offset) => this.list({ ...params, limit, offset }), DEALS_PAYMENTS_PAGE_CAP, params.limit, params.offset);
+  }
+  run(id: string, params: ReportRunParams = {}): Promise<ReportRunResult> {
+    return this.http.request("POST", `/v1/reports/${id}/run`, { body: params });
   }
 }

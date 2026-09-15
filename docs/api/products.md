@@ -1,8 +1,8 @@
 # Products
 
-The workspace **product catalog**, shared by [deals](deals.md) and customer [payments](payments.md): when a deal or payment carries a `product_id`, its title derives from the product name, and a deal created without an amount defaults to the product's price. The API mirrors the in-app catalog (Tools → Products) — same rows, same rules.
+The workspace **product catalog**, shared by [deals](deals.md) and customer [payments](payments.md): when a deal or payment carries a `product_id`, its title derives from the product name, and a deal created without an amount defaults to the product's price. The API mirrors the in-app catalog (Products) — same rows, same rules.
 
-All endpoints require [authentication](getting-started.md#authentication); there is no extra plan feature (like contacts and tags, products sell on API access alone). Products cannot be deleted — deactivate with `is_active: false` so existing deals/payments keep resolving their attached product.
+All endpoints require [authentication](getting-started.md#authentication); there is no extra plan feature (like contacts and tags, products sell on API access alone). Products cannot be deleted — archive with `manual_status: "archived"` so existing deals/payments keep resolving their attached product.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -24,6 +24,9 @@ All endpoints require [authentication](getting-started.md#authentication); there
 | `price` | number or `null` | Default price in the workspace payment currency, as a JSON number. **`null` = dynamic pricing** — a deal referencing the product then needs an explicit amount |
 | `vat_mode` / `vat_rate` | enum / number, or `null`s | Per-product VAT override (`inclusive` / `exclusive` + percent 0–100). One **both-or-neither pair** — `null`s mean the workspace payments default applies at resolution time |
 | `is_active` | boolean | Inactive products stay attached to existing deals/payments but cannot be attached to new ones |
+| `starts_on` / `ends_on` | date or `null` | Schedule dates in the workspace calendar |
+| `duration_unit` / `manual_status` | enum / nullable enum | Schedule unit and optional archive/cancel override |
+| `enforce_cycle_capacity` / `require_cycle` | boolean | Sales capacity and cycle requirements |
 | `created_by` | UUID or `null` | `null` for API creates |
 | `created_at` / `updated_at` | ISO 8601 | |
 
@@ -61,7 +64,12 @@ Returns the product, or 404 `product_not_found` (structured `{"error": {"code", 
 | `price` | number or `null` | no | ≥0; `null` = dynamic pricing |
 | `vat_mode` | `inclusive` \| `exclusive` \| `null` | no | Travels with `vat_rate` as one both-or-neither pair (400 when only one leg is sent); send both `null` to clear |
 | `vat_rate` | number or `null` | no | 0–100, max 2 decimals |
-| `is_active` | boolean | no | Defaults to `true` |
+| `is_active` | boolean | no | Defaults to `true`; `false` alone is rejected for dated products. Use `manual_status` to archive/cancel them. |
+| `starts_on` / `ends_on` | date or `null` | no | Workspace-calendar `YYYY-MM-DD`; real dates, end not before start. |
+| `duration_unit` | enum | no | `days` (default), `weeks`, `months`, `years`. |
+| `manual_status` | enum or `null` | no | `archived`, `cancelled`, or `null` to remove the override. Archive/cancel makes the product inactive. |
+| `enforce_cycle_capacity` | boolean | no | Default `false`: full [cycles](product-cycles.md) are advisory. `true` rejects new sales into full cycles with 409 `CYCLE_FULL`. |
+| `require_cycle` | boolean | no | Default `false`. `true` requires a cycle on sales (400 `CYCLE_REQUIRED`); deal cycles remain optional. |
 
 ### Upsert resolution
 
@@ -111,13 +119,13 @@ Response `201`:
 
 Partial update — same fields as POST, all optional; only the fields present in the body change (a field you don't send is never nulled). Returns the updated product (no `duplicate` marker).
 
-Deactivate instead of deleting:
+Archive instead of deleting:
 
 ```bash
 curl -X PATCH "https://app.otok.io/api/v1/products/6f2a1b3c-..." \
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
-  -d '{"is_active": false}'
+  -d '{"manual_status": "archived"}'
 ```
 
 | Status | Code | Meaning |
@@ -129,3 +137,9 @@ curl -X PATCH "https://app.otok.io/api/v1/products/6f2a1b3c-..." \
 
 - **Attachment rules** (enforced on deals/payments, not here): only **active** products attach to new records; re-saving a record that already carries an inactive product never fails; deleting is impossible, so denormalized titles always keep resolving.
 - The public API resolves product references on [deal creation](deals.md) by `product_id` → `sku` → `external_id`.
+
+### Scheduling
+
+Dated products use automatic schedule status. Use `manual_status: "archived"` or `"cancelled"` to override it. For a dated product, `is_active: false` without an archive/cancel status returns 400 `PRODUCT_STATUS_AUTOMATIC`. Dates are validated together with existing values on PATCH; an end before the start returns 400 `PRODUCT_DATES_INCOHERENT`. Setting `is_active: true` without `manual_status` clears a previous override.
+
+Use [product cycles](product-cycles.md) for multiple cohorts, runs or versions of a product.

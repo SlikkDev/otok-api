@@ -49,7 +49,7 @@ Exactly one pipeline per workspace has `is_default: true`. A stage's `win_probab
 
 ## The deal object
 
-Deal responses include all deal fields — `id`, `workspace_id`, `pipeline_id`, `stage_id`, `contact_id`, `product_id`, `owner_user_id`, `title`, `amount`, `currency`, `status`, `lost_reason`, `expected_close_at`, `closed_at`, `stage_entered_at`, `position`, `note`, `external_reference`, `source`, `created_by`, `created_at`, `updated_at`.
+Deal responses include all deal fields — `id`, `workspace_id`, `pipeline_id`, `stage_id`, `contact_id`, `product_id`, `cycle_id`, `owner_user_id`, `title`, `amount`, `currency`, `status`, `lost_reason`, `expected_close_at`, `closed_at`, `stage_entered_at`, `position`, `note`, `external_reference`, `source`, `created_by`, `created_at`, `updated_at`.
 
 `GET /v1/deals`, `GET /v1/deals/:id`, `POST /v1/deals`, and `PATCH /v1/deals/:id` additionally join the contact's identity: `contact_name`, `contact_phone`, `contact_email`. The `/stage` and `/status` action routes return the bare deal row **without** these joined fields.
 
@@ -111,6 +111,7 @@ Creates a deal — or, when `external_reference` matches an existing deal, **upd
 | `currency` | string | no | ≤8 chars, uppercased. Omitted → workspace default currency |
 | `pipeline_id` | UUID | no | Omitted → the workspace default pipeline |
 | `stage_id` | UUID | no | Omitted → the pipeline's first stage |
+| `cycle_id` | UUID | no | Optional [cycle](product-cycles.md) of the attached product. A mismatch returns 400 `CYCLE_PRODUCT_MISMATCH`. |
 | `owner_user_id` | UUID | no | Must be a workspace agent. Omitted → the deal is unowned |
 | `expected_close_at` | string | no | ISO 8601 |
 | `note` | string | no | ≤4000 |
@@ -137,7 +138,7 @@ A product reference is resolved in order: `product_id` → `product_sku` → `pr
 
 `external_reference` is unique per workspace. When a POST carries an `external_reference` that matches an existing deal, the deal is **updated instead of created**:
 
-- **Fields updated (only those present in the body):** `product_id` (when a product reference resolves), `title` (still ignored while a product is attached), `amount`, `currency`, `owner_user_id`, `expected_close_at`, `note`.
+- **Fields updated (only those present in the body):** `product_id` (when a product reference resolves), `cycle_id`, `title` (still ignored while a product is attached), `amount`, `currency`, `owner_user_id`, `expected_close_at`, `note`.
 - **`contact_id` is always re-applied** from the freshly resolved contact — a repeat POST with different phone/email **re-points the deal to that contact** (and the contact upsert side effects still run). Because contact resolution happens before the match check, every repeat POST must still carry `contact_id` or `phone`/`email`.
 - **`stage_id`**, if present and different from the deal's current stage, **moves** the deal (with the same ledger/automation effects as `POST /v1/deals/:id/stage`).
 - **`status` is never touched** on a match — use `POST /v1/deals/:id/status`.
@@ -221,6 +222,7 @@ Update deal fields. All fields optional.
 | `amount` | number | 0 – 9,999,999,999, rounded to 2 decimals |
 | `currency` | string | ≤8, uppercased |
 | `contact_id` | UUID | Re-points the deal; 404 `"Contact not found"` if not in this workspace |
+| `cycle_id` | UUID or `null` | Attach a cycle of the product; `null` clears it. |
 | `owner_user_id` | UUID or `null` | `null` unassigns; a UUID must be a workspace agent (400 `INVALID_DEAL_OWNER`) |
 | `expected_close_at` | string or `null` | ISO 8601; `null` clears |
 | `note` | string or `null` | ≤4000; trimmed, empty becomes `null` |

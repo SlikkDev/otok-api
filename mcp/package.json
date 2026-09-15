@@ -45,12 +45,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@otok/node": "^0.7.0",
+    "@otok/node": "^0.8.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/node": "^18.19.0",
+    "@types/node": "^20.19.0",
     "typescript": "^5.5.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.11"
   }
 }

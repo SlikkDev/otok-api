@@ -9,6 +9,8 @@ on:
       - "sdk/node/**"
       - "sdk/python/**"
       - "mcp/**"
+      - "docs/**"
+      - "scripts/build-docs-site.mjs"
       - ".github/workflows/ci.yml"
   push:
     branches:
@@ -17,9 +19,23 @@ on:
       - "sdk/node/**"
       - "sdk/python/**"
       - "mcp/**"
+      - "docs/**"
+      - "scripts/build-docs-site.mjs"
       - ".github/workflows/ci.yml"
 
 jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npx -y @redocly/cli@latest lint docs/openapi.yaml
+      - run: npm install --no-save marked
+      - run: node scripts/build-docs-site.mjs
+      - run: npx -y @redocly/cli@latest build-docs docs/openapi.yaml -o _site/reference/index.html
+
   sdk-node:
     runs-on: ubuntu-latest
     defaults:
@@ -44,10 +60,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      # @otok/mcp depends on "@otok/node": "^0.7.0", which may not be on npm
-      # yet when this runs — build the sibling workspace copy and pack it, so
-      # the tarball satisfies the (unchanged) semver range. mcp/ has no
-      # lockfile until the registry serves ^0.7.0 (see mcp/README.md).
+      # Test MCP against the SDK in this checkout, including unpublished changes.
       - name: Build + pack the local @otok/node
         working-directory: sdk/node
         run: |
@@ -55,7 +68,7 @@ jobs:
           npm run build
           mkdir -p ../../mcp/.local
           npm pack --pack-destination ../../mcp/.local
-      - name: Install (tarball satisfies @otok/node ^0.7.0)
+      - name: Install the locally packed SDK
         working-directory: mcp
         run: npm install --no-save ./.local/otok-node-*.tgz
       - run: npm run typecheck

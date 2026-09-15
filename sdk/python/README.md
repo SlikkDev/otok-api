@@ -421,3 +421,15 @@ Contact create/update parameters now include `source_page_url`,
 Marketing fields; send them as top-level properties. See the
 [contact API reference](https://slikkdev.github.io/otok-api/api/contacts.html#marketing-metadata)
 for descriptions, length limits, and an example.
+
+## Contact intake, product cycles and reports
+
+Contact upserts accept national IDs, contact ownership, and explicit acquisition submissions. Use `acquisition.event_id` for a stable submission id and `inquiry: "never"` for bulk backfills. PATCH uses `ContactUpdateParams` and rejects acquisition/inquiry controls. Compatible current identifier owners can merge on POST; always use the returned contact id. See [Contacts](../../docs/api/contacts.md).
+
+```python
+cycle = client.product_cycles.create(product_id, {"name": "Autumn course", "capacity": 20})
+reports = client.reports.list()
+result = client.reports.run(report_id, {"page": {"size": 50, "offset": 0}})
+```
+
+[Cycles](../../docs/api/product-cycles.md) support list, iteration, get, create/upsert and update. [Reports](../../docs/api/reports.md) support list, iteration and run; only shared, unarchived reports are available, and runs use workspace-wide data. Product scheduling fields, deal `cycle_id` and payment-request `terminal_number` are typed.

@@ -8,7 +8,7 @@ All endpoints require [authentication](getting-started.md#authentication). There
 |---|---|---|
 | GET | `/api/v1/contacts` | List contacts (paginated, filterable) |
 | GET | `/api/v1/contacts/:id` | Get one contact |
-| POST | `/api/v1/contacts` | **Upsert** a contact by phone/email |
+| POST | `/api/v1/contacts` | **Upsert** a contact by phone/email/national ID |
 | PATCH | `/api/v1/contacts/:id` | Update a contact by id |
 | GET | `/api/v1/contacts/:id/consent` | Read per-channel marketing consent — see [Consent & Suppressions](consent-and-suppressions.md) |
 | PUT | `/api/v1/contacts/:id/consent/:channel` | Record a consent decision — see [Consent & Suppressions](consent-and-suppressions.md) |
@@ -28,6 +28,8 @@ Responses return the full contact record plus computed fields:
 - `groups` — array of group **ids**
 - `event_attendances` — `[{id, event_id, status, registered_at, attended_at, unregistered_at}]`
 - `whatsapp_subscribed`, `email_subscribed` (booleans), `whatsapp_deliverability`, `email_deliverability` — per-channel consent state (contacts without a subscription record report `false` / `"unknown"`)
+- `national_id` — normalized national ID, or `null`.
+- `owner_user_id` and `owner` — the owning member id and `{ id, name, email }`, or `null` when unowned.
 - `score_band` — read-only lead-scoring band: `"cold"`, `"warm"`, `"hot"`, or `null`
 
 > **Round-trip warning — tags/groups are NAMES on input, IDS on output.** `POST`/`PATCH` accept tag and group **names**; `GET` returns **ids**. Never echo the ids from a GET back into a write: unrecognized names are auto-created, so a UUID sent as a "name" creates a brand-new tag literally named like that UUID. Map ids back to names first (see [Tags & Contact Groups](tags-and-groups.md)).
@@ -71,7 +73,7 @@ Response `200` — a single contact object (same enrichment as list).
 
 ## POST /api/v1/contacts — upsert
 
-Creates a contact, or **updates the existing contact** that the given `phone`/`email` resolves to. This is the recommended way to write contacts from external systems — including changing a contact's phone or email.
+Creates a contact, or **updates the existing contact** that the given `phone`/`email` resolves to. This is the recommended way to write contacts from external systems — including changing a contact’s phone or email.
 
 ### Request body
 
@@ -83,6 +85,9 @@ Every field is optional. Unknown fields → 400.
 | `name` | string | ≤200 |
 | `first_name` / `last_name` | string | ≤100 each |
 | `email` | string | valid email, ≤255 |
+| `national_id` | string | ≤20 chars; Israeli national ID, normalized to nine digits after check-digit validation. Invalid check digits are ignored. Participates in matching after phone/email. |
+| `owner_email` | string | Active workspace member’s login email; takes precedence over `owner_user_id`. An unknown or inactive member returns 400 `INVALID_CONTACT_OWNER`. |
+| `owner_user_id` | UUID or `null` | Active workspace member id; `null` clears the owner. |
 | `avatar_url` | string | ≤500 |
 | `notes` | string | ≤5000 |
 | `lifecycle_stage` | enum | `lead`, `prospect`, `customer`, `inactive`, `archived` |
@@ -103,12 +108,17 @@ Every field is optional. Unknown fields → 400.
 | `date_of_birth` | string | ISO 8601 date |
 | `language` | string | ≤12 |
 | `utm_source` / `utm_medium` / `utm_campaign` / `utm_term` / `utm_content` / `gclid` / `fbclid` | string | ≤200 each |
+| `msclkid` / `gbraid` / `wbraid` / `ttclid` / `li_fat_id` | string | ≤500 each; advertising click identifiers |
 | `lead_score` | number | **Engine-owned:** silently ignored while workspace lead scoring is enabled — the response echoes the computed score. Writable only when scoring is disabled. |
 | `linkedin_url` / `facebook_url` | string | ≤500 each |
 | `instagram_handle` / `twitter_handle` | string | ≤100 each |
 | `custom_fields` | object | Arbitrary keys; **shallow-merged** into the existing object on update |
 | `tags` | string[] | Tag **names**, each 1–100 chars. Missing tags are auto-created. |
 | `groups` | string[] | Group **names**, each 1–100 chars. Missing groups are auto-created. |
+
+Changing a contact's owner also transfers eligible live records held by the previous owner, including open deals, tasks and inquiries, draft/sent quotes, and upcoming bookings.
+
+An impossible incoming phone does not replace an existing valid phone. Send an empty string to explicitly clear it; inspect the returned phone after writing.
 
 ### Marketing metadata
 
@@ -138,11 +148,54 @@ Example request body:
 }
 ```
 
+### Acquisition events and inquiry capture (POST only)
+
+Use `acquisition` for an actual submission, including a returning contact submitting a new form. It is a request option, not a stored contact profile field.
+
+| Field inside `acquisition` | Constraints |
+|---|---|
+| `event_id` | Required, non-empty string, ≤180 chars. Reuse for retries for the **same contact**; use a new id for each genuine submission. |
+| `occurred_at` | ISO 8601 timestamp; omitted uses capture time. |
+| `visitor_id` | 8–64 letters, digits, underscores or hyphens. |
+| `landing_url` / `referrer_url` | Strings, ≤2048 chars each. |
+| `utm_source` / `utm_medium` / `utm_campaign` / `utm_term` / `utm_content` | Strings, ≤500 chars each. |
+| `gclid` / `fbclid` / `msclkid` / `gbraid` / `wbraid` / `ttclid` / `li_fat_id` | Strings, ≤500 chars each. |
+| `platform_campaign_id` / `form_name` | Strings, ≤500 chars each. |
+
+The event's source values take precedence over corresponding top-level fields. Top-level marketing fields alone create acquisition context only when a contact is first created; ordinary profile updates do not add another acquisition event. Capture is best-effort: a successful profile write does not guarantee that attribution was recorded.
+
+The top-level `inquiry` option controls the inquiry queue:
+
+| Value | Behavior |
+|---|---|
+| `create` (default) | Opens an inquiry when a contact is created **or** an explicit acquisition is supplied, including for an existing contact. |
+| `always` | Also captures ordinary updates. Without an acquisition id, updates for the same contact within one UTC hour collapse into one inquiry. |
+| `never` | Opens no inquiry. Use for bulk backfills and CRM syncs. Does not disable an explicitly supplied acquisition event. |
+
+With `acquisition.event_id`, both the event and its inquiry are deduplicated per contact and event id. Send the same identity and event id when retrying.
+
+Example body (all values are illustrative):
+
+```json
+{
+  "email": "jane@example.com",
+  "acquisition": {
+    "event_id": "signup-example-001",
+    "landing_url": "https://example.com/signup",
+    "utm_source": "newsletter",
+    "utm_campaign": "autumn-course",
+    "form_name": "Course interest"
+  }
+}
+```
+
+Both `acquisition` and `inquiry` are rejected on PATCH with 400. PATCH is a profile edit and never opens an inquiry.
+
 ### Upsert resolution
 
-1. `phone` and `email` are normalized.
+1. `phone`, `email`, and `national_id` are normalized.
 2. The API looks up the current owner of each identifier — resolution is **history-aware**: a phone/email that was moved off a contact still resolves to its most recent holder if no current owner exists.
-3. **Phone wins**: if the phone resolves to a contact, that contact is updated; otherwise the email match is used.
+3. Matching precedence is **phone → email → national ID**. Split matches follow the rules below. Always use the contact `id` returned by the API.
 4. Match found → **update**: scalar fields overwrite, `custom_fields` shallow-merge, and `tags`/`groups` are **added** to the existing set (never removed by this route).
 5. No match → **create**. Concurrent creates of the same identity are safe — the loser of the race is retried as an update of the winner.
 
@@ -150,7 +203,9 @@ The response is **201 in both cases** (create and update) with the full contact 
 
 ### Identity conflict — 409 `CONTACT_MERGE_REQUIRED`
 
-If the `phone` resolves to one existing contact and the `email` to a *different* one, the API does **not** write and does **not** auto-merge. It opens a merge request for the workspace to resolve in-app and responds:
+When incoming identifiers resolve to different **current** contacts, POST can automatically merge complementary records: every non-empty phone, email and national ID must agree across the records and the incoming payload. Blanks can be filled. A phone-only record and a compatible email-only record can therefore become one contact; the response returns the surviving id with `duplicate: true`.
+
+Conflicting identifiers, historical split matches, and pairs awaiting or preserving a human review decision still require in-app resolution. In that case the API opens a merge request and responds:
 
 ```json
 {
@@ -158,7 +213,7 @@ If the `phone` resolves to one existing contact and the `email` to a *different*
   "error": "Conflict",
   "error_code": "CONTACT_MERGE_REQUIRED",
   "merge_request_id": "3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
-  "message": "The provided phone and email belong to two different existing contacts. A merge request has been opened — resolve it in the app, then retry."
+  "message": "The provided identifiers belong to different existing contacts. A merge request has been opened — resolve it in the app, then retry."
 }
 ```
 
@@ -232,7 +287,7 @@ Semantics that differ from POST:
 
 ### Identity conflict — 409 `CONTACT_MERGE_REQUIRED` (PATCH)
 
-Setting `phone`/`email` to an identifier that belongs to a *different* contact does **not** apply the write. Like the POST upsert's conflict path, the API opens a merge request for the workspace to resolve in-app and responds:
+Setting `phone`/`email`/`national_id` to an identifier that belongs to a *different* contact does **not** apply the write. Like the POST upsert's conflict path, the API opens a merge request for the workspace to resolve in-app and responds:
 
 ```json
 {

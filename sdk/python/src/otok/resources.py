@@ -27,6 +27,7 @@ from .types import (
     ContactGroup,
     ContactGroupCreateParams,
     ContactGroupUpdateParams,
+    ContactUpdateParams,
     ContactUpsertParams,
     Deal,
     DealCreateParams,
@@ -71,8 +72,15 @@ from .types import (
     Pipeline,
     Product,
     ProductCreateParams,
+    ProductCycle,
+    ProductCycleCreateParams,
+    ProductCycleListParams,
+    ProductCycleUpdateParams,
     ProductListParams,
     ProductUpdateParams,
+    ReportListParams,
+    ReportRunParams,
+    ReportRunResult,
     SenderProfileListParams,
     SetConsentParams,
     SlotsParams,
@@ -180,7 +188,7 @@ class ContactsApi:
         """
         return cast(Contact, self._http.request("POST", "/v1/contacts", body=params))
 
-    def update(self, contact_id: str, params: ContactUpsertParams) -> Contact:
+    def update(self, contact_id: str, params: ContactUpdateParams) -> Contact:
         """Update by id (404 when unknown). ``tags``/``groups`` REPLACE the
         full set.
 
@@ -551,9 +559,7 @@ class SuppressionsApi:
             self._http.request("GET", "/v1/suppressions", query=_params_query(params)),
         )
 
-    def iter(
-        self, params: Optional[SuppressionListParams] = None
-    ) -> Iterator[dict[str, Any]]:
+    def iter(self, params: Optional[SuppressionListParams] = None) -> Iterator[dict[str, Any]]:
         """Iterate every matching suppression, auto-paginating ``GET
         /v1/suppressions`` (``limit`` cap 500). Accepts the same params as
         ``list``.
@@ -714,9 +720,7 @@ class AudiencesApi:
             self._http.request("GET", "/v1/audiences", query=_params_query(params)),
         )
 
-    def iter(
-        self, params: Optional[AudienceListParams] = None
-    ) -> Iterator[dict[str, Any]]:
+    def iter(self, params: Optional[AudienceListParams] = None) -> Iterator[dict[str, Any]]:
         """Iterate every matching audience, auto-paginating ``GET
         /v1/audiences`` (``limit`` cap 100 — the deals/payments family).
         Accepts the same params as ``list``.
@@ -757,14 +761,10 @@ class SenderProfilesApi:
         """
         return cast(
             Paginated,
-            self._http.request(
-                "GET", "/v1/sender-profiles", query=_params_query(params)
-            ),
+            self._http.request("GET", "/v1/sender-profiles", query=_params_query(params)),
         )
 
-    def iter(
-        self, params: Optional[SenderProfileListParams] = None
-    ) -> Iterator[dict[str, Any]]:
+    def iter(self, params: Optional[SenderProfileListParams] = None) -> Iterator[dict[str, Any]]:
         """Iterate every sender profile, auto-paginating ``GET
         /v1/sender-profiles`` (``limit`` cap 100 — the deals/payments
         family). Accepts the same params as ``list``.
@@ -807,9 +807,7 @@ class EmailCampaignsApi:
             self._http.request("GET", "/v1/email-campaigns", query=_params_query(params)),
         )
 
-    def iter(
-        self, params: Optional[EmailCampaignListParams] = None
-    ) -> Iterator[dict[str, Any]]:
+    def iter(self, params: Optional[EmailCampaignListParams] = None) -> Iterator[dict[str, Any]]:
         """Iterate every matching campaign, auto-paginating ``GET
         /v1/email-campaigns`` (``limit`` cap 100 — the deals/payments
         family). Accepts the same params as ``list``.
@@ -848,18 +846,14 @@ class EmailCampaignsApi:
             self._http.request("POST", "/v1/email-campaigns", body=params),
         )
 
-    def update(
-        self, campaign_id: str, params: EmailCampaignUpdateParams
-    ) -> EmailCampaign:
+    def update(self, campaign_id: str, params: EmailCampaignUpdateParams) -> EmailCampaign:
         """Update a draft/scheduled campaign (409 ``campaign_not_editable``
         otherwise). A ``content`` change recompiles — and detaches an in-app
         template, so the patched content is what sends.
         """
         return cast(
             EmailCampaign,
-            self._http.request(
-                "PATCH", f"/v1/email-campaigns/{campaign_id}", body=params
-            ),
+            self._http.request("PATCH", f"/v1/email-campaigns/{campaign_id}", body=params),
         )
 
     def estimate(self, campaign_id: str) -> AudienceEstimate:
@@ -1045,9 +1039,7 @@ class NewslettersApi:
             self._http.request("GET", f"/v1/newsletter-issues/{issue_id}"),
         )
 
-    def update_issue(
-        self, issue_id: str, params: NewsletterIssueUpdateParams
-    ) -> NewsletterIssue:
+    def update_issue(self, issue_id: str, params: NewsletterIssueUpdateParams) -> NewsletterIssue:
         """Update an issue. Published issues stay editable (a content change
         recompiles); a scheduled issue's content cannot be cleared —
         unschedule first.
@@ -1251,9 +1243,7 @@ class PaymentRequestsApi:
             self._http.request("GET", "/v1/payment-requests", query=_params_query(params)),
         )
 
-    def iter(
-        self, params: Optional[PaymentRequestListParams] = None
-    ) -> Iterator[dict[str, Any]]:
+    def iter(self, params: Optional[PaymentRequestListParams] = None) -> Iterator[dict[str, Any]]:
         """Iterate every matching payment request, auto-paginating ``GET
         /v1/payment-requests`` (``limit`` cap 100 — the deals/payments
         family). Accepts the same params as ``list``.
@@ -1539,5 +1529,96 @@ class BookingsApi:
                 "POST",
                 f"/v1/bookings/{booking_id}/reassign",
                 body=dict(params or {}),
+            ),
+        )
+
+
+class ProductCyclesApi:
+    """Product cohorts, runs or versions. Archive with update; no DELETE."""
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, product_id: str, params: Optional[ProductCycleListParams] = None) -> Paginated:
+        return cast(
+            Paginated,
+            self._http.request(
+                "GET",
+                f"/v1/products/{product_id}/cycles",
+                query=_params_query(params),
+            ),
+        )
+
+    def iter(
+        self,
+        product_id: str,
+        params: Optional[ProductCycleListParams] = None,
+    ) -> Iterator[dict[str, Any]]:
+        p: ProductCycleListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                product_id,
+                cast(ProductCycleListParams, {**p, "limit": limit, "offset": offset}),
+            ),
+            _STANDARD_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, cycle_id: str) -> ProductCycle:
+        return cast(ProductCycle, self._http.request("GET", f"/v1/product-cycles/{cycle_id}"))
+
+    def create(self, product_id: str, params: ProductCycleCreateParams) -> ProductCycle:
+        """Upsert by case-insensitive name within the product; returns duplicate on a match."""
+        return cast(
+            ProductCycle,
+            self._http.request(
+                "POST",
+                f"/v1/products/{product_id}/cycles",
+                body=params,
+            ),
+        )
+
+    def update(self, cycle_id: str, params: ProductCycleUpdateParams) -> ProductCycle:
+        return cast(
+            ProductCycle,
+            self._http.request(
+                "PATCH",
+                f"/v1/product-cycles/{cycle_id}",
+                body=params,
+            ),
+        )
+
+
+class ReportsApi:
+    """Shared, unarchived saved reports. Runs use workspace-wide data."""
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[ReportListParams] = None) -> Paginated:
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/reports", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[ReportListParams] = None) -> Iterator[dict[str, Any]]:
+        p: ReportListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(ReportListParams, {**p, "limit": limit, "offset": offset}),
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def run(self, report_id: str, params: Optional[ReportRunParams] = None) -> ReportRunResult:
+        return cast(
+            ReportRunResult,
+            self._http.request(
+                "POST",
+                f"/v1/reports/{report_id}/run",
+                body=params if params is not None else {},
             ),
         )

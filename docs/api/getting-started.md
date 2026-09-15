@@ -294,3 +294,7 @@ Every authenticated `/v1` request that reaches an endpoint is recorded (method, 
 - [Transactional Emails](emails.md)
 - [Webhooks](webhooks.md) — email delivery/engagement events + order and payment-request lifecycle events
 - [Bookings & Meeting Types](bookings.md)
+
+### Product cycles and shared reports
+
+[Product cycles](product-cycles.md) use the standard 50-row default and 500-row cap. [Shared report listing](reports.md) uses a 25-row default and 100-row cap. Both require API access; report runs also check the dataset’s plan feature. Only shared, unarchived saved reports are reachable.

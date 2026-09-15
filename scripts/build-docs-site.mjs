@@ -28,6 +28,8 @@ const GUIDES = [
   ["templates", "Templates (WhatsApp)"],
   ["deals", "Deals & Pipelines"],
   ["products", "Products"],
+  ["product-cycles", "Product cycles"],
+  ["reports", "Shared reports"],
   ["payments", "Payments"],
   ["payment-requests", "Payment Requests"],
   ["orders", "Orders"],
