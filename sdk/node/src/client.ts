@@ -17,6 +17,7 @@ import {
   PipelinesApi,
   ProductsApi,
   ProductCyclesApi,
+  EventsApi,
   ReportsApi,
   SenderProfilesApi,
   SuppressionsApi,
@@ -55,6 +56,7 @@ export class OtokClient {
   readonly products: ProductsApi;
   readonly productCycles: ProductCyclesApi;
   readonly reports: ReportsApi;
+  readonly events: EventsApi;
   readonly suppressions: SuppressionsApi;
   readonly emails: EmailsApi;
   readonly campaigns: CampaignsApi;
@@ -84,6 +86,7 @@ export class OtokClient {
     this.products = new ProductsApi(this.http);
     this.productCycles = new ProductCyclesApi(this.http);
     this.reports = new ReportsApi(this.http);
+    this.events = new EventsApi(this.http);
     this.suppressions = new SuppressionsApi(this.http);
     this.emails = new EmailsApi(this.http);
     this.campaigns = new CampaignsApi(this.http);

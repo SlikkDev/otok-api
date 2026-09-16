@@ -22,6 +22,7 @@ Start with **[Getting Started](getting-started.md)** — authentication, error e
 | [Products](products.md) | The product catalog shared by deals and payments: idempotent upsert via `external_id`, deactivation instead of delete |
 | [Product cycles](product-cycles.md) | Cohorts, runs and versions: upsert, scheduling, capacity and archiving |
 | [Shared reports](reports.md) | List and run shared saved reports |
+| [Events](events.md) | Events and registrations: idempotent event upsert, register by contact id or inline identity, Zoom push, roster moves |
 | [Payments](payments.md) | One-time / recurring / installment payments, entries, refunds, VAT, metadata |
 | [Payment Requests](payment-requests.md) | Hosted pay-links through the workspace's own provider: mint, list, cancel |
 | [Orders](orders.md) | E-commerce orders: line items, refunds, mark-paid/cancel, idempotent upsert |
@@ -51,6 +52,7 @@ Start with **[Getting Started](getting-started.md)** — authentication, error e
 | **Orders** | `GET /v1/orders` · `GET /v1/orders/:id` · `POST /v1/orders` (upsert) · `POST /v1/orders/:id/refunds` · `POST /v1/orders/:id/mark-paid` · `POST /v1/orders/:id/cancel` |
 | **Product cycles** | `GET/POST /v1/products/:productId/cycles` · `GET/PATCH /v1/product-cycles/:id` |
 | **Reports** | `GET /v1/reports` · `POST /v1/reports/:id/run` |
+| **Events** | `GET /v1/events` · `GET /v1/events/:id` · `POST /v1/events` (upsert) · `GET/POST /v1/events/:id/attendances` · `PATCH /v1/attendances/:id` |
 | **Emails** | `POST /v1/emails` |
 | **Email campaigns** | `GET /v1/email-campaigns` · `GET /v1/email-campaigns/:id` · `POST /v1/email-campaigns` (upsert) · `PATCH /v1/email-campaigns/:id` · `GET /v1/email-campaigns/:id/estimate` · `POST /v1/email-campaigns/:id/send` · `POST /v1/email-campaigns/:id/schedule` · `POST /v1/email-campaigns/:id/unschedule` |
 | **Newsletters** | `GET /v1/newsletters` · `GET /v1/newsletters/:id` · `POST /v1/newsletters` · `GET /v1/newsletters/:id/issues` · `POST /v1/newsletters/:id/issues` (upsert) |

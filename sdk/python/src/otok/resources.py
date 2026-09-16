@@ -9,6 +9,11 @@ from typing import Any, Callable, Optional, cast
 
 from ._http import HttpClient, QueryValue
 from .types import (
+    AcquisitionListParams,
+    Attendance,
+    AttendanceCreateParams,
+    AttendanceListParams,
+    AttendanceStatusInput,
     AudienceEstimate,
     AudienceListParams,
     Booking,
@@ -41,6 +46,9 @@ from .types import (
     EmailCampaignUpdateParams,
     EmailSendParams,
     EmailSendResult,
+    Event,
+    EventListParams,
+    EventUpsertParams,
     ListParams,
     MeetingType,
     MeetingTypeEmbed,
@@ -53,6 +61,7 @@ from .types import (
     NewsletterIssueUpdateParams,
     NewsletterListParams,
     Note,
+    OffsetPage,
     Order,
     OrderCreateParams,
     OrderListParams,
@@ -273,6 +282,27 @@ class ContactsApi:
             ),
         )
 
+    def list_acquisitions(
+        self,
+        contact_id: str,
+        params: Optional[AcquisitionListParams] = None,
+    ) -> Paginated:
+        """The contact's acquisition touches — one row per submission, newest
+        first, never a rollup.
+
+        Requires the Attribution plan feature (403
+        ``FEATURE_NOT_INCLUDED_IN_PLAN`` otherwise) — the same gate that hides
+        ``first_touch`` / ``last_touch`` on the contact object.
+        """
+        return cast(
+            Paginated,
+            self._http.request(
+                "GET",
+                f"/v1/contacts/{contact_id}/acquisitions",
+                query=_params_query(params),
+            ),
+        )
+
     # ── Notes ──
 
     def list_notes(self, contact_id: str) -> builtins.list[Note]:
@@ -320,6 +350,85 @@ class ContactsApi:
 
 
 # ─────────────────────────────── Tags ───────────────────────────────
+
+
+class EventsApi:
+    """Events and their registrations.
+
+    Every write here fires exactly what the same action fires inside oToK: the
+    event automations, the ``event.attendance.changed`` webhook, lead scoring,
+    and the Zoom registrant push that produces an attendee's personal join
+    link. Requires the Events plan feature.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[EventListParams] = None) -> OffsetPage:
+        return cast(
+            OffsetPage,
+            self._http.request("GET", "/v1/events", query=_params_query(params)),
+        )
+
+    def get(self, event_id: str) -> Event:
+        return cast(Event, self._http.request("GET", f"/v1/events/{event_id}"))
+
+    def upsert(self, params: EventUpsertParams) -> Event:
+        """Create the event, or update the one already carrying this
+        ``external_id`` (matched case-insensitively) — so a form can announce
+        its event on every submission without growing a second copy.
+        ``duplicate`` tells the outcomes apart. There is no separate update
+        call: the upsert is the update path.
+        """
+        return cast(Event, self._http.request("POST", "/v1/events", body=dict(params)))
+
+    def list_attendances(
+        self,
+        event_id: str,
+        params: Optional[AttendanceListParams] = None,
+    ) -> OffsetPage:
+        return cast(
+            OffsetPage,
+            self._http.request(
+                "GET",
+                f"/v1/events/{event_id}/attendances",
+                query=_params_query(params),
+            ),
+        )
+
+    def register(self, event_id: str, params: AttendanceCreateParams) -> Attendance:
+        """Register a contact for the event, by id or by inline identity.
+
+        Idempotent per (event, contact): re-sending the same status answers the
+        same registration with ``created: False`` and fires nothing twice. The
+        response's ``zoom`` block reports what this call did with Zoom.
+        """
+        return cast(
+            Attendance,
+            self._http.request(
+                "POST",
+                f"/v1/events/{event_id}/attendances",
+                body=dict(params),
+            ),
+        )
+
+    def update_attendance(
+        self,
+        attendance_id: str,
+        status: AttendanceStatusInput,
+    ) -> Attendance:
+        """Move an existing registration (``PATCH /v1/attendances/{id}``) — the
+        same chokepoint as :meth:`register`, so marking someone ``attended``
+        here fires what marking them in the app fires.
+        """
+        return cast(
+            Attendance,
+            self._http.request(
+                "PATCH",
+                f"/v1/attendances/{attendance_id}",
+                body={"status": status},
+            ),
+        )
 
 
 class TagsApi:

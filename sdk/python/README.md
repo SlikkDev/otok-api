@@ -296,7 +296,7 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 | Namespace | Endpoints |
 |---|---|
-| `client.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id` |
+| `client.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id`; acquisitions: `GET /v1/contacts/:id/acquisitions` (Attribution feature) |
 | `client.tags` | `GET/POST /v1/tags`, `GET/PATCH /v1/tags/:id` |
 | `client.contact_groups` | `GET/POST /v1/contact-groups`, `GET/PATCH /v1/contact-groups/:id` |
 | `client.pipelines` | `GET /v1/pipelines` (with ordered stages) |
@@ -310,6 +310,7 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 | `client.newsletters` | `GET/POST /v1/newsletters`, `GET /v1/newsletters/:id`; issues: `GET/POST /v1/newsletters/:id/issues`, `GET/PATCH/DELETE /v1/newsletter-issues/:id`, `POST …/publish`, `POST …/schedule`, `POST …/unschedule` (`newsletters` feature; issue POST = idempotent upsert by `external_reference`) |
 | `client.campaigns` | `GET/POST /v1/campaigns`, `GET/PATCH /v1/campaigns/:id`, `POST /v1/campaigns/:id/execute` |
 | `client.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
+| `client.events` | `GET/POST /v1/events`, `GET /v1/events/:id` (POST = idempotent upsert by `external_id`); attendances: `GET/POST /v1/events/:id/attendances`, `PATCH /v1/attendances/:id` |
 | `client.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
 | `client.payment_requests` | `GET/POST /v1/payment-requests`, `GET /v1/payment-requests/:id`, `POST …/cancel` — hosted pay-links (`workspace_payments` feature; create is **not** idempotent) |
 | `client.orders` | `GET/POST /v1/orders`, `GET /v1/orders/:id`, `POST …/refunds`, `POST …/mark-paid`, `POST …/cancel` |
@@ -320,7 +321,7 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier flat dicts and maps them for you.
 
-Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, audiences, sender profiles, email campaigns, newsletters, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — plus `client.newsletters.iter_issues(newsletter_id)` for one newsletter's issues. See [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, audiences, sender profiles, email campaigns, newsletters, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — plus `client.newsletters.iter_issues(newsletter_id)` for one newsletter's issues. Events and attendances are the exception: those lists page by `limit`/`offset` without a `total`, so walk them yourself until a short page comes back. See [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
 
 ## Errors, timeouts, retries
 
@@ -433,3 +434,49 @@ result = client.reports.run(report_id, {"page": {"size": 50, "offset": 0}})
 ```
 
 [Cycles](../../docs/api/product-cycles.md) support list, iteration, get, create/upsert and update. [Reports](../../docs/api/reports.md) support list, iteration and run; only shared, unarchived reports are available, and runs use workspace-wide data. Product scheduling fields, deal `cycle_id` and payment-request `terminal_number` are typed.
+
+## Events, attendances and acquisition history (v0.10.0)
+
+Events are now first-class. `client.events.upsert` is idempotent on
+`external_id` (matched case-insensitively), so a registration form can announce
+its event on every submission without growing a second copy — `duplicate` tells
+a create and an update apart. Registration goes through the event: pass a
+`contact_id` or an inline `contact` identity, and the same `acquisition` block a
+contact upsert takes, so the touch that produced the signup is recorded against
+the attendance it created.
+
+```python
+event = client.events.upsert({"name": "Autumn webinar", "external_id": "autumn-2026"})
+result = client.events.register(
+    event["id"],
+    {
+        "contact": {"email": "jane@example.com", "name": "Jane"},
+        "acquisition": {
+            "event_id": "webinar-signup-8891",
+            "landing_url": "https://example.com/webinar",
+        },
+    },
+)
+# result["zoom"]["status"]: "registered" when oToK pushed the attendee to Zoom
+```
+
+When the event is linked to a Zoom meeting or webinar, oToK registers the
+attendee there too and returns Zoom's own join link. Pass
+`zoom_registration="skip"` with your own `join_url` when you have already
+registered them yourself.
+
+Attendance status is corrected through
+`client.events.update_attendance(attendance_id, status)`, which addresses the
+attendance by its own id — you do not need the event. Writes accept `cancelled`
+as an alias, but reads always return the stored vocabulary (`registered`,
+`attended`, `no_show`, `waitlist`, `unregistered`).
+
+`client.contacts.list_acquisitions(contact_id)` returns the contact's
+acquisition touches — one row per submission, newest first, never a rollup —
+and a contact now carries `first_touch` / `last_touch`. Both require the
+Attribution plan feature (403 `FEATURE_NOT_INCLUDED_IN_PLAN` otherwise); the
+touch blocks are absent without it and `None` for a contact with no touch.
+
+A retried `POST /v1/contacts` carrying `acquisition.event_id` is now treated as
+network-retry-safe, alongside the existing `idempotency_key` and
+`external_reference` keys: the submission id is what makes the replay durable.

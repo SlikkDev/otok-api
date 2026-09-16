@@ -357,6 +357,66 @@ describe("HttpClient network-error retries", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("retries a contact upsert carrying acquisition.event_id (the server dedups it workspace-wide)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("ECONNRESET"))
+      .mockResolvedValueOnce(jsonResponse(201, { id: "c-1", duplicate: false }));
+    const client = makeClient(fetchMock as any);
+    const result = await client.request<{ id: string }>("POST", "/v1/contacts", {
+      body: {
+        email: "jane@example.com",
+        acquisition: { event_id: "signup-001", utm_source: "newsletter" },
+      },
+    });
+    expect(result.id).toBe("c-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries an event registration carrying acquisition.event_id", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("ENOTFOUND"))
+      .mockResolvedValueOnce(jsonResponse(201, { id: "att-1", created: true }));
+    const client = makeClient(fetchMock as any);
+    const result = await client.request<{ id: string }>(
+      "POST",
+      "/v1/events/e-1/attendances",
+      {
+        body: {
+          contact: { email: "jane@example.com" },
+          acquisition: { event_id: "webinar-signup-8891" },
+        },
+      },
+    );
+    expect(result.id).toBe("att-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("a contact upsert WITHOUT an acquisition stays non-retryable", async () => {
+    // Deliberate: with `inquiry: "always"` a replay that crossed an hour
+    // boundary would open a second inquiry.
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
+    const client = makeClient(fetchMock as any);
+    await expect(
+      client.request("POST", "/v1/contacts", {
+        body: { email: "jane@example.com", inquiry: "always" },
+      }),
+    ).rejects.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a blank nested event_id does not make a POST retryable", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
+    const client = makeClient(fetchMock as any);
+    await expect(
+      client.request("POST", "/v1/contacts", {
+        body: { email: "jane@example.com", acquisition: { event_id: "" } },
+      }),
+    ).rejects.toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("an empty idempotency key does not make a POST retryable", async () => {
     const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
     const client = makeClient(fetchMock as any);

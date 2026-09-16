@@ -172,7 +172,7 @@ Four [booking](bookings.md) lifecycle events. All are **opt-in** (delivered only
 
 | Type | Subscription | Fires when |
 |---|---|---|
-| `event.attendance.changed` | opt-in | An attendee's status changed (`registered`, `attending`, `attended`, `no_show`, `cancelled`) — per attendance row, from single edits, bulk operations, and automation actions. `data.previous_status` carries the transition (`null` for fresh registrations and for set-based bulk status updates, which have no per-row prior state) |
+| `event.attendance.changed` | opt-in | An attendee's status changed (`registered`, `attended`, `no_show`, `waitlist`, `unregistered`) — per attendance row, from single edits, bulk operations, and automation actions. `data.previous_status` carries the transition (`null` for fresh registrations and for set-based bulk status updates, which have no per-row prior state) |
 
 ### Form events
 
@@ -485,7 +485,7 @@ All four booking events carry the same `data` fields (full field set, explicit `
 | Field | Meaning |
 |---|---|
 | `data.attendance_id` / `data.event_id` / `data.contact_id` | The attendance row, its event, and the attendee |
-| `data.status` | `registered`, `attending`, `attended`, `no_show`, `cancelled`. Tolerate unknown values |
+| `data.status` | `registered`, `attended`, `no_show`, `waitlist`, `unregistered` — emitted verbatim (`cancelled` is a write-only input alias for `unregistered`, never emitted). Tolerate unknown values |
 | `data.previous_status` | The prior status — `null` for fresh registrations and for set-based **bulk** status updates (whose single UPDATE has no per-row prior state) |
 | `data.registered_at` / `data.attended_at` / `data.unregistered_at` | ISO 8601 UTC or `null` |
 | `data.event` | Compact event snapshot `{ id, name, start_at }`, or `null` when unavailable |

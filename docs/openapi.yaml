@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.7.0"
+  version: "1.8.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
@@ -118,6 +118,27 @@ info:
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
     `POST /v1/emails`, which answers 201 fresh / 200 replay.
 
+    ## Changes in 1.8.0
+
+    - New **Events** resource group (`/v1/events*`, `PATCH /v1/attendances/{id}`) — events
+      and their registrations. A registration made here fires exactly what an in-app one
+      fires: the event automations, the `event.attendance.changed` webhook, lead scoring,
+      and the Zoom registrant push that produces the attendee's personal join link. Gated
+      by the `events` plan feature.
+    - New `GET /v1/contacts/{id}/acquisitions` — the per-submission record behind the
+      in-app Journey, newest first. Gated by the `attribution` plan feature.
+    - Contacts: `first_touch` and `last_touch` on the contact object — the contact's first
+      and most recent acquisition, in the same shape as an acquisitions row, or `null`.
+      Both keys are **absent** (not null) without the `attribution` feature.
+    - **Schema correction** for existing consumers: the `event.attendance.changed` webhook's
+      `status` and `previous_status` were documented as
+      `registered | attending | attended | no_show | cancelled`. The values the API has
+      always emitted are `registered | attended | no_show | waitlist | unregistered`:
+      `attending` never existed, `cancelled` is accepted only as a write-time alias for
+      `unregistered`, and `waitlist` / `unregistered` were missing. Nothing changed on the
+      wire — but a consumer branching on the documented spelling was never matching those
+      two states.
+
     ## Changes in 1.6.0
 
     - New **Email campaigns** resource group (`/v1/email-campaigns*`) — author, estimate,
@@ -222,6 +243,12 @@ tags:
     description: Product cohorts, runs and versions.
   - name: Reports
     description: Discover and run shared saved reports.
+  - name: Events
+    description: Events and their registrations.
+  - name: Attendances
+    description: Event registrations, moved by id.
+  - name: Acquisitions
+    description: A contact's per-submission acquisition record.
   - name: Contacts
     description: Contact upsert & update, plus the merge-conflict contract. There is no DELETE endpoint for contacts.
   - name: Contact notes
@@ -520,6 +547,275 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
   # ───────────────────────────── Contacts ─────────────────────────────
+  /v1/events:
+    get:
+      operationId: listEvents
+      tags: [Events]
+      summary: List events
+      description: Newest start date first. **Requires the `events` plan feature.**
+      parameters:
+        - name: q
+          in: query
+          required: false
+          description: Substring match on the event name.
+          schema:
+            type: string
+        - name: external_id
+          in: query
+          required: false
+          description: Exact, case-insensitive lookup by your own event id.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page size (default 50, max 500).
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip (default 0).
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: The event listing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: upsertEvent
+      tags: [Events]
+      summary: Create an event (idempotent via external_id)
+      description: |
+        Creates an event, or updates the one already carrying this `external_id` (matched
+        case-insensitively) and answers `duplicate: true` — so a form can announce its
+        event on every submission without growing a second copy. There is no
+        `PATCH /v1/events/{id}`: the upsert is the update path.
+
+        **Requires the `events` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EventWrite"
+      responses:
+        "201":
+          description: The created or updated event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventUpsertResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/events/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getEvent
+      tags: [Events]
+      summary: Get an event
+      description: "**Requires the `events` plan feature.**"
+      responses:
+        "200":
+          description: The event.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`error_code: \"event_not_found\"` — unknown or cross-workspace event."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/events/{id}/attendances:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: listEventAttendances
+      tags: [Events]
+      summary: List an event's registrations
+      description: Newest first. **Requires the `events` plan feature.**
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: >-
+            One of the stored statuses (`cancelled` is accepted as an alias for
+            `unregistered`). Any other value returns 400 `invalid_status`.
+          schema:
+            type: string
+            enum: [registered, attended, no_show, waitlist, unregistered, cancelled]
+        - name: limit
+          in: query
+          required: false
+          description: Page size (default 50, max 500).
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip (default 0).
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: The registration listing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttendanceList"
+        "400":
+          description: Non-UUID event id, or an unknown `status`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`error_code: \"event_not_found\"`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createEventAttendance
+      tags: [Events]
+      summary: Register a contact for an event
+      description: |
+        Registers a contact, or sets their status directly. Takes `contact_id` or an
+        inline `contact` to upsert through the same identity resolution
+        `POST /v1/contacts` uses.
+
+        Idempotent per (event, contact): re-sending the same status answers the same
+        registration with `created: false` and fires nothing twice. A registration made
+        here fires exactly what an in-app one fires — the event automations, the
+        `event.attendance.changed` webhook, lead scoring, and (on a Zoom-linked event)
+        the registrant push that produces the attendee's personal join link.
+
+        An optional `acquisition` object records how the registration was acquired, as one
+        touch on the contact's journey linked to the registration this call creates;
+        supplying `acquisition.attendance_id` yourself is a 400, because this call is the
+        link.
+
+        **Requires the `events` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttendanceWrite"
+      responses:
+        "201":
+          description: The registration, with what this call did.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttendanceResult"
+        "400":
+          description: >-
+            Validation, `contact_ambiguous` (both `contact_id` and `contact`),
+            `contact_required` (a `contact` with no identifier), or
+            `attendance_id_not_allowed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`event_not_found` or `contact_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: >-
+            `event_archived` (an archived event takes no writes) or `event_canceled` (a
+            canceled event takes no `registered` / `waitlist`). Marking `attended` or
+            `no_show` still works on both a canceled and an ended event — a roster is a
+            record of what happened, not a plan.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/attendances/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    patch:
+      operationId: updateAttendance
+      tags: [Attendances]
+      summary: Move a registration to another status
+      description: |
+        The same chokepoint as the POST — marking someone `attended` or `no_show` here
+        fires exactly what marking them in the app fires, and the same event-state
+        refusals apply. **Requires the `events` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AttendanceUpdate"
+      responses:
+        "200":
+          description: The moved registration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AttendanceResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`error_code: \"attendance_not_found\"`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: "`event_archived` or `event_canceled` — as on the POST."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/contacts:
     get:
       operationId: listContacts
@@ -889,6 +1185,77 @@ paths:
             `"contacts with ID <id> not found"` — same lookup and wording as
             `GET /v1/contacts/{id}`, so an unknown or cross-workspace contact answers
             identically instead of returning an empty-but-plausible document list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/contacts/{id}/acquisitions:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: listContactAcquisitions
+      tags: [Acquisitions]
+      summary: List a contact's acquisition touches
+      description: |
+        The per-submission record behind the in-app Journey — one row per submission,
+        newest first (`occurred_at` descending), never a rollup. **Requires the
+        `attribution` plan feature**, in addition to API access; the same gate hides the
+        `first_touch` / `last_touch` blocks on the contact object.
+
+        `kind` is the transport oToK observed (`api` for anything sent through this API);
+        `source` is what the caller declared produced it. They answer different questions
+        and are never mapped onto one another.
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          description: Narrow to one transport. Any value outside the enum returns 400.
+          schema:
+            type: string
+            enum:
+              - web_visit
+              - form_submission
+              - ctwa_ad
+              - email_click
+              - campaign_reply
+              - import
+              - api
+              - whatconverts_lead
+              - lead_ad
+              - legacy
+        - name: limit
+          in: query
+          required: false
+          description: Page size (default 50, max 200).
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          required: false
+          description: Rows to skip (default 0).
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: The contact's acquisition touches, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcquisitionList"
+        "400":
+          description: Non-UUID contact id, or an unknown `kind`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: Unknown or cross-workspace contact.
           content:
             application/json:
               schema:
@@ -7454,7 +7821,407 @@ components:
                 - string
                 - "null"
           description: Owning workspace member, or null when unowned.
+        first_touch:
+          oneOf:
+            - $ref: "#/components/schemas/Acquisition"
+            - type: "null"
+          description: >-
+            The contact's FIRST recorded acquisition, in the same shape as a row from
+            `GET /v1/contacts/{id}/acquisitions`, or null when they have no touch. Present
+            only with the `attribution` plan feature — without it the key is ABSENT rather
+            than null, which is how you tell "not entitled" from "no touches yet".
+        last_touch:
+          oneOf:
+            - $ref: "#/components/schemas/Acquisition"
+            - type: "null"
+          description: >-
+            The contact's most recent acquisition, same shape and same feature gate as
+            `first_touch`.
       additionalProperties: true
+    Acquisition:
+      type: object
+      title: Acquisition touch
+      description: >-
+        One submission, exactly as the producer reported it. `kind` is the transport oToK
+        observed; `source` is what the caller declared produced it — they answer different
+        questions and are never mapped onto one another.
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_id:
+          type: [string, "null"]
+          description: The producer's own submission id (workspace-unique for API touches).
+        kind:
+          type: string
+          enum:
+            - web_visit
+            - form_submission
+            - ctwa_ad
+            - email_click
+            - campaign_reply
+            - import
+            - api
+            - whatconverts_lead
+            - lead_ad
+            - legacy
+          description: The transport this touch arrived through.
+        source:
+          type: [string, "null"]
+          enum: [form, widget, api, import, campaign, null]
+          description: The origin the caller declared.
+        occurred_at:
+          type: string
+          format: date-time
+        visitor_id:
+          type: [string, "null"]
+        form_name:
+          type: [string, "null"]
+        landing_url:
+          type: [string, "null"]
+          description: First page of the session.
+        conversion_url:
+          type: [string, "null"]
+          description: The page that submitted. Embedded forms report the submitting page for both.
+        landing_referrer:
+          type: [string, "null"]
+        referrer_url:
+          type: [string, "null"]
+          description: Same value as `landing_referrer`; both spellings are returned.
+        source_page_title:
+          type: [string, "null"]
+        utm_source:
+          type: [string, "null"]
+        utm_medium:
+          type: [string, "null"]
+        utm_campaign:
+          type: [string, "null"]
+        utm_term:
+          type: [string, "null"]
+        utm_content:
+          type: [string, "null"]
+        gclid:
+          type: [string, "null"]
+        gbraid:
+          type: [string, "null"]
+        wbraid:
+          type: [string, "null"]
+        fbclid:
+          type: [string, "null"]
+        msclkid:
+          type: [string, "null"]
+        ttclid:
+          type: [string, "null"]
+        li_fat_id:
+          type: [string, "null"]
+        ctwa_clid:
+          type: [string, "null"]
+          description: Click-to-WhatsApp ad click id.
+        platform_campaign_id:
+          type: [string, "null"]
+        params:
+          type: [object, "null"]
+          additionalProperties:
+            type: string
+          description: >-
+            Raw query parameters the producer kept (≤20 keys × 200 chars), minus the
+            canonical UTM and click-id keys. Readable here and nowhere else — never
+            exported, never sent on a webhook.
+        user_agent:
+          type: [string, "null"]
+          description: The visitor's, as the producer stated it — never inferred from the API request.
+        ip:
+          type: [string, "null"]
+          description: The visitor's, as the producer stated it — never inferred from the API request.
+        attendance_id:
+          type: [string, "null"]
+          format: uuid
+          description: The event registration this submission produced, when there is one.
+        form_id:
+          type: [string, "null"]
+          format: uuid
+        landing_page_id:
+          type: [string, "null"]
+          format: uuid
+        campaign_id:
+          type: [string, "null"]
+          format: uuid
+        email_campaign_id:
+          type: [string, "null"]
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    AcquisitionList:
+      type: object
+      title: Acquisition listing
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Acquisition"
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+    Event:
+      type: object
+      title: Event
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        external_id:
+          type: [string, "null"]
+          description: Your own id for the event; per-workspace unique, matched case-insensitively.
+        external_provider:
+          type: [string, "null"]
+          description: >-
+            Read-only. Set by an integration (`"zoom"`) when the event is linked to a
+            provider meeting — never writable, because it is the key registrants are
+            pushed against.
+        start_at:
+          type: [string, "null"]
+          format: date-time
+        end_at:
+          type: [string, "null"]
+          format: date-time
+        ended_at:
+          type: [string, "null"]
+          format: date-time
+        status:
+          type: string
+          enum: [draft, scheduled, canceled, completed]
+        timezone:
+          type: [string, "null"]
+        language:
+          type: [string, "null"]
+        category:
+          type: [string, "null"]
+        presenter:
+          type: [string, "null"]
+        link:
+          type: [string, "null"]
+        use_personal_links:
+          type: boolean
+        product_id:
+          type: [string, "null"]
+          format: uuid
+        cycle_id:
+          type: [string, "null"]
+          format: uuid
+        suppress_event_automations:
+          type: boolean
+        archived_at:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    EventWrite:
+      type: object
+      title: Event write payload
+      description: >-
+        `external_provider` is deliberately absent: it is how oToK knows a meeting belongs
+        to a connected Zoom account.
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 300
+        external_id:
+          type: string
+          maxLength: 200
+        start_at:
+          type: string
+          format: date-time
+        end_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [draft, scheduled, canceled, completed]
+          description: Defaults to `scheduled` — an event created over the API is a real one, not an editor draft.
+        timezone:
+          type: string
+          maxLength: 100
+        language:
+          type: string
+          maxLength: 10
+        category:
+          type: string
+          maxLength: 200
+        presenter:
+          type: string
+          maxLength: 200
+        link:
+          type: string
+          maxLength: 2000
+        link_password:
+          type: string
+          maxLength: 200
+        use_personal_links:
+          type: boolean
+        product_id:
+          type: string
+          format: uuid
+        cycle_id:
+          type: string
+          format: uuid
+        suppress_event_automations:
+          type: boolean
+    EventUpsertResult:
+      allOf:
+        - $ref: "#/components/schemas/Event"
+        - type: object
+          properties:
+            duplicate:
+              type: boolean
+              description: True when `external_id` matched an existing event and this call updated it.
+    EventList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Event"
+        limit:
+          type: integer
+        offset:
+          type: integer
+    Attendance:
+      type: object
+      title: Event registration
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_id:
+          type: string
+          format: uuid
+        contact_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [registered, attended, no_show, waitlist, unregistered]
+          description: >-
+            The stored vocabulary, emitted verbatim. `cancelled` is accepted as an input
+            alias for `unregistered` on writes and is never returned.
+        registered_at:
+          type: [string, "null"]
+          format: date-time
+        attended_at:
+          type: [string, "null"]
+          format: date-time
+        unregistered_at:
+          type: [string, "null"]
+          format: date-time
+        join_url:
+          type: [string, "null"]
+          description: The attendee's personal join link, from Zoom or supplied by the caller.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    AttendanceWrite:
+      type: object
+      title: Registration payload
+      additionalProperties: false
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+          description: An existing contact. Mutually exclusive with `contact`.
+        contact:
+          type: object
+          description: >-
+            Identity to upsert when you have no `contact_id` — resolved by phone, then
+            email, then national ID, exactly like `POST /v1/contacts`. At least one
+            identifier is required.
+          additionalProperties: false
+          properties:
+            name:
+              type: string
+              maxLength: 200
+            email:
+              type: string
+              format: email
+              maxLength: 320
+            phone:
+              type: string
+              maxLength: 40
+            national_id:
+              type: string
+              maxLength: 20
+        status:
+          type: string
+          enum: [registered, attended, no_show, waitlist, unregistered, cancelled]
+          default: registered
+        zoom_registration:
+          type: string
+          enum: [auto, skip]
+          default: auto
+          description: >-
+            `auto` registers the attendee with Zoom like every in-app registration does.
+            Use `skip` only when you registered them with Zoom yourself.
+        join_url:
+          type: string
+          maxLength: 2000
+          description: >-
+            Honoured with `zoom_registration` set to `skip`; a blank value never clears
+            an existing link.
+        acquisition:
+          $ref: "#/components/schemas/ContactAcquisition"
+    AttendanceUpdate:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [registered, attended, no_show, waitlist, unregistered, cancelled]
+    AttendanceResult:
+      allOf:
+        - $ref: "#/components/schemas/Attendance"
+        - type: object
+          properties:
+            created:
+              type: boolean
+              description: True when this call created the registration, false when it moved an existing one.
+            previous_status:
+              type: [string, "null"]
+              description: The status it moved from; `null` when it was created.
+            zoom:
+              type: object
+              description: What THIS call did with Zoom.
+              properties:
+                status:
+                  type: string
+                  enum: [registered, pending, failed, skipped, not_applicable]
+                join_url:
+                  type: [string, "null"]
+    AttendanceList:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/Attendance"
+        limit:
+          type: integer
+        offset:
+          type: integer
     ContactUpsertResult:
       title: Contact upsert result
       description: |
@@ -12193,8 +12960,10 @@ components:
             status:
               type: [string, "null"]
               description: |
-                `registered`, `attending`, `attended`, `no_show`, or `cancelled`.
-                Tolerate unknown values.
+                `registered`, `attended`, `no_show`, `waitlist`, or `unregistered` —
+                the stored vocabulary, emitted verbatim. (`cancelled` is accepted as an
+                input alias for `unregistered` when you WRITE a registration, and is
+                never emitted.) Tolerate unknown values.
             previous_status:
               type: [string, "null"]
               description: |

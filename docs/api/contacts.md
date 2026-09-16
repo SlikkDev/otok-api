@@ -30,6 +30,7 @@ Responses return the full contact record plus computed fields:
 - `whatsapp_subscribed`, `email_subscribed` (booleans), `whatsapp_deliverability`, `email_deliverability` — per-channel consent state (contacts without a subscription record report `false` / `"unknown"`)
 - `national_id` — normalized national ID, or `null`.
 - `owner_user_id` and `owner` — the owning member id and `{ id, name, email }`, or `null` when unowned.
+- `first_touch` and `last_touch` — the contact's first and most recent acquisition, each the same object shape as a row from [`GET /api/v1/contacts/:id/acquisitions`](#get-apiv1contactsidacquisitions), or `null` when the contact has no recorded touch. **Present only on plans with Attribution** — without it the two keys are absent entirely, which is how you tell "not entitled" from "no touches yet".
 - `score_band` — read-only lead-scoring band: `"cold"`, `"warm"`, `"hot"`, or `null`
 
 > **Round-trip warning — tags/groups are NAMES on input, IDS on output.** `POST`/`PATCH` accept tag and group **names**; `GET` returns **ids**. Never echo the ids from a GET back into a write: unrecognized names are auto-created, so a UUID sent as a "name" creates a brand-new tag literally named like that UUID. Map ids back to names first (see [Tags & Contact Groups](tags-and-groups.md)).
@@ -154,13 +155,20 @@ Use `acquisition` for an actual submission, including a returning contact submit
 
 | Field inside `acquisition` | Constraints |
 |---|---|
-| `event_id` | Required, non-empty string, ≤180 chars. Reuse for retries for the **same contact**; use a new id for each genuine submission. |
-| `occurred_at` | ISO 8601 timestamp; omitted uses capture time. |
-| `visitor_id` | 8–64 letters, digits, underscores or hyphens. |
-| `landing_url` / `referrer_url` | Strings, ≤2048 chars each. |
+| `event_id` | Required, non-empty string, ≤180 chars. **Unique per workspace**: reuse it on retries and the same touch and inquiry are returned, whichever contact the identifiers resolve to. Use a new id for each genuine submission — a fixed per-form id would collapse every submission into one. |
+| `occurred_at` | ISO 8601 timestamp; omitted uses capture time. A future value is clamped to now. |
+| `source` | What produced the touch on your side: `form`, `widget`, `api`, `import` or `campaign`. Informational — the touch is always recorded as having arrived through the API. |
+| `visitor_id` | 8–64 letters, digits, underscores or hyphens. Attaches the visitor's earlier anonymous visits to this contact. |
+| `landing_url` | First page of the session. String, ≤2048 chars. |
+| `conversion_url` | The page that submitted. String, ≤2048 chars. |
+| `landing_referrer` / `referrer_url` | The referrer. `landing_referrer` is the preferred spelling; both are accepted. Strings, ≤2048 chars each. |
+| `source_page_title` | String, ≤500 chars. |
 | `utm_source` / `utm_medium` / `utm_campaign` / `utm_term` / `utm_content` | Strings, ≤500 chars each. |
 | `gclid` / `fbclid` / `msclkid` / `gbraid` / `wbraid` / `ttclid` / `li_fat_id` | Strings, ≤500 chars each. |
 | `platform_campaign_id` / `form_name` | Strings, ≤500 chars each. |
+| `ip` / `user_agent` | The **visitor's** address and browser, as your system observed them. Never inferred from your API request — that context belongs to your server, not to the person. |
+| `params` | Raw query parameters you want kept with the touch: at most 20 keys × 200 chars. Canonical keys (the UTM and click-id names above) are stripped, since they have their own fields. Stored for reading only — never exported, never sent on a webhook, and never usable as a contact field. |
+| `attendance_id` | The event registration this submission produced, when you have one. Must name a registration in this workspace that belongs to this very contact, else 400 `ATTENDANCE_NOT_FOUND` / `ATTENDANCE_CONTACT_MISMATCH`. Registering through [`POST /api/v1/events/:id/attendances`](events.md) stamps it for you. |
 
 The event's source values take precedence over corresponding top-level fields. Top-level marketing fields alone create acquisition context only when a contact is first created; ordinary profile updates do not add another acquisition event. Capture is best-effort: a successful profile write does not guarantee that attribution was recorded.
 
@@ -172,7 +180,7 @@ The top-level `inquiry` option controls the inquiry queue:
 | `always` | Also captures ordinary updates. Without an acquisition id, updates for the same contact within one UTC hour collapse into one inquiry. |
 | `never` | Opens no inquiry. Use for bulk backfills and CRM syncs. Does not disable an explicitly supplied acquisition event. |
 
-With `acquisition.event_id`, both the event and its inquiry are deduplicated per contact and event id. Send the same identity and event id when retrying.
+With `acquisition.event_id`, both the touch and its inquiry are deduplicated on that id **across the whole workspace** — so a retry that resolves to a different contact (an identifier that turned out to belong to someone else) still records one touch, not two. Send the same event id when retrying.
 
 Example body (all values are illustrative):
 
@@ -322,6 +330,84 @@ Response `200` — the updated contact object.
 | 400 | `error_code: "PHONE_BLACKLISTED"` | Only when the patch *changes* the phone to a blacklisted number |
 | 404 | `"Contact <id> not found"` | Unknown in this workspace |
 | 409 | `error_code: "CONTACT_MERGE_REQUIRED"` | The new phone/email belongs (or previously belonged) to another contact — see above |
+
+---
+
+## GET /api/v1/contacts/:id/acquisitions
+
+Read-only listing of one contact's **acquisition touches** — the per-submission record behind the in-app Journey, newest first. One row per submission, never a rollup: use it to answer "how did this person actually reach us, and how many times".
+
+> **Plan feature required:** this endpoint requires the **Attribution** feature on the workspace's plan. Without it, calls return `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` — see [feature-gated resource groups](getting-started.md#feature-gated-resource-groups). The same gate hides the `first_touch` / `last_touch` blocks on the contact object.
+
+| Param | Type | Notes |
+|---|---|---|
+| `id` | UUID (path) | Non-UUID → 400. A contact in another workspace → 404 |
+| `kind` | string (query) | Narrow to one transport: `web_visit`, `form_submission`, `ctwa_ad`, `email_click`, `campaign_reply`, `import`, `api`, `whatconverts_lead`, `lead_ad` or `legacy`. Any other value → 400 |
+| `limit` | integer (query) | Page size, default 50, max 200 |
+| `offset` | integer (query) | Rows to skip, default 0 |
+
+```bash
+curl "https://app.otok.io/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c/acquisitions?kind=api&limit=20" \
+  -H "Authorization: Bearer otok_live_abc123..."
+```
+
+Response `200` — `{ data, total, limit, offset }`, ordered by `occurred_at` descending:
+
+```json
+{
+  "data": [
+    {
+      "id": "b1d9c0f2-5a3e-4c18-9f77-2e6a8d4b0c31",
+      "event_id": "signup-example-001",
+      "kind": "api",
+      "source": "form",
+      "occurred_at": "2026-09-14T08:31:00.000Z",
+      "visitor_id": "v_8fa31c2b9d40",
+      "form_name": "Course interest",
+      "landing_url": "https://example.com/autumn",
+      "conversion_url": "https://example.com/autumn/signup",
+      "landing_referrer": "https://www.google.com/",
+      "referrer_url": "https://www.google.com/",
+      "source_page_title": "Autumn course",
+      "utm_source": "newsletter",
+      "utm_medium": "email",
+      "utm_campaign": "autumn-course",
+      "utm_term": null,
+      "utm_content": null,
+      "gclid": null,
+      "gbraid": null,
+      "wbraid": null,
+      "fbclid": null,
+      "msclkid": null,
+      "ttclid": null,
+      "li_fat_id": null,
+      "ctwa_clid": null,
+      "platform_campaign_id": null,
+      "params": { "plan": "pro" },
+      "user_agent": "Mozilla/5.0 …",
+      "ip": "203.0.113.9",
+      "attendance_id": null,
+      "form_id": null,
+      "landing_page_id": null,
+      "campaign_id": null,
+      "email_campaign_id": null,
+      "created_at": "2026-09-14T08:31:00.412Z"
+    }
+  ],
+  "total": 3,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+**Reading a row.**
+
+- `kind` is the transport oToK observed (`api` for anything sent through this API). `source` is what the *caller declared* produced it. They answer different questions and are never mapped onto one another.
+- `landing_url` is the first page of the session; `conversion_url` is the page that submitted. Embedded forms currently report the submitting page for both.
+- `params` holds the raw query parameters the producer kept, minus the canonical UTM and click-id keys. It is readable here and nowhere else — not in exports, not on webhooks.
+- `ip` and `user_agent` are the visitor's, exactly as the producer stated them, and are kept for the life of the touch.
+- `event_id` is the producer's own submission id (workspace-unique for API touches). `attendance_id` links the touch to the event registration it produced, when there is one.
+- The row carries no channel classification: that lives on the contact's `first_touch_channel` / `last_touch_channel` rollups.
 
 ---
 
