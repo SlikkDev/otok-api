@@ -259,6 +259,51 @@ class TestNetworkErrorRetries:
             client.request("POST", "/v1/contacts", body={"email": "a@b.co"})
         assert transport.calls == 1
 
+    def test_retries_a_post_carrying_a_nested_acquisition_event_id(self) -> None:
+        # The server deduplicates the touch AND the inquiry on that id across
+        # the workspace, so a replay records one submission, not two.
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"id": "c1", "duplicate": False})],
+        )
+        client = self._client(transport)
+        assert client.request(
+            "POST",
+            "/v1/contacts",
+            body={"email": "a@b.co", "acquisition": {"event_id": "signup-001"}},
+        ) == {"id": "c1", "duplicate": False}
+        assert transport.calls == 2
+
+    def test_retries_an_event_registration_carrying_an_acquisition(self) -> None:
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"id": "att-1", "created": True})],
+        )
+        client = self._client(transport)
+        assert client.request(
+            "POST",
+            "/v1/events/e-1/attendances",
+            body={
+                "contact": {"email": "a@b.co"},
+                "acquisition": {"event_id": "webinar-8891"},
+            },
+        ) == {"id": "att-1", "created": True}
+        assert transport.calls == 2
+
+    def test_does_not_retry_a_blank_nested_event_id(self) -> None:
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"id": "c1"})],
+        )
+        client = self._client(transport)
+        with pytest.raises(ConnectionResetError):
+            client.request(
+                "POST",
+                "/v1/contacts",
+                body={"email": "a@b.co", "acquisition": {"event_id": ""}},
+            )
+        assert transport.calls == 1
+
     def test_does_not_retry_a_payment_request_create(self) -> None:
         # POST /v1/payment-requests has NO idempotency key of any kind — a
         # replay would mint a second, independently payable link — so the

@@ -30,6 +30,7 @@ const GUIDES = [
   ["products", "Products"],
   ["product-cycles", "Product cycles"],
   ["reports", "Shared reports"],
+  ["events", "Events"],
   ["payments", "Payments"],
   ["payment-requests", "Payment Requests"],
   ["orders", "Orders"],

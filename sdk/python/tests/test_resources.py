@@ -2208,3 +2208,114 @@ class TestBookings:
             }
         )
         assert booking["duplicate"] is True
+
+
+class TestEvents:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "limit": 50, "offset": 0})
+        )
+        client.events.list(
+            {"q": "webinar", "external_id": "autumn-2026", "limit": 10, "offset": 20}
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/events"
+        assert query_of(request) == {
+            "q": ["webinar"],
+            "external_id": ["autumn-2026"],
+            "limit": ["10"],
+            "offset": ["20"],
+        }
+
+    def test_upsert_posts_the_event_and_reports_duplicate(self) -> None:
+        client, transport = make_client(
+            json_response(201, {"id": "e-1", "duplicate": True})
+        )
+        result = client.events.upsert({"name": "Autumn webinar", "external_id": "autumn-2026"})
+        request = last_request(transport)
+        assert request.method == "POST"
+        assert urlsplit(request.url).path == "/api/v1/events"
+        assert transport.request_body() == {
+            "name": "Autumn webinar",
+            "external_id": "autumn-2026",
+        }
+        assert result["duplicate"] is True
+
+    def test_register_posts_the_inline_contact_and_acquisition(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "att-1",
+                    "created": True,
+                    "previous_status": None,
+                    "zoom": {"status": "registered", "join_url": "https://zoom.test/j/1"},
+                },
+            )
+        )
+        result = client.events.register(
+            "e-1",
+            {
+                "contact": {"email": "jane@example.com", "name": "Jane"},
+                "acquisition": {"event_id": "webinar-signup-8891"},
+            },
+        )
+        request = last_request(transport)
+        assert urlsplit(request.url).path == "/api/v1/events/e-1/attendances"
+        assert transport.request_body() == {
+            "contact": {"email": "jane@example.com", "name": "Jane"},
+            "acquisition": {"event_id": "webinar-signup-8891"},
+        }
+        assert result["created"] is True
+        assert result["zoom"]["status"] == "registered"
+
+    def test_register_can_skip_the_zoom_push_with_its_own_link(self) -> None:
+        client, transport = make_client(
+            json_response(201, {"id": "att-2", "zoom": {"status": "skipped"}})
+        )
+        client.events.register(
+            "e-1",
+            {
+                "contact_id": "c-1",
+                "zoom_registration": "skip",
+                "join_url": "https://zoom.test/j/9",
+            },
+        )
+        assert transport.request_body() == {
+            "contact_id": "c-1",
+            "zoom_registration": "skip",
+            "join_url": "https://zoom.test/j/9",
+        }
+
+    def test_update_attendance_patches_by_its_own_id(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"id": "att-1", "previous_status": "registered"})
+        )
+        result = client.events.update_attendance("att-1", "attended")
+        request = last_request(transport)
+        assert request.method == "PATCH"
+        assert urlsplit(request.url).path == "/api/v1/attendances/att-1"
+        assert transport.request_body() == {"status": "attended"}
+        assert result["previous_status"] == "registered"
+
+    def test_list_attendances_narrows_by_status(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "limit": 50, "offset": 0})
+        )
+        client.events.list_attendances("e-1", {"status": "waitlist", "limit": 5})
+        request = last_request(transport)
+        assert urlsplit(request.url).path == "/api/v1/events/e-1/attendances"
+        assert query_of(request) == {"status": ["waitlist"], "limit": ["5"]}
+
+
+class TestContactAcquisitions:
+    def test_lists_touches_narrowed_by_kind(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 50, "offset": 0})
+        )
+        client.contacts.list_acquisitions("c-1", {"kind": "api", "limit": 20})
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/contacts/c-1/acquisitions"
+        assert query_of(request) == {"kind": ["api"], "limit": ["20"]}

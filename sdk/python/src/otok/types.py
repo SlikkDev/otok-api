@@ -139,13 +139,32 @@ class _ContactAcquisitionRequired(TypedDict):
     event_id: str
 
 
-class ContactAcquisition(_ContactAcquisitionRequired, total=False):
-    """Submission context. Reuse event_id when retrying the same submission for a contact."""
+#: What produced a touch on the caller's side. Informational: the touch is
+#: always recorded as having arrived through the API.
+AcquisitionSource = Literal["form", "widget", "api", "import", "campaign"]
 
+
+class ContactAcquisition(_ContactAcquisitionRequired, total=False):
+    """Submission context.
+
+    ``event_id`` is **unique per workspace**: reuse it on retries and the same
+    touch and inquiry are returned, whichever contact the identifiers resolve
+    to. Use a new id for each genuine submission — a fixed per-form id would
+    collapse every submission into one.
+    """
+
+    #: A future value is clamped to now.
     occurred_at: str
+    source: AcquisitionSource
     visitor_id: str
+    #: First page of the session.
     landing_url: str
+    #: The page that submitted.
+    conversion_url: str
+    #: The referrer. ``landing_referrer`` is the preferred spelling; both work.
+    landing_referrer: str
     referrer_url: str
+    source_page_title: str
     utm_source: str
     utm_medium: str
     utm_campaign: str
@@ -160,6 +179,18 @@ class ContactAcquisition(_ContactAcquisitionRequired, total=False):
     li_fat_id: str
     platform_campaign_id: str
     form_name: str
+    #: The VISITOR's browser, as your system observed it — never your server's.
+    user_agent: str
+    #: The VISITOR's address, as your system observed it — never your server's.
+    ip: str
+    #: Raw query parameters to keep with the touch: at most 20 keys x 200
+    #: chars. Canonical keys (the UTM and click-id names above) are stripped.
+    #: Stored for reading only — never exported, never sent on a webhook.
+    params: dict[str, str]
+    #: The event registration this submission produced. Must name a
+    #: registration in this workspace belonging to this very contact.
+    #: ``events.register`` stamps it for you.
+    attendance_id: str
 
 
 class ContactUpsertParams(ContactUpdateParams, total=False):
@@ -1237,8 +1268,8 @@ class EventAttendanceChangedEventData(TypedDict):
     attendance_id: str
     event_id: str
     contact_id: str
-    #: ``registered`` | ``attending`` | ``attended`` | ``no_show`` |
-    #: ``cancelled``. Tolerate unknown values.
+    #: ``registered`` | ``attended`` | ``no_show`` | ``waitlist`` |
+    #: ``unregistered``. Tolerate unknown values.
     status: Optional[str]
     #: ``None`` for fresh registrations and set-based bulk status updates.
     previous_status: Optional[str]
@@ -2370,3 +2401,159 @@ class ReportRunParams(TypedDict, total=False):
 
     page: ReportPageParams
     sort: list[ReportSortParams]
+
+
+# ── Events, registrations and acquisition touches (OFEAT-218) ────────────
+
+#: The transport an acquisition touch arrived through.
+AcquisitionKind = Literal[
+    "web_visit",
+    "form_submission",
+    "ctwa_ad",
+    "email_click",
+    "campaign_reply",
+    "import",
+    "api",
+    "whatconverts_lead",
+    "lead_ad",
+    "legacy",
+]
+
+#: One submission, exactly as the producer reported it — the per-touch record
+#: behind the in-app Journey. ``kind`` is the transport oToK observed (``api``
+#: for anything sent through this SDK); ``source`` is what the caller declared
+#: produced it. They answer different questions and are never mapped onto one
+#: another. Open — servers may add fields.
+Acquisition = dict[str, Any]
+
+
+class AcquisitionListParams(TypedDict, total=False):
+    """Query for ``contacts.list_acquisitions``."""
+
+    #: Narrow to one transport.
+    kind: AcquisitionKind
+    #: Page size (default 50, max 200).
+    limit: int
+    #: Rows to skip (default 0).
+    offset: int
+
+
+#: An event's lifecycle state.
+EventStatus = Literal["draft", "scheduled", "canceled", "completed"]
+
+#: Event record as returned by the API. ``external_provider`` is read-only:
+#: it is how oToK knows a meeting belongs to a connected Zoom account. Open —
+#: servers may add fields.
+Event = dict[str, Any]
+
+
+class _EventUpsertRequired(TypedDict):
+    name: str
+
+
+class EventUpsertParams(_EventUpsertRequired, total=False):
+    """Fields for ``events.upsert``.
+
+    Sending an ``external_id`` that already exists updates that event and
+    answers ``duplicate: True``. ``external_provider`` is deliberately absent.
+    """
+
+    external_id: str
+    start_at: str
+    end_at: str
+    #: Defaults to "scheduled" — an event created over the API is a real one,
+    #: not an editor draft.
+    status: EventStatus
+    timezone: str
+    language: str
+    category: str
+    presenter: str
+    link: str
+    link_password: str
+    use_personal_links: bool
+    product_id: str
+    cycle_id: str
+    suppress_event_automations: bool
+
+
+class EventListParams(TypedDict, total=False):
+    """Query for ``events.list``."""
+
+    #: Substring match on the event name.
+    q: str
+    #: Exact, case-insensitive lookup by your own event id.
+    external_id: str
+    limit: int
+    offset: int
+
+
+#: The stored registration vocabulary, emitted verbatim.
+AttendanceStatus = Literal[
+    "registered", "attended", "no_show", "waitlist", "unregistered"
+]
+
+#: What a write accepts: the stored values plus ``cancelled``, an input alias
+#: for ``unregistered`` that is never returned.
+AttendanceStatusInput = Literal[
+    "registered", "attended", "no_show", "waitlist", "unregistered", "cancelled"
+]
+
+#: Registration record as returned by the API. Open — servers may add fields.
+Attendance = dict[str, Any]
+
+
+class AttendeeContact(TypedDict, total=False):
+    """Identity to upsert when you have no ``contact_id``. At least one
+    identifier is required."""
+
+    name: str
+    email: str
+    phone: str
+    national_id: str
+
+
+class AttendanceAcquisition(ContactAcquisition, total=False):
+    """The acquisition object a registration may carry.
+
+    Identical to a contact upsert's, except that ``attendance_id`` must NOT be
+    sent: the registration the call creates IS the link, so the server stamps
+    it and refuses a supplied one with 400 ``attendance_id_not_allowed``.
+    """
+
+
+class AttendanceCreateParams(TypedDict, total=False):
+    """Body for ``events.register``."""
+
+    #: An existing contact. Mutually exclusive with ``contact``.
+    contact_id: str
+    #: Resolved by phone, then email, then national ID — exactly like
+    #: ``contacts.upsert``, so registering someone who already exists never
+    #: creates a second copy of them.
+    contact: AttendeeContact
+    #: Default "registered". ``cancelled`` is an alias for ``unregistered``.
+    status: AttendanceStatusInput
+    #: "auto" (default) registers the attendee with Zoom like every in-app
+    #: registration does. Use "skip" only when you registered them yourself.
+    zoom_registration: Literal["auto", "skip"]
+    #: Honoured with ``zoom_registration="skip"``; a blank value never clears
+    #: an existing link.
+    join_url: str
+    #: Recorded as one touch on the contact's journey, linked to the
+    #: registration this call creates.
+    acquisition: AttendanceAcquisition
+
+
+class AttendanceListParams(TypedDict, total=False):
+    """Query for ``events.list_attendances``."""
+
+    status: AttendanceStatusInput
+    limit: int
+    offset: int
+
+
+class OffsetPage(TypedDict):
+    """A list page that reports no total (events and registrations)."""
+
+    data: list[dict[str, Any]]
+    limit: int
+    offset: int

@@ -31,7 +31,7 @@ const DEFAULT_MAX_RETRIES = 2;
 /** Base backoff delay; grows exponentially per retry with full jitter. */
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30_000;
-const SDK_VERSION = "0.9.0";
+const SDK_VERSION = "0.10.0";
 
 export type QueryValue = string | number | boolean | undefined;
 
@@ -130,6 +130,14 @@ export function isTransientNetworkError(err: unknown, depth = 0): boolean {
  * server-derived, not a body key). (429/5xx HTTP
  * responses are a different case — the server answered — and keep their
  * existing retry behavior for all requests.)
+ *
+ * One nested key counts too: `acquisition.event_id` on a contact upsert or an
+ * event registration. The server deduplicates both the acquisition touch and
+ * the inquiry it opens on that id across the workspace, so a replay records
+ * one submission, not two — which is exactly the form submission you do NOT
+ * want to lose to a connection reset. A contact upsert WITHOUT an acquisition
+ * stays non-retryable on purpose: with `inquiry: "always"` a replay that
+ * crossed an hour boundary would open a second inquiry.
  */
 export function isNetworkRetrySafe(method: string, body: unknown): boolean {
   if (method === "GET" || method === "HEAD") return true;
@@ -142,6 +150,11 @@ export function isNetworkRetrySafe(method: string, body: unknown): boolean {
     ] as const) {
       const value = b[key];
       if (typeof value === "string" && value !== "") return true;
+    }
+    const acquisition = b.acquisition;
+    if (acquisition && typeof acquisition === "object" && !Array.isArray(acquisition)) {
+      const eventId = (acquisition as Record<string, unknown>).event_id;
+      if (typeof eventId === "string" && eventId !== "") return true;
     }
   }
   return false;

@@ -233,6 +233,14 @@ def _is_network_retry_safe(method: str, body: Any) -> bool:
     error to the caller. (429/5xx HTTP responses are a different case — the
     server answered — and keep their existing retry behavior for all
     requests.)
+
+    One nested key counts too: ``acquisition.event_id`` on a contact upsert or
+    an event registration. The server deduplicates both the acquisition touch
+    and the inquiry it opens on that id across the workspace, so a replay
+    records one submission, not two — which is exactly the form submission you
+    do NOT want to lose to a connection reset. A contact upsert WITHOUT an
+    acquisition stays non-retryable on purpose: with ``inquiry="always"`` a
+    replay that crossed an hour boundary would open a second inquiry.
     """
     if method.upper() in ("GET", "HEAD"):
         return True
@@ -240,6 +248,11 @@ def _is_network_retry_safe(method: str, body: Any) -> bool:
         for key in ("idempotency_key", "external_reference", "external_refund_id"):
             value = body.get(key)
             if isinstance(value, str) and value:
+                return True
+        acquisition = body.get("acquisition")
+        if isinstance(acquisition, Mapping):
+            event_id = acquisition.get("event_id")
+            if isinstance(event_id, str) and event_id:
                 return True
     return False
 

@@ -1,5 +1,12 @@
 import type { HttpClient, QueryValue } from "./http";
 import type {
+  Acquisition,
+  AcquisitionListParams,
+  Attendance,
+  AttendanceCreateParams,
+  AttendanceListParams,
+  AttendanceResult,
+  AttendanceStatusInput,
   AudienceEstimate,
   AudienceListParams,
   AudienceSummary,
@@ -55,12 +62,17 @@ import type {
   NewsletterListParams,
   Note,
   NoteUpdateParams,
+  OffsetPage,
   Order,
   OrderCreateParams,
   OrderListParams,
   OrderMarkPaidParams,
   OrderRefundParams,
   OrderRefundResult,
+  OtokEvent,
+  OtokEventListParams,
+  OtokEventUpsertParams,
+  OtokEventUpsertResult,
   Paginated,
   Payment,
   PaymentCreateParams,
@@ -74,20 +86,20 @@ import type {
   PaymentRequestListParams,
   PaymentUpdateParams,
   Pipeline,
-  ProductCycle,
-  ProductCycleCreateParams,
-  ProductCycleUpdateParams,
-  ProductCycleListParams,
-  ProductCycleUpsertResult,
-  ReportListParams,
-  SavedReport,
-  ReportRunParams,
-  ReportRunResult,
   Product,
   ProductCreateParams,
+  ProductCycle,
+  ProductCycleCreateParams,
+  ProductCycleListParams,
+  ProductCycleUpdateParams,
+  ProductCycleUpsertResult,
   ProductListParams,
   ProductUpdateParams,
   ProductUpsertResult,
+  ReportListParams,
+  ReportRunParams,
+  ReportRunResult,
+  SavedReport,
   SenderProfile,
   SenderProfileListParams,
   SetConsentParams,
@@ -101,8 +113,8 @@ import type {
   TagUpdateParams,
   TemplateSendParams,
   WebhookEndpoint,
-  WebhookEndpointCreateParams,
   WebhookEndpointCreated,
+  WebhookEndpointCreateParams,
 } from "./types";
 
 /** Serialize the shared list params (filter is sent as a JSON string). */
@@ -222,6 +234,20 @@ export class ContactsApi {
     });
   }
 
+  /**
+   * The contact's acquisition touches — one row per submission, newest first,
+   * never a rollup. Requires the `attribution` plan feature (the same gate
+   * that hides `first_touch` / `last_touch` on the contact object).
+   */
+  listAcquisitions(
+    contactId: string,
+    params: AcquisitionListParams = {},
+  ): Promise<Paginated<Acquisition>> {
+    return this.http.request("GET", `/v1/contacts/${contactId}/acquisitions`, {
+      query: { kind: params.kind, limit: params.limit, offset: params.offset },
+    });
+  }
+
   // ── Consent ──
 
   /**
@@ -295,6 +321,86 @@ export class ContactsApi {
 }
 
 // ─────────────────────────────── Tags ───────────────────────────────
+
+/**
+ * Events and their registrations. Every write here fires exactly what the same
+ * action fires inside oToK: the event automations, the
+ * `event.attendance.changed` webhook, lead scoring, and the Zoom registrant
+ * push that produces an attendee's personal join link.
+ *
+ * Requires the `events` plan feature.
+ */
+export class EventsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  list(params: OtokEventListParams = {}): Promise<OffsetPage<OtokEvent>> {
+    return this.http.request("GET", "/v1/events", {
+      query: {
+        q: params.q,
+        external_id: params.external_id,
+        limit: params.limit,
+        offset: params.offset,
+      },
+    });
+  }
+
+  get(id: string): Promise<OtokEvent> {
+    return this.http.request("GET", `/v1/events/${id}`);
+  }
+
+  /**
+   * Create the event, or update the one already carrying this `external_id`
+   * (matched case-insensitively) — so a form can announce its event on every
+   * submission without growing a second copy. `duplicate` tells the outcomes
+   * apart. There is no separate update call: the upsert is the update path.
+   */
+  upsert(params: OtokEventUpsertParams): Promise<OtokEventUpsertResult> {
+    return this.http.request("POST", "/v1/events", { body: params });
+  }
+
+  listAttendances(
+    eventId: string,
+    params: AttendanceListParams = {},
+  ): Promise<OffsetPage<Attendance>> {
+    return this.http.request("GET", `/v1/events/${eventId}/attendances`, {
+      query: {
+        status: params.status,
+        limit: params.limit,
+        offset: params.offset,
+      },
+    });
+  }
+
+  /**
+   * Register a contact for the event, by id or by inline identity.
+   *
+   * Idempotent per (event, contact): re-sending the same status answers the
+   * same registration with `created: false` and fires nothing twice. The
+   * response's `zoom` block reports what this call did with Zoom.
+   */
+  register(
+    eventId: string,
+    params: AttendanceCreateParams,
+  ): Promise<AttendanceResult> {
+    return this.http.request("POST", `/v1/events/${eventId}/attendances`, {
+      body: params,
+    });
+  }
+
+  /**
+   * Move an existing registration (`PATCH /v1/attendances/{id}`) — the same
+   * chokepoint as {@link register}, so marking someone `attended` here fires
+   * what marking them in the app fires.
+   */
+  updateAttendance(
+    attendanceId: string,
+    status: AttendanceStatusInput,
+  ): Promise<AttendanceResult> {
+    return this.http.request("PATCH", `/v1/attendances/${attendanceId}`, {
+      body: { status },
+    });
+  }
+}
 
 export class TagsApi {
   constructor(private readonly http: HttpClient) {}

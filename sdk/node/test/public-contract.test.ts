@@ -59,6 +59,35 @@ describe("public contract additions", () => {
     expect(new URL(String(fetch.mock.calls[0]![0])).pathname).toBe("/api/v1/reports/report-1/run");
   });
 
+  it("upserts an event and registers an attendee with its acquisition", async () => {
+    const { client, fetch } = clientWith(
+      { id: "event-1", external_id: "autumn-2026", duplicate: true },
+      { id: "att-1", created: true, previous_status: null, zoom: { status: "registered", join_url: "https://zoom.test/j/1" } },
+    );
+    const event = await client.events.upsert({ name: "Autumn webinar", external_id: "autumn-2026" });
+    expect(event.duplicate).toBe(true);
+    const register = { contact: { email: "jane@example.com" }, acquisition: { event_id: "webinar-signup-8891" } };
+    const result = await client.events.register(event.id, register);
+    expect([result.created, result.zoom?.status]).toEqual([true, "registered"]);
+    expect(fetch.mock.calls.map(([url, options]) => [new URL(String(url)).pathname, options?.method])).toEqual([
+      ["/api/v1/events", "POST"], ["/api/v1/events/event-1/attendances", "POST"],
+    ]);
+    expect(fetch.mock.calls.map(([, options]) => JSON.parse(options!.body as string))).toEqual([
+      { name: "Autumn webinar", external_id: "autumn-2026" }, register,
+    ]);
+  });
+
+  it("moves an attendance by its own id and lists acquisitions under the contact", async () => {
+    const { client, fetch } = clientWith({ id: "att-1", previous_status: "registered" }, { data: [], total: 0, limit: 50, offset: 0 });
+    expect((await client.events.updateAttendance("att-1", "attended")).previous_status).toBe("registered");
+    await client.contacts.listAcquisitions("contact-1", { kind: "api", limit: 20 });
+    expect(fetch.mock.calls.map(([url, options]) => [new URL(String(url)).pathname, options?.method])).toEqual([
+      ["/api/v1/attendances/att-1", "PATCH"], ["/api/v1/contacts/contact-1/acquisitions", "GET"],
+    ]);
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string)).toEqual({ status: "attended" });
+    expect(Object.fromEntries(new URL(String(fetch.mock.calls[1]![0])).searchParams)).toEqual({ kind: "api", limit: "20" });
+  });
+
   it("paginates report metadata with the report list cap", async () => {
     const { client, fetch } = clientWith({ data: [], total: 0, limit: 100, offset: 3 });
     for await (const report of client.reports.iter({ limit: 500, offset: 3 })) void report;

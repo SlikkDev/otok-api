@@ -1043,3 +1043,149 @@ describe("contact documents", () => {
     expect(err.status).toBe(404);
   });
 });
+
+describe("events", () => {
+  it("list serializes every documented filter", async () => {
+    const fetchMock = vi.fn(async () => json(200, { data: [], limit: 50, offset: 0 }));
+    const otok = makeClient(fetchMock as any);
+    await otok.events.list({
+      q: "webinar",
+      external_id: "autumn-2026",
+      limit: 10,
+      offset: 20,
+    });
+    const [url] = fetchMock.mock.calls[0] as [any];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/api/v1/events");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      q: "webinar",
+      external_id: "autumn-2026",
+      limit: "10",
+      offset: "20",
+    });
+  });
+
+  it("upsert passes the duplicate flag through (external_id matched an event)", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        name: "Autumn webinar",
+        external_id: "autumn-2026",
+      });
+      return json(201, {
+        id: "e-1",
+        name: "Autumn webinar",
+        external_id: "autumn-2026",
+        duplicate: true,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.events.upsert({
+      name: "Autumn webinar",
+      external_id: "autumn-2026",
+    });
+    expect(result.duplicate).toBe(true);
+    expect(result.id).toBe("e-1");
+  });
+
+  it("register posts the inline contact and reports what the call did", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toContain("/api/v1/events/e-1/attendances");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        contact: { email: "jane@example.com", name: "Jane" },
+        acquisition: { event_id: "webinar-signup-8891" },
+      });
+      return json(201, {
+        id: "att-1",
+        event_id: "e-1",
+        contact_id: "c-1",
+        status: "registered",
+        created: true,
+        previous_status: null,
+        zoom: { status: "registered", join_url: "https://zoom.test/j/1" },
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.events.register("e-1", {
+      contact: { email: "jane@example.com", name: "Jane" },
+      acquisition: { event_id: "webinar-signup-8891" },
+    });
+    expect(result.created).toBe(true);
+    expect(result.previous_status).toBeNull();
+    expect(result.zoom?.status).toBe("registered");
+    expect(result.zoom?.join_url).toBe("https://zoom.test/j/1");
+  });
+
+  it("register can opt out of the Zoom push and carry its own join link", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({
+        contact_id: "c-1",
+        zoom_registration: "skip",
+        join_url: "https://zoom.test/j/9",
+      });
+      return json(201, {
+        id: "att-2",
+        status: "registered",
+        created: true,
+        previous_status: null,
+        zoom: { status: "skipped", join_url: "https://zoom.test/j/9" },
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.events.register("e-1", {
+      contact_id: "c-1",
+      zoom_registration: "skip",
+      join_url: "https://zoom.test/j/9",
+    });
+    expect(result.zoom?.status).toBe("skipped");
+  });
+
+  it("updateAttendance patches the attendance by its own id", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toContain("/api/v1/attendances/att-1");
+      expect(init.method).toBe("PATCH");
+      expect(JSON.parse(init.body)).toEqual({ status: "attended" });
+      return json(200, {
+        id: "att-1",
+        status: "attended",
+        created: false,
+        previous_status: "registered",
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.events.updateAttendance("att-1", "attended");
+    expect(result.previous_status).toBe("registered");
+    expect(result.created).toBe(false);
+  });
+
+  it("listAttendances narrows by status", async () => {
+    const fetchMock = vi.fn(async () => json(200, { data: [], limit: 50, offset: 0 }));
+    const otok = makeClient(fetchMock as any);
+    await otok.events.listAttendances("e-1", { status: "waitlist", limit: 5 });
+    const [url] = fetchMock.mock.calls[0] as [any];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/api/v1/events/e-1/attendances");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      status: "waitlist",
+      limit: "5",
+    });
+  });
+});
+
+describe("contact acquisitions", () => {
+  it("lists a contact's touches, narrowed by kind", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { data: [], total: 0, limit: 50, offset: 0 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    await otok.contacts.listAcquisitions("c-1", { kind: "api", limit: 20 });
+    const [url] = fetchMock.mock.calls[0] as [any];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/api/v1/contacts/c-1/acquisitions");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      kind: "api",
+      limit: "20",
+    });
+  });
+});

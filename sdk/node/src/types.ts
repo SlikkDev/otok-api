@@ -57,15 +57,32 @@ export type ContactSource =
   | "api"
   | "form";
 
+/** What produced a touch on the caller's side. Informational: the touch is always
+ *  recorded as having arrived through the API. */
+export type AcquisitionSource = "form" | "widget" | "api" | "import" | "campaign";
+
 /** Submission context for POST /v1/contacts. Reuse event_id when retrying the same submission. */
 export interface ContactAcquisition {
-  /** Required, non-empty, at most 180 characters; deduplicated per contact. */
+  /**
+   * Required, non-empty, at most 180 characters. **Unique per workspace**:
+   * reuse it on retries and the same touch and inquiry are returned, whichever
+   * contact the identifiers resolve to. Use a new id for each genuine
+   * submission — a fixed per-form id would collapse every submission into one.
+   */
   event_id: string;
+  /** A future value is clamped to now. */
   occurred_at?: string;
+  source?: AcquisitionSource;
   /** 8–64 letters, digits, underscores or hyphens. */
   visitor_id?: string;
+  /** First page of the session. */
   landing_url?: string;
+  /** The page that submitted. */
+  conversion_url?: string;
+  /** The referrer. `landing_referrer` is the preferred spelling; both are accepted. */
+  landing_referrer?: string;
   referrer_url?: string;
+  source_page_title?: string;
   utm_source?: string;
   utm_medium?: string;
   utm_campaign?: string;
@@ -80,6 +97,22 @@ export interface ContactAcquisition {
   li_fat_id?: string;
   platform_campaign_id?: string;
   form_name?: string;
+  /** The VISITOR's browser, as your system observed it — never your server's. */
+  user_agent?: string;
+  /** The VISITOR's address, as your system observed it — never your server's. */
+  ip?: string;
+  /**
+   * Raw query parameters to keep with the touch: at most 20 keys × 200 chars.
+   * Canonical keys (the UTM and click-id names above) are stripped. Stored for
+   * reading only — never exported, never sent on a webhook.
+   */
+  params?: Record<string, string>;
+  /**
+   * The event registration this submission produced. Must name a registration
+   * in this workspace belonging to this very contact. Registering through
+   * `events.register` stamps it for you.
+   */
+  attendance_id?: string;
 }
 
 /**
@@ -187,6 +220,15 @@ export interface Contact {
   national_id?: string | null;
   owner_user_id?: string | null;
   owner?: { id: string; name: string | null; email: string | null } | null;
+  /**
+   * The contact's FIRST recorded acquisition, or null when they have no touch.
+   * Present only with the `attribution` plan feature — without it the key is
+   * ABSENT rather than null, which is how you tell "not entitled" from "no
+   * touches yet".
+   */
+  first_touch?: Acquisition | null;
+  /** The most recent acquisition; same shape and same gate as `first_touch`. */
+  last_touch?: Acquisition | null;
   [key: string]: unknown;
 }
 
@@ -1295,7 +1337,7 @@ export interface EventAttendanceChangedEvent {
     attendance_id: string;
     event_id: string;
     contact_id: string;
-    /** `registered` | `attending` | `attended` | `no_show` | `cancelled`. */
+    /** `registered` | `attended` | `no_show` | `waitlist` | `unregistered`. */
     status: string | null;
     previous_status: string | null;
     registered_at: string | null;
@@ -2814,3 +2856,256 @@ export interface ReportTableResult extends ReportResultBase {
 }
 export interface ReportSummaryResult extends ReportResultBase { shape: "summary"; }
 export type ReportRunResult = ReportTableResult | ReportSummaryResult;
+
+/** The transport an acquisition touch arrived through. */
+export type AcquisitionKind =
+  | "web_visit"
+  | "form_submission"
+  | "ctwa_ad"
+  | "email_click"
+  | "campaign_reply"
+  | "import"
+  | "api"
+  | "whatconverts_lead"
+  | "lead_ad"
+  | "legacy";
+
+/**
+ * One submission, exactly as the producer reported it — the per-touch record
+ * behind the in-app Journey.
+ *
+ * `kind` is the transport oToK observed (`api` for anything sent through this
+ * SDK); `source` is what the caller declared produced it. They answer
+ * different questions and are never mapped onto one another.
+ */
+export interface Acquisition {
+  id: string;
+  /** The producer's own submission id (workspace-unique for API touches). */
+  event_id: string | null;
+  kind: AcquisitionKind;
+  source: AcquisitionSource | null;
+  occurred_at: string;
+  visitor_id: string | null;
+  form_name: string | null;
+  /** First page of the session. */
+  landing_url: string | null;
+  /** The page that submitted. Embedded forms report the submitting page for both. */
+  conversion_url: string | null;
+  landing_referrer: string | null;
+  /** Same value as `landing_referrer`; both spellings are returned. */
+  referrer_url: string | null;
+  source_page_title: string | null;
+  utm_source: string | null;
+  utm_medium: string | null;
+  utm_campaign: string | null;
+  utm_term: string | null;
+  utm_content: string | null;
+  gclid: string | null;
+  gbraid: string | null;
+  wbraid: string | null;
+  fbclid: string | null;
+  msclkid: string | null;
+  ttclid: string | null;
+  li_fat_id: string | null;
+  /** Click-to-WhatsApp ad click id. */
+  ctwa_clid: string | null;
+  platform_campaign_id: string | null;
+  /**
+   * Raw query parameters the producer kept, minus the canonical UTM and
+   * click-id keys. Readable here and nowhere else — never exported, never
+   * sent on a webhook.
+   */
+  params: Record<string, string> | null;
+  /** The visitor's, as the producer stated it — never inferred from the request. */
+  user_agent: string | null;
+  /** The visitor's, as the producer stated it — never inferred from the request. */
+  ip: string | null;
+  /** The event registration this submission produced, when there is one. */
+  attendance_id: string | null;
+  form_id: string | null;
+  landing_page_id: string | null;
+  campaign_id: string | null;
+  email_campaign_id: string | null;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+export interface AcquisitionListParams {
+  /** Narrow to one transport. */
+  kind?: AcquisitionKind;
+  /** Page size (default 50, max 200). */
+  limit?: number;
+  /** Rows to skip (default 0). */
+  offset?: number;
+}
+
+/** An event's lifecycle state. */
+export type EventStatus = "draft" | "scheduled" | "canceled" | "completed";
+
+/**
+ * An event. Named `OtokEvent` rather than `Event` so importing it never
+ * shadows the DOM `Event` type in your own files.
+ */
+export interface OtokEvent {
+  id: string;
+  name: string;
+  /** Your own id for the event; per-workspace unique, matched case-insensitively. */
+  external_id: string | null;
+  /**
+   * Read-only. Set by an integration ("zoom") when the event is linked to a
+   * provider meeting — never writable, because it is the key registrants are
+   * pushed against.
+   */
+  external_provider: string | null;
+  start_at: string | null;
+  end_at: string | null;
+  ended_at: string | null;
+  status: EventStatus;
+  timezone: string | null;
+  language: string | null;
+  category: string | null;
+  presenter: string | null;
+  link: string | null;
+  use_personal_links: boolean;
+  product_id: string | null;
+  cycle_id: string | null;
+  suppress_event_automations: boolean;
+  archived_at: string | null;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+export interface OtokEventUpsertParams {
+  name: string;
+  /** Sending one that already exists updates that event and answers `duplicate: true`. */
+  external_id?: string;
+  start_at?: string;
+  end_at?: string;
+  /** Defaults to "scheduled" — an event created over the API is a real one, not a draft. */
+  status?: EventStatus;
+  timezone?: string;
+  language?: string;
+  category?: string;
+  presenter?: string;
+  link?: string;
+  link_password?: string;
+  use_personal_links?: boolean;
+  product_id?: string;
+  cycle_id?: string;
+  suppress_event_automations?: boolean;
+}
+
+export interface OtokEventUpsertResult extends OtokEvent {
+  /** True when `external_id` matched an existing event and this call updated it. */
+  duplicate: boolean;
+}
+
+export interface OtokEventListParams {
+  /** Substring match on the event name. */
+  q?: string;
+  /** Exact, case-insensitive lookup by your own event id. */
+  external_id?: string;
+  /** Page size (default 50, max 500). */
+  limit?: number;
+  /** Rows to skip (default 0). */
+  offset?: number;
+}
+
+/** The stored registration vocabulary, emitted verbatim. */
+export type AttendanceStatus =
+  | "registered"
+  | "attended"
+  | "no_show"
+  | "waitlist"
+  | "unregistered";
+
+/** What a write accepts: the stored values plus `cancelled`, an alias for `unregistered`. */
+export type AttendanceStatusInput = AttendanceStatus | "cancelled";
+
+export interface Attendance {
+  id: string;
+  event_id: string;
+  contact_id: string;
+  status: AttendanceStatus;
+  registered_at: string | null;
+  attended_at: string | null;
+  unregistered_at: string | null;
+  /** The attendee's personal join link, from Zoom or supplied by you. */
+  join_url: string | null;
+  created_at: string;
+  updated_at: string | null;
+  [key: string]: unknown;
+}
+
+/** Identity to upsert when you have no `contact_id`. At least one identifier is required. */
+export interface AttendeeContact {
+  name?: string;
+  email?: string;
+  phone?: string;
+  national_id?: string;
+}
+
+/**
+ * The acquisition object a registration may carry. Identical to a contact
+ * upsert's, minus `attendance_id`: the registration this call creates IS the
+ * link, so the server stamps it and refuses a supplied one.
+ */
+export type AttendanceAcquisition = Omit<ContactAcquisition, "attendance_id">;
+
+export interface AttendanceCreateParams {
+  /** An existing contact. Mutually exclusive with `contact`. */
+  contact_id?: string;
+  /**
+   * Resolved by phone, then email, then national ID — exactly like
+   * `contacts.upsert`, so registering someone who already exists never
+   * creates a second copy of them.
+   */
+  contact?: AttendeeContact;
+  /** Default "registered". `cancelled` is accepted as an alias for `unregistered`. */
+  status?: AttendanceStatusInput;
+  /**
+   * "auto" (default) registers the attendee with Zoom like every in-app
+   * registration does, so their personal join link and the reminders that
+   * carry it work. Use "skip" only when you registered them with Zoom
+   * yourself, and pass the `join_url` you were given.
+   */
+  zoom_registration?: "auto" | "skip";
+  /** Honoured with `zoom_registration: "skip"`; a blank value never clears an existing link. */
+  join_url?: string;
+  /**
+   * How this registration was acquired — recorded as one touch on the
+   * contact's journey, linked to the registration this call creates.
+   * `attendance_id` is stamped for you here (and supplying one is a 400), so
+   * it is omitted from the type.
+   */
+  acquisition?: AttendanceAcquisition;
+}
+
+/** What THIS call did with Zoom. */
+export interface AttendanceZoomOutcome {
+  status: "registered" | "pending" | "failed" | "skipped" | "not_applicable";
+  join_url: string | null;
+}
+
+export interface AttendanceResult extends Attendance {
+  /** True when this call created the registration, false when it moved an existing one. */
+  created: boolean;
+  /** The status it moved from; null when it was created. */
+  previous_status: AttendanceStatus | null;
+  zoom?: AttendanceZoomOutcome;
+}
+
+export interface AttendanceListParams {
+  status?: AttendanceStatusInput;
+  /** Page size (default 50, max 500). */
+  limit?: number;
+  /** Rows to skip (default 0). */
+  offset?: number;
+}
+
+/** A list page that reports no total (events and registrations). */
+export interface OffsetPage<T> {
+  data: T[];
+  limit: number;
+  offset: number;
+}
