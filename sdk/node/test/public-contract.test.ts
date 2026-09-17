@@ -77,6 +77,23 @@ describe("public contract additions", () => {
     ]);
   });
 
+  it("files an event under a saved event and filters the listing by it", async () => {
+    const { client, fetch } = clientWith(
+      { id: "event-2", event_type_id: "et-1", event_type: { id: "et-1", name: "Weekly yoga" }, duplicate: false },
+      { data: [], limit: 50, offset: 0 },
+    );
+    const event = await client.events.upsert({ name: "Weekly yoga — October", event_type_name: "Weekly yoga" });
+    expect(event.event_type).toEqual({ id: "et-1", name: "Weekly yoga" });
+    await client.events.list({ event_type_id: "et-1", limit: 5 });
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string)).toEqual({
+      name: "Weekly yoga — October", event_type_name: "Weekly yoga",
+    });
+    const listUrl = new URL(String(fetch.mock.calls[1]![0]));
+    expect([listUrl.pathname, listUrl.searchParams.get("event_type_id"), listUrl.searchParams.get("limit")]).toEqual([
+      "/api/v1/events", "et-1", "5",
+    ]);
+  });
+
   it("moves an attendance by its own id and lists acquisitions under the contact", async () => {
     const { client, fetch } = clientWith({ id: "att-1", previous_status: "registered" }, { data: [], total: 0, limit: 50, offset: 0 });
     expect((await client.events.updateAttendance("att-1", "attended")).previous_status).toBe("registered");

@@ -435,6 +435,29 @@ result = client.reports.run(report_id, {"page": {"size": 50, "offset": 0}})
 
 [Cycles](../../docs/api/product-cycles.md) support list, iteration, get, create/upsert and update. [Reports](../../docs/api/reports.md) support list, iteration and run; only shared, unarchived reports are available, and runs use workspace-wide data. Product scheduling fields, deal `cycle_id` and payment-request `terminal_number` are typed.
 
+## Saved events (v0.11.0)
+
+An event can be filed under a **saved event** — a reusable event definition
+managed in the oToK app (Events → Saved events) — so it shows on that saved
+event's page, counts in its statistics and matches automations scoped to it.
+Name it by `event_type_id`, or by `event_type_name` when you only know the name
+(exact match, case-insensitive). The API only links: it never creates a saved
+event (an unknown one answers 400 `event_type_not_found`), and the saved
+event's defaults are not applied — send the fields you want.
+
+```python
+event = client.events.upsert(
+    {
+        "name": "Weekly yoga — October",
+        "external_id": "yoga-2026-10",
+        "event_type_name": "Weekly yoga",
+        "start_at": "2026-10-06T18:00:00Z",
+    }
+)
+# event["event_type"]: {"id": "…", "name": "Weekly yoga"}; None when not created from one
+october = client.events.list({"event_type_id": event["event_type_id"]})
+```
+
 ## Events, attendances and acquisition history (v0.10.0)
 
 Events are now first-class. `client.events.upsert` is idempotent on

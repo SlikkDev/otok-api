@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.8.0"
+  version: "1.9.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
@@ -117,6 +117,15 @@ info:
     `GET /v1/orders?external_reference=...`); the order **refund** endpoint does return
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
     `POST /v1/emails`, which answers 201 fresh / 200 replay.
+
+    ## Changes in 1.9.0
+
+    - Events: `event_type_id` and `event_type_name` on `POST /v1/events` link the event to a
+      **saved event** — a reusable event definition managed in the oToK app (Events → Saved
+      events). Resolve-only: the API never creates a saved event. An unknown id or name
+      answers 400 `event_type_not_found`; an id and a name that disagree answer 400
+      `event_type_mismatch`. The event object carries `event_type_id` and an `event_type`
+      block (`{id, name}`, or `null`), and `GET /v1/events` filters on `event_type_id`.
 
     ## Changes in 1.8.0
 
@@ -566,6 +575,13 @@ paths:
           description: Exact, case-insensitive lookup by your own event id.
           schema:
             type: string
+        - name: event_type_id
+          in: query
+          required: false
+          description: Only events created from this saved event. Non-UUID values answer 400.
+          schema:
+            type: string
+            format: uuid
         - name: limit
           in: query
           required: false
@@ -600,6 +616,11 @@ paths:
         case-insensitively) and answers `duplicate: true` — so a form can announce its
         event on every submission without growing a second copy. There is no
         `PATCH /v1/events/{id}`: the upsert is the update path.
+
+        `event_type_id` or `event_type_name` files the event under an existing **saved
+        event** (resolve-only — never created here): an unknown one answers 400
+        `event_type_not_found`, an id and a name that disagree answer 400
+        `event_type_mismatch`.
 
         **Requires the `events` plan feature.**
       requestBody:
@@ -8015,6 +8036,19 @@ components:
         cycle_id:
           type: [string, "null"]
           format: uuid
+        event_type_id:
+          type: [string, "null"]
+          format: uuid
+          description: The saved event this event was created from, when any.
+        event_type:
+          type: [object, "null"]
+          description: The saved event this event was created from — `null` when it was not created from one.
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
         suppress_event_automations:
           type: boolean
         archived_at:
@@ -8075,6 +8109,22 @@ components:
         cycle_id:
           type: string
           format: uuid
+        event_type_id:
+          type: string
+          format: uuid
+          description: >-
+            The saved event (Events → Saved events in the oToK app) this event is created
+            from, by id. Links only: the API never creates a saved event, and the saved
+            event's defaults are not applied here — send the fields you want. An unknown
+            id answers 400 `event_type_not_found`.
+        event_type_name:
+          type: string
+          maxLength: 200
+          description: >-
+            The saved event by its exact name instead of its id (matched case-insensitively,
+            whitespace trimmed). An unknown name answers 400 `event_type_not_found` — nothing
+            is created. With `event_type_id` too, both must name the same saved event
+            (400 `event_type_mismatch`).
         suppress_event_automations:
           type: boolean
     EventUpsertResult:

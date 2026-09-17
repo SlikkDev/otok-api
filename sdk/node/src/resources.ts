@@ -338,6 +338,7 @@ export class EventsApi {
       query: {
         q: params.q,
         external_id: params.external_id,
+        event_type_id: params.event_type_id,
         limit: params.limit,
         offset: params.offset,
       },
