@@ -21,6 +21,8 @@ Events and their registrations. Create the event your form or system knows about
 | `link` | string or `null` | Join link shared by every attendee |
 | `use_personal_links` | boolean | Each attendee gets their own join link instead of the shared one |
 | `product_id` / `cycle_id` | UUID or `null` | |
+| `event_type_id` | UUID or `null` | The saved event this event was created from |
+| `event_type` | object or `null` | `{ "id", "name" }` of that saved event — `null` when the event was not created from one |
 | `suppress_event_automations` | boolean | Stops every automation for this event, reminders included |
 | `archived_at` | ISO 8601 or `null` | Archived events are never written to |
 | `created_at` | ISO 8601 | |
@@ -46,6 +48,7 @@ Events and their registrations. Create the event your form or system knows about
 |---|---|---|
 | `q` | string (query) | Substring match on the event name |
 | `external_id` | string (query) | Exact, case-insensitive lookup by your own id |
+| `event_type_id` | UUID (query) | Only events created from this saved event. A non-UUID value → 400 |
 | `limit` | integer (query) | Page size, default 50, max 500 |
 | `offset` | integer (query) | Rows to skip, default 0 |
 
@@ -75,6 +78,8 @@ Creates an event, or updates the one already carrying this `external_id`.
 | `link` | string | ≤2000 chars |
 | `use_personal_links` | boolean | |
 | `product_id` / `cycle_id` | UUID | |
+| `event_type_id` | UUID | The saved event to file this event under. See [Saved events](#saved-events) |
+| `event_type_name` | string | ≤200 chars. The same saved event by its exact name (case-insensitive, whitespace trimmed) — for callers that don't hold the id |
 | `suppress_event_automations` | boolean | |
 
 `external_provider` is not writable. It is how oToK knows a meeting belongs to a connected Zoom account, and a caller claiming it would make us push registrants at a meeting nobody owns.
@@ -89,6 +94,29 @@ curl -X POST "https://app.otok.io/api/v1/events" \
 Response `200`: the event object plus `"duplicate": true | false`.
 
 **Idempotency.** Send the same `external_id` on every submission. The first call creates the event; the rest update it. There is no `PATCH /v1/events/:id` — the upsert *is* the update path.
+
+### Saved events
+
+A **saved event** is a reusable event definition managed in the oToK app (Events → Saved events): a name plus a template of event-form defaults. Filing an event under one — by `event_type_id`, or by `event_type_name` when you only know the name — makes it show on that saved event's page, count in its statistics, and match automations scoped to it.
+
+- **Resolve-only.** The API never creates a saved event, so a typo can't spawn a definition: an unknown id or name is refused. Archived saved events still resolve, so an integration keeps working until you re-point it.
+- **The template is not applied.** Linking records where the event came from; send the fields you want on the event yourself.
+- **Both keys together** must name the same saved event.
+- On the `external_id` update path, sending neither key leaves the existing link untouched.
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `event_type_not_found` | No saved event in this workspace has that id / name |
+| 400 | `event_type_mismatch` | `event_type_id` and `event_type_name` name different saved events |
+
+```bash
+curl -X POST "https://app.otok.io/api/v1/events" \
+  -H "Authorization: Bearer otok_live_abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Weekly yoga — October","external_id":"yoga-2026-10","event_type_name":"Weekly yoga","start_at":"2026-10-06T18:00:00Z"}'
+```
+
+Response `200`: the event object with `"event_type": { "id": "…", "name": "Weekly yoga" }`.
 
 ---
 

@@ -24,6 +24,12 @@ export const eventUpsert: OtokEventUpsertParams = {
   external_id: "autumn-2026",
   status: "scheduled",
 };
+// A saved event is named by id or by its exact name — both are optional, never created.
+export const eventFromSavedEvent: OtokEventUpsertParams = {
+  name: "Weekly yoga — October",
+  event_type_id: "et-1",
+  event_type_name: "Weekly yoga",
+};
 export const registerByContact: AttendanceCreateParams = { contact_id: "c-1" };
 export const registerInline: AttendanceCreateParams = {
   contact: { email: "jane@example.com" },

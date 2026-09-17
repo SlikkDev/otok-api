@@ -424,6 +424,27 @@ const result = await otok.reports.run(reportId, { page: { size: 50, offset: 0 } 
 
 SDK development checks require Node.js 20.19 or newer for the JavaScript test runner.
 
+## Saved events (v0.11.0)
+
+An event can be filed under a **saved event** — a reusable event definition
+managed in the oToK app (Events → Saved events) — so it shows on that saved
+event's page, counts in its statistics and matches automations scoped to it.
+Name it by `event_type_id`, or by `event_type_name` when you only know the name
+(exact match, case-insensitive). The API only links: it never creates a saved
+event (an unknown one answers 400 `event_type_not_found`), and the saved
+event's defaults are not applied — send the fields you want.
+
+```ts
+const event = await otok.events.upsert({
+  name: "Weekly yoga — October",
+  external_id: "yoga-2026-10",
+  event_type_name: "Weekly yoga",
+  start_at: "2026-10-06T18:00:00Z",
+});
+// event.event_type → { id: "…", name: "Weekly yoga" }; null when not created from one
+const october = await otok.events.list({ event_type_id: event.event_type_id! });
+```
+
 ## Events, attendances and acquisition history (v0.10.0)
 
 Events are now first-class. `otok.events.upsert` is idempotent on `external_id`

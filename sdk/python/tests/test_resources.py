@@ -2308,6 +2308,36 @@ class TestEvents:
         assert urlsplit(request.url).path == "/api/v1/events/e-1/attendances"
         assert query_of(request) == {"status": ["waitlist"], "limit": ["5"]}
 
+    def test_upsert_names_a_saved_event_verbatim_and_reads_its_block(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "e-2",
+                    "event_type_id": "et-1",
+                    "event_type": {"id": "et-1", "name": "Weekly yoga"},
+                    "duplicate": False,
+                },
+            )
+        )
+        event = client.events.upsert(
+            {"name": "Weekly yoga — October", "event_type_name": "Weekly yoga"}
+        )
+        assert transport.request_body() == {
+            "name": "Weekly yoga — October",
+            "event_type_name": "Weekly yoga",
+        }
+        assert event["event_type"] == {"id": "et-1", "name": "Weekly yoga"}
+
+    def test_list_narrows_by_saved_event(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "limit": 50, "offset": 0})
+        )
+        client.events.list({"event_type_id": "et-1", "limit": 5})
+        request = last_request(transport)
+        assert urlsplit(request.url).path == "/api/v1/events"
+        assert query_of(request) == {"event_type_id": ["et-1"], "limit": ["5"]}
+
 
 class TestContactAcquisitions:
     def test_lists_touches_narrowed_by_kind(self) -> None:

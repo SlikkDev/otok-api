@@ -2969,6 +2969,13 @@ export interface OtokEvent {
   use_personal_links: boolean;
   product_id: string | null;
   cycle_id: string | null;
+  /** The saved event this event was created from, when any. */
+  event_type_id: string | null;
+  /**
+   * The saved event this event was created from — `null` when it was not
+   * created from one.
+   */
+  event_type: { id: string; name: string | null } | null;
   suppress_event_automations: boolean;
   archived_at: string | null;
   created_at: string;
@@ -2992,6 +2999,20 @@ export interface OtokEventUpsertParams {
   use_personal_links?: boolean;
   product_id?: string;
   cycle_id?: string;
+  /**
+   * The saved event (Events → Saved events in the oToK app) to file this
+   * event under, by id. Resolve-only: the API never creates a saved event,
+   * and the saved event's defaults are not applied — send the fields you
+   * want. An unknown id answers 400 `event_type_not_found`.
+   */
+  event_type_id?: string;
+  /**
+   * The same saved event by its exact name (case-insensitive, whitespace
+   * trimmed), for callers that don't hold the id. An unknown name answers
+   * 400 `event_type_not_found`; with `event_type_id` too, both must name the
+   * same saved event (400 `event_type_mismatch`).
+   */
+  event_type_name?: string;
   suppress_event_automations?: boolean;
 }
 
@@ -3005,6 +3026,8 @@ export interface OtokEventListParams {
   q?: string;
   /** Exact, case-insensitive lookup by your own event id. */
   external_id?: string;
+  /** Only events created from this saved event. */
+  event_type_id?: string;
   /** Page size (default 50, max 500). */
   limit?: number;
   /** Rows to skip (default 0). */

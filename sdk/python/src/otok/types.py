@@ -2442,8 +2442,9 @@ class AcquisitionListParams(TypedDict, total=False):
 EventStatus = Literal["draft", "scheduled", "canceled", "completed"]
 
 #: Event record as returned by the API. ``external_provider`` is read-only:
-#: it is how oToK knows a meeting belongs to a connected Zoom account. Open —
-#: servers may add fields.
+#: it is how oToK knows a meeting belongs to a connected Zoom account.
+#: ``event_type`` is the saved event the event was created from
+#: (``{"id", "name"}``), or ``None``. Open — servers may add fields.
 Event = dict[str, Any]
 
 
@@ -2473,6 +2474,16 @@ class EventUpsertParams(_EventUpsertRequired, total=False):
     use_personal_links: bool
     product_id: str
     cycle_id: str
+    #: The saved event (Events → Saved events in the oToK app) to file this
+    #: event under, by id. Resolve-only: the API never creates a saved event,
+    #: and the saved event's defaults are not applied — send the fields you
+    #: want. An unknown id answers 400 ``event_type_not_found``.
+    event_type_id: str
+    #: The same saved event by its exact name (case-insensitive, whitespace
+    #: trimmed), for callers that don't hold the id. An unknown name answers
+    #: 400 ``event_type_not_found``; with ``event_type_id`` too, both must
+    #: name the same saved event (400 ``event_type_mismatch``).
+    event_type_name: str
     suppress_event_automations: bool
 
 
@@ -2483,6 +2494,8 @@ class EventListParams(TypedDict, total=False):
     q: str
     #: Exact, case-insensitive lookup by your own event id.
     external_id: str
+    #: Only events created from this saved event.
+    event_type_id: str
     limit: int
     offset: int
 
