@@ -23,21 +23,21 @@ Start with **[Getting Started](getting-started.md)** — authentication, error e
 | [Product cycles](product-cycles.md) | Cohorts, runs and versions: upsert, scheduling, capacity and archiving |
 | [Shared reports](reports.md) | List and run shared saved reports |
 | [Events](events.md) | Events and registrations: idempotent event upsert, filing under a saved event, register by contact id or inline identity, Zoom push, roster moves |
-| [Payments](payments.md) | One-time / recurring / installment payments, entries, refunds, VAT, metadata |
-| [Payment Requests](payment-requests.md) | Hosted pay-links through the workspace's own provider: mint, list, cancel |
+| [Payments](payments.md) | One-time / recurring / installment payments, entries, refunds (through the gateway or recorded), VAT, metadata, funding a sale |
+| [Payment Requests](payment-requests.md) | Hosted pay-links through the workspace's own provider: mint (idempotent with a key), list, cancel, send by email/WhatsApp/SMS, issue the tax document, refund |
 | [Orders](orders.md) | E-commerce orders: line items, refunds, mark-paid/cancel, idempotent upsert |
 | [Transactional Emails](emails.md) | `POST /v1/emails`: idempotent raw sends, tracking opt-in |
 | [Email Campaigns](email-campaigns.md) | Broadcast email campaigns: the shared content contract (markdown / blocks / design_json), compile feedback, estimate, send/schedule lifecycle, idempotent upsert |
 | [Newsletters](newsletters.md) | Smart newsletters and their sequenced issues: idempotent issue upsert, publish-time numbering, publish/schedule lifecycle |
 | [Consent & Suppressions](consent-and-suppressions.md) | Per-channel consent read/write on contacts + the email suppression list — two independent layers that compose at send time |
-| [Webhooks](webhooks.md) | Nine event families — email, order, payment-request, contact, message, deal, booking, attendance, form: registration, signatures, retries |
+| [Webhooks](webhooks.md) | Ten event families — email, order, payment-request, payment, contact, message, deal, booking, attendance, form: registration, signatures, retries |
 | [Bookings & Meeting Types](bookings.md) | Availability slots, booking lifecycle, host reassignment |
 
 ## Endpoint summary
 
 | Resource | Endpoints |
 |---|---|
-| **Contacts** | `GET /v1/contacts` · `GET /v1/contacts/:id` · `POST /v1/contacts` (upsert) · `PATCH /v1/contacts/:id` · `GET /v1/contacts/:id/documents` |
+| **Contacts** | `GET /v1/contacts` · `GET /v1/contacts/:id` · `POST /v1/contacts` (upsert) · `PATCH /v1/contacts/:id` · `GET /v1/contacts/:id/documents` · `GET /v1/contacts/:id/payment-methods` · `POST /v1/contacts/:id/charges` |
 | **Contact consent** | `GET /v1/contacts/:id/consent` · `PUT /v1/contacts/:id/consent/:channel` |
 | **Contact notes** | `GET /v1/contacts/:id/notes` · `POST /v1/contacts/:id/notes` · `PATCH /v1/notes/:id` · `DELETE /v1/notes/:id` |
 | **Tags** | `GET /v1/tags` · `GET /v1/tags/:id` · `POST /v1/tags` · `PATCH /v1/tags/:id` |
@@ -48,7 +48,7 @@ Start with **[Getting Started](getting-started.md)** — authentication, error e
 | **Deals** | `GET /v1/deals` · `GET /v1/deals/:id` · `POST /v1/deals` (upsert) · `PATCH /v1/deals/:id` · `POST /v1/deals/:id/stage` · `POST /v1/deals/:id/status` |
 | **Products** | `GET /v1/products` · `GET /v1/products/:id` · `POST /v1/products` (upsert) · `PATCH /v1/products/:id` |
 | **Payments** | `GET /v1/payments` · `GET /v1/payments/:id` · `POST /v1/payments` (upsert) · `PATCH /v1/payments/:id` · `POST /v1/payments/:id/cancel` · `POST /v1/payments/:id/entries/:entryId/mark` · `POST /v1/payments/:id/refund` |
-| **Payment requests** | `GET /v1/payment-requests` · `GET /v1/payment-requests/:id` · `POST /v1/payment-requests` (**not** idempotent) · `POST /v1/payment-requests/:id/cancel` |
+| **Payment requests** | `GET /v1/payment-requests` · `GET /v1/payment-requests/:id` · `POST /v1/payment-requests` (idempotent with `idempotency_key`) · `POST /v1/payment-requests/:id/cancel` · `POST /v1/payment-requests/:id/send-link` · `POST /v1/payment-requests/:id/document` · `POST /v1/payment-requests/:id/refund` |
 | **Orders** | `GET /v1/orders` · `GET /v1/orders/:id` · `POST /v1/orders` (upsert) · `POST /v1/orders/:id/refunds` · `POST /v1/orders/:id/mark-paid` · `POST /v1/orders/:id/cancel` |
 | **Product cycles** | `GET/POST /v1/products/:productId/cycles` · `GET/PATCH /v1/product-cycles/:id` |
 | **Reports** | `GET /v1/reports` · `POST /v1/reports/:id/run` |
@@ -68,5 +68,5 @@ Start with **[Getting Started](getting-started.md)** — authentication, error e
 - **Errors:** two body shapes — a structured `{"error": {"code", "message"}}` envelope on the email/email-campaign/newsletter/webhook/consent/suppression/product APIs (and the campaign execute route), and the standard `{"statusCode", "message", "error"}` shape elsewhere, sometimes extended with an `error_code` field. See [error responses](getting-started.md#error-responses).
 - **Pagination:** `{ "data", "total", "limit", "offset" }` — default limit 50 (cap 500) on most lists; deals, payments, payment requests, orders, and the email-campaign/newsletter lists use default 25 (cap 100). All of those except orders reject malformed `limit`/`offset` with 400; orders silently defaults/clamps them instead. The email-campaign and newsletter-issue lists reject an unknown `status` value with 400.
 - **Rate limits:** 100 requests/min per key (300/min for `POST /v1/emails`); HTTP 429 with `Retry-After` on excess.
-- **Idempotency:** contacts upsert by phone/email/national ID; deals, payments, orders, email campaigns, and newsletter issues upsert by `external_reference` (a campaign/issue replay updates content/fields while the record is still editable and never touches `status`, `scheduled_at`, or an issue's number); products upsert by `external_id`; cycles by case-insensitive name within a product; order refunds by `external_refund_id`; suppression adds are idempotent per address; emails require an explicit `idempotency_key`; booking creation is idempotent per slot+contact. Idempotent create responses carry a top-level boolean `duplicate` (`false` on a fresh create, `true` on an upsert/replay) — **except `POST /v1/orders`**, which returns the same full-order body for both outcomes with no `duplicate` field (see [Orders](orders.md#post-apiv1orders)). **`POST /v1/payment-requests` is not idempotent at all** — a repeat POST mints a second payable link (see [Payment Requests](payment-requests.md)).
+- **Idempotency:** contacts upsert by phone/email/national ID; deals, payments, orders, email campaigns, and newsletter issues upsert by `external_reference` (a campaign/issue replay updates content/fields while the record is still editable and never touches `status`, `scheduled_at`, or an issue's number); products upsert by `external_id`; cycles by case-insensitive name within a product; order refunds by `external_refund_id`; suppression adds are idempotent per address; emails and saved-card charges require an explicit `idempotency_key`; payment requests and payment refunds accept an optional one; booking creation is idempotent per slot+contact. Idempotent create responses carry a top-level boolean `duplicate` (`false` on a fresh create, `true` on an upsert/replay) — **except `POST /v1/orders`**, which returns the same full-order body for both outcomes with no `duplicate` field (see [Orders](orders.md#post-apiv1orders)). **A `POST /v1/payment-requests` without `idempotency_key` is not idempotent** — a repeat POST mints a second payable link (see [Payment Requests](payment-requests.md)).
 - **Deletion:** the API never deletes customer data — contacts, deals, products, payments, orders, campaigns, tags, and contact groups have no DELETE routes (archive a product with `manual_status: "archived"`). Only API-owned resources can be deleted: notes (`DELETE /v1/notes/:id`), webhook endpoints (`DELETE /v1/webhook-endpoints/:id`), suppressions (`DELETE /v1/suppressions/:id` — lifts a send-time block; deletes no contact data, resubscribes no one), and never-published newsletter issues (`DELETE /v1/newsletter-issues/:id` — published issues are never deletable).

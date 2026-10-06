@@ -57,3 +57,15 @@ export const stampedLink: AttendanceCreateParams = {
     attendance_id: "att-1",
   },
 };
+
+// ── Refunds + saved-card charges ──
+import type { PaymentRefundParams, SavedCardChargeParams } from "../src";
+
+export const refundParams: PaymentRefundParams = { reason: "requested_by_customer", mode: "auto" };
+// @ts-expect-error A refund must say why and how.
+export const refundWithoutMode: PaymentRefundParams = { reason: "other" };
+// @ts-expect-error System reasons cannot be sent.
+export const refundSystemReason: PaymentRefundParams = { reason: "legacy_mark", mode: "auto" };
+export const chargeParams: SavedCardChargeParams = { idempotency_key: "charge-0001", amount: 250 };
+// @ts-expect-error A saved-card charge always carries an idempotency key.
+export const chargeWithoutKey: SavedCardChargeParams = { amount: 250 };

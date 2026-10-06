@@ -210,6 +210,8 @@ Order lifecycle events — `order.created`, `order.paid`, `order.refunded`, `ord
 
 Payment-request lifecycle events — `payment_request.created`, `payment_request.paid`, `payment_request.expired`, `payment_request.cancelled` — are opt-in by listing too (`PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES`). They fire for hosted pay-links from every mint source (API and in-app), never for direct saved-card charges or internal dunning-recovery links. Payloads follow the order-event conventions (full field set, explicit `null`s); `data["test_mode"]` is always present — check it before recording revenue, and treat a late `payment_request.paid` after a cancel as authoritative.
 
+`payment.refunded` (`PAYMENT_WEBHOOK_EVENT_TYPES`, opt-in by listing) fires once per refund recorded on a payment, from every source — the refund routes, order refunds, in-app refunds, connected stores and refunds made in the payment provider's dashboard. `data["refund"]["amount"]` is positive; `data["refund"]["recorded_outside"]` says whether the money moved through the gateway.
+
 Events are POSTed with an `X-Otok-Signature: t=<unix>,v1=<hex>` header (HMAC-SHA256 of `"{t}.{body}"` with your secret). Failed deliveries retry for ≈16 hours. **Always verify against the raw request body** — parsing and re-serializing changes the bytes.
 
 #### Flask
@@ -296,7 +298,7 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 | Namespace | Endpoints |
 |---|---|
-| `client.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id`; acquisitions: `GET /v1/contacts/:id/acquisitions` (Attribution feature) |
+| `client.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); saved cards: `GET /v1/contacts/:id/payment-methods`, `POST /v1/contacts/:id/charges` (`workspace_payments` feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id`; acquisitions: `GET /v1/contacts/:id/acquisitions` (Attribution feature) |
 | `client.tags` | `GET/POST /v1/tags`, `GET/PATCH /v1/tags/:id` |
 | `client.contact_groups` | `GET/POST /v1/contact-groups`, `GET/PATCH /v1/contact-groups/:id` |
 | `client.pipelines` | `GET /v1/pipelines` (with ordered stages) |
@@ -312,7 +314,7 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 | `client.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
 | `client.events` | `GET/POST /v1/events`, `GET /v1/events/:id` (POST = idempotent upsert by `external_id`); attendances: `GET/POST /v1/events/:id/attendances`, `PATCH /v1/attendances/:id` |
 | `client.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
-| `client.payment_requests` | `GET/POST /v1/payment-requests`, `GET /v1/payment-requests/:id`, `POST …/cancel` — hosted pay-links (`workspace_payments` feature; create is **not** idempotent) |
+| `client.payment_requests` | `GET/POST /v1/payment-requests`, `GET /v1/payment-requests/:id`, `POST …/cancel`, `POST …/send-link`, `POST …/document`, `POST …/refund` — hosted pay-links (`workspace_payments` feature; create is idempotent only with `idempotency_key`) |
 | `client.orders` | `GET/POST /v1/orders`, `GET /v1/orders/:id`, `POST …/refunds`, `POST …/mark-paid`, `POST …/cancel` |
 | `client.meeting_types` | `GET /v1/meeting-types`, `GET /v1/meeting-types/:id`, `GET /v1/meeting-types/:id/slots`, `GET /v1/meeting-types/:id/embed` |
 | `client.bookings` | `GET/POST /v1/bookings`, `GET /v1/bookings/:id`, `POST …/cancel`, `POST …/reschedule`, `POST …/reassign` |
@@ -336,9 +338,9 @@ Every namespace with a paginated `list()` (contacts, tags, contact groups, deals
 - `429` and `5xx` responses are retried up to `max_retries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header (both delta-seconds and HTTP-date forms). This applies to **all** requests: the server answered, so the retry semantics are unchanged from v0.1.
 - **Transient network errors are retried too — but only when replaying is safe.** Connection resets/refusals (`ConnectionError`), DNS failures (`socket.gaierror`), socket timeouts (`TimeoutError`, and the SDK's own `OtokTimeoutError`) — raised directly or wrapped in a `urllib.error.URLError` — share the same bounded backoff schedule (`max_retries`, exponential + full jitter) **if and only if** the request is:
   - a **safe method** (`GET`/`HEAD`), or
-  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`client.emails.send`), `external_reference` (`client.deals.create`, `client.payments.create`, `client.orders.create`, `client.email_campaigns.create`, `client.newsletters.create_issue`), or `external_refund_id` (`client.orders.create_refund`).
+  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`client.emails.send`, `client.payment_requests.create`, `client.contacts.charge_saved_card`, the refund calls), `external_reference` (`client.deals.create`, `client.payments.create`, `client.orders.create`, `client.email_campaigns.create`, `client.newsletters.create_issue`), or `external_refund_id` (`client.orders.create_refund`).
 
-  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, ...) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is raised for you to handle. In particular, **`client.payment_requests.create` is never auto-retried**: the endpoint has no idempotency key at all, and a replay would mint a second, independently payable link — check `client.payment_requests.list()` before minting again after a failure. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `client.commerce.track_order`) or retry at the call site.
+  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, ...) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is raised for you to handle. In particular, **`client.payment_requests.create` without an `idempotency_key` is never auto-retried**: a replay would mint a second, independently payable link — send a key, or check `client.payment_requests.list()` before minting again after a failure. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `client.commerce.track_order`) or retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
 
 ```python
@@ -434,6 +436,40 @@ result = client.reports.run(report_id, {"page": {"size": 50, "offset": 0}})
 ```
 
 [Cycles](../../docs/api/product-cycles.md) support list, iteration, get, create/upsert and update. [Reports](../../docs/api/reports.md) support list, iteration and run; only shared, unarchived reports are available, and runs use workspace-wide data. Product scheduling fields, deal `cycle_id` and payment-request `terminal_number` are typed.
+
+## Refunds, pay-link delivery and saved cards
+
+Refunds take a required `reason` and `mode` (`"auto"` refunds a provider-collected charge through the payment gateway; `"recorded_outside"` books it only) and need an API key with refund access, granted by the workspace owner. An `idempotency_key` makes a retry safe:
+
+```python
+result = client.payments.refund(
+    payment_id,
+    {
+        "reason": "requested_by_customer",
+        "mode": "auto",
+        "amount": 100,
+        "idempotency_key": "refund-88123-1",
+    },
+)
+result["outcome"]  # "gateway_refunded", "voided", "credit_document_only", "recorded_outside", ...
+client.payment_requests.refund(request_id, {"reason": "duplicate", "mode": "auto"})
+```
+
+Pay-links can be sent and documented from the API, and saved cards charged with a required idempotency key (the API key needs saved-card charge access, off by default):
+
+```python
+client.payment_requests.send_link(request_id, {"channel": "whatsapp"})
+client.payment_requests.issue_document(request_id)
+cards = client.contacts.list_payment_methods(contact_id)["payment_methods"]
+charge = client.contacts.charge_saved_card(
+    contact_id,
+    {"idempotency_key": "charge-0001", "amount": 250, "method_id": cards[0]["id"]},
+)
+if charge.get("outcome") == "processing":
+    ...  # HTTP 202 — poll client.payment_requests.get(charge["payment_request_id"])
+```
+
+Payments, payment requests and orders accept `sale_id` to fund an existing sale. See [Payments](../../docs/api/payments.md), [Payment requests](../../docs/api/payment-requests.md) and [Contacts](../../docs/api/contacts.md#saved-cards-and-charges).
 
 ## Saved events (v0.11.0)
 

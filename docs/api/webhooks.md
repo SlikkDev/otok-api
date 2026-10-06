@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
+| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `payment.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -117,7 +117,17 @@ Four [payment-request](payment-requests.md) (pay-link) lifecycle events, mirrori
 | `payment_request.expired` | opt-in | A pending link passed `expires_at` unpaid (from the expiry sweep, or lazily when the expired link is opened) |
 | `payment_request.cancelled` | opt-in | The link was withdrawn — `POST /v1/payment-requests/:id/cancel` or an in-app cancel. A later `payment_request.paid` for the same request supersedes this event (late completion) |
 
-**Hosted pay-links only:** direct saved-card charges (`charge_kind: "token"`) and internal dunning-recovery links never emit `payment_request.*` events — the event stream is exactly the payer-facing links.
+**Hosted pay-links only:** direct saved-card charges (`charge_kind: "token"`, including those made through [`POST /v1/contacts/:id/charges`](contacts.md#post-apiv1contactsidcharges)), save-card-only links and internal dunning-recovery links never emit `payment_request.*` events — the event stream is exactly the payer-facing links that collect money.
+
+### Payment events
+
+One [payment](payments.md) ledger event. It is **opt-in**: delivered only to endpoints that list it explicitly in `events`.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `payment.refunded` | opt-in | A refund entry was recorded on a payment — from **any** source: `POST /v1/payments/:id/refund`, `POST /v1/payment-requests/:id/refund`, an [order refund](orders.md#post-apiv1ordersidrefunds) mirrored into its payment, marking a charge `refunded`, an in-app refund, a refund made in a connected store, or a refund made directly in the payment provider's dashboard that oToK picked up. `data.refund.recorded_outside` says whether the money moved through the gateway |
+
+One event per refund entry. A **pending reversal** (the provider issued the credit document but the money is still to be returned) is silent until it settles, and fires then. A refund that was first booked as returned outside oToK and later matched to the provider's own refund does not fire a second time — the money moved once.
 
 ### Contact events
 
@@ -305,6 +315,7 @@ Unlike email events, order event `data` always carries the full field set — ab
     "status": "paid",
     "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
     "deal_id": null,
+    "sale_id": null,
     "provider": "sumit",
     "amount": 250,
     "currency": "ILS",
@@ -313,6 +324,7 @@ Unlike email events, order event `data` always carries the full field set — ab
     "vat_rate": 18,
     "test_mode": false,
     "pay_url": "https://app.otok.io/pay/pr_k3J9…",
+    "channel": "whatsapp",
     "contact_payment_id": "7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d",
     "expires_at": "2026-07-18T09:00:00.000Z",
     "paid_at": "2026-07-15T11:20:00.000Z",
@@ -329,16 +341,69 @@ All four payment-request events carry the same `data` fields (a snapshot of the 
 | `data.payment_request_id` | The payment request's `id` |
 | `data.status` | Status at event time — `pending` on `payment_request.created`; `paid` / `expired` / `cancelled` on the terminal events |
 | `data.contact_id` / `data.deal_id` | The payer contact; the bound deal (or `null`) |
+| `data.sale_id` | The [sale](sales.md) the link collects for, or `null` |
 | `data.provider` | `cardcom` / `sumit` |
 | `data.amount` / `data.currency` | **JSON number** in the request's currency |
 | `data.title` | Payer-facing charge title, or `null` |
 | `data.vat_mode` / `data.vat_rate` | The request's stamped VAT posture, or `null`s on pre-VAT rows |
 | `data.test_mode` | **Always present.** `true` = authorise-only test request — never real money |
 | `data.pay_url` | The same hosted pay-link URL the API/app expose |
+| `data.channel` | The first channel oToK delivered the link on — `email`, `whatsapp`, `sms` — or `null` when it was never sent by oToK |
 | `data.contact_payment_id` | The settled [payment](payments.md) ledger row — set once paid, else `null` |
 | `data.expires_at` / `data.paid_at` / `data.cancelled_at` / `data.created_at` | ISO 8601 UTC, or `null` |
 
 Provider correlation references and internal row metadata are deliberately excluded from the payload — read `GET /v1/payment-requests/:id` when you need them.
+
+### Payment event `data`
+
+```json
+{
+  "id": "d4e5f607-1829-304a-5b6c-7d8e9f0a1b2c",
+  "type": "payment.refunded",
+  "created_at": "2026-07-16T08:05:00.000Z",
+  "data": {
+    "payment": {
+      "id": "7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d",
+      "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "title": "Onboarding session",
+      "total_amount": 350,
+      "currency": "ILS",
+      "arrangement_status": "completed",
+      "external_reference": "shop-order-88123"
+    },
+    "refund": {
+      "entry_id": "f2e3d4c5-b6a7-4890-8123-456789abcdef",
+      "amount": 100,
+      "currency": "ILS",
+      "reason": "requested_by_customer",
+      "note": "Partial refund — unused session",
+      "recorded_outside": false,
+      "is_void": false,
+      "occurred_at": "2026-07-16T08:05:00.000Z"
+    },
+    "contact": {
+      "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "name": "Dana Levi",
+      "phone": "+972501234567",
+      "email": "dana@example.com"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `data.payment` | The payment header after the refund — `id`, `contact_id`, `title`, `total_amount` (JSON number), `currency`, `arrangement_status`, `external_reference` (your idempotency key on `POST /v1/payments`, or `null`) |
+| `data.refund.entry_id` | The refund entry's id on the payment (`entries[]` on `GET /v1/payments/:id`) |
+| `data.refund.amount` / `data.refund.currency` | The refunded amount as a **positive** JSON number (the ledger entry itself stores it negative) |
+| `data.refund.reason` | The [refund reason](payments.md#refund-reasons) — including the system reasons `order_refund`, `store_refund`, `legacy_mark` — or `null` |
+| `data.refund.note` | The refund note, or `null` |
+| `data.refund.recorded_outside` | `true` = booked only, the money was returned outside oToK; `false` = executed through the payment gateway, or a payment that never involved a provider |
+| `data.refund.is_void` | `true` when the provider voided the original charge rather than refunding it |
+| `data.refund.occurred_at` | When the refund was recognized — ISO 8601 UTC |
+| `data.contact` | The payer: `id`, `name`, `phone`, `email` (explicit `null`s when unknown) |
+
+Provider correlation references, idempotency keys and the performing user are deliberately excluded.
 
 ### Contact event `data`
 

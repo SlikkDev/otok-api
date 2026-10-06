@@ -659,6 +659,15 @@ PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES: tuple[PaymentRequestWebhookEventType, ...] 
     "payment_request.cancelled",
 )
 
+PaymentWebhookEventType = Literal["payment.refunded"]
+
+#: The payment ledger event. Opt-in by listing, like the order events.
+#: ``payment.refunded`` fires once per refund entry recorded on a payment,
+#: from EVERY source (the refund routes, order refunds, in-app refunds,
+#: connected stores, refunds made in the payment provider's dashboard). A
+#: pending reversal is silent until the money is confirmed returned.
+PAYMENT_WEBHOOK_EVENT_TYPES: tuple[PaymentWebhookEventType, ...] = ("payment.refunded",)
+
 ContactWebhookEventType = Literal[
     "contact.created",
     "contact.updated",
@@ -742,6 +751,7 @@ WebhookEventType = Union[
     EmailWebhookEventType,
     OrderWebhookEventType,
     PaymentRequestWebhookEventType,
+    PaymentWebhookEventType,
     ContactWebhookEventType,
     MessageWebhookEventType,
     DealWebhookEventType,
@@ -961,6 +971,8 @@ class PaymentRequestWebhookEventData(TypedDict):
     status: PaymentRequestStatus
     contact_id: Optional[str]
     deal_id: Optional[str]
+    #: The sale the request collects for, or ``None``.
+    sale_id: Optional[str]
     provider: str
     amount: float
     currency: str
@@ -969,6 +981,8 @@ class PaymentRequestWebhookEventData(TypedDict):
     vat_rate: Optional[float]
     test_mode: bool
     pay_url: Optional[str]
+    #: The channel the link was first sent on, or ``None``.
+    channel: Optional[PayLinkChannel]
     contact_payment_id: Optional[str]
     expires_at: Optional[str]
     paid_at: Optional[str]
@@ -1002,6 +1016,62 @@ class PaymentRequestCancelledEvent(TypedDict):
     type: Literal["payment_request.cancelled"]
     created_at: str
     data: PaymentRequestWebhookEventData
+
+
+class PaymentRefundedPaymentBlock(TypedDict):
+    """``data.payment`` of ``payment.refunded`` — the header after the refund."""
+
+    id: str
+    contact_id: Optional[str]
+    title: Optional[str]
+    total_amount: Optional[float]
+    currency: Optional[str]
+    arrangement_status: Optional[str]
+    #: Your ``external_reference`` from ``POST /v1/payments``, or ``None``.
+    external_reference: Optional[str]
+
+
+class PaymentRefundedRefundBlock(TypedDict):
+    """``data.refund`` of ``payment.refunded``. ``amount`` is POSITIVE (the
+    ledger entry stores it negative).
+    """
+
+    entry_id: str
+    amount: float
+    currency: Optional[str]
+    #: A :data:`RefundReason` or a system reason (``order_refund``,
+    #: ``store_refund``, ``legacy_mark``).
+    reason: Optional[str]
+    note: Optional[str]
+    #: ``True`` = booked only; the money was returned outside oToK.
+    recorded_outside: bool
+    #: ``True`` when the provider voided the original charge.
+    is_void: bool
+    occurred_at: Optional[str]
+
+
+class PaymentRefundedContactBlock(TypedDict):
+    id: Optional[str]
+    name: Optional[str]
+    phone: Optional[str]
+    email: Optional[str]
+
+
+class PaymentRefundedWebhookEventData(TypedDict):
+    """Payload ``data`` of ``payment.refunded``. Absent values are explicit
+    ``None``s.
+    """
+
+    payment: PaymentRefundedPaymentBlock
+    refund: PaymentRefundedRefundBlock
+    contact: PaymentRefundedContactBlock
+
+
+class PaymentRefundedEvent(TypedDict):
+    id: str
+    type: Literal["payment.refunded"]
+    created_at: str
+    data: PaymentRefundedWebhookEventData
 
 
 class ContactWebhookSummary(TypedDict):
@@ -1340,6 +1410,7 @@ OtokWebhookEvent = Union[
     PaymentRequestPaidEvent,
     PaymentRequestExpiredEvent,
     PaymentRequestCancelledEvent,
+    PaymentRefundedEvent,
     ContactCreatedEvent,
     ContactUpdatedEvent,
     ContactDeletedEvent,
@@ -1803,6 +1874,12 @@ class PaymentCreateParams(_PaymentCreateRequired, total=False):
     #: installments only: number of installments (min 2).
     installment_count: int
     external_reference: str
+    #: Fund an existing sale of the same contact with the recorded charge(s)
+    #: (create only; requires the Sales feature). 404 unknown sale; 409
+    #: ``SALE_ALREADY_CANCELLED`` / ``SALE_CONTACT_MISMATCH`` /
+    #: ``PLAN_FEATURE_REQUIRED``; 400 ``CURRENCY_MISMATCH``. The response then
+    #: carries ``sale_allocations`` (``[{sale_id, entry_id, amount}]``).
+    sale_id: str
     #: Free-form JSON stored on the payment — max 2048 bytes serialized (400
     #: over the cap). On an ``external_reference`` match the provided object
     #: REPLACES the stored one (omit to keep it).
@@ -1843,12 +1920,79 @@ class PaymentListParams(TypedDict, total=False):
     offset: int
 
 
-class PaymentRefundParams(TypedDict, total=False):
+#: Why a refund is given — the values a caller may send. Refund entries
+#: written by the system can also carry ``order_refund``, ``store_refund``
+#: or ``legacy_mark``.
+RefundReason = Literal[
+    "requested_by_customer",
+    "duplicate",
+    "fraudulent",
+    "order_change",
+    "product_unsatisfactory",
+    "sale_cancelled",
+    "refunded_outside",
+    "chargeback",
+    "other",
+]
+
+#: ``auto`` — refund through the connected payment gateway when the charge
+#: was collected by it (a charge recorded by hand or through the API is
+#: booked only); ``recorded_outside`` — book the refund only, the money was
+#: (or will be) returned outside oToK.
+RefundMode = Literal["auto", "recorded_outside"]
+
+#: How a refund was executed.
+RefundOutcome = Literal[
+    "gateway_refunded",
+    "voided",
+    "credit_document_only",
+    "recorded_outside",
+    "ledger_only",
+    "duplicate",
+]
+
+
+class _RefundRequired(TypedDict):
+    reason: RefundReason
+    mode: RefundMode
+
+
+class PaymentRefundParams(_RefundRequired, total=False):
+    """``POST /v1/payments/:id/refund``. Requires an API key with refund
+    access (``allow_money_out``, granted by the workspace owner) — 403
+    ``API_KEY_MONEY_OUT_DISABLED`` otherwise.
+    """
+
     #: The charge entry to refund; optional when the payment has one charge.
     entry_id: str
     #: Partial amount; defaults to the full remaining refundable balance.
     amount: float
+    #: ≤1000 chars.
     note: str
+    #: ≤200 chars, unique per workspace. A replay returns the original
+    #: refund with ``duplicate: True`` and refunds nothing; the same key for
+    #: a different payment → 409 ``IDEMPOTENCY_KEY_MISMATCH``. Makes network
+    #: retries safe.
+    idempotency_key: str
+
+
+class _RefundResultRequired(TypedDict):
+    #: The full payment with ``entries``, after the refund.
+    payment: dict[str, Any]
+    #: The refund entry written (or, on a replay, the original one).
+    entry: Optional[dict[str, Any]]
+    outcome: RefundOutcome
+    #: ``True`` when ``idempotency_key`` replayed an earlier refund.
+    duplicate: bool
+
+
+class RefundResult(_RefundResultRequired, total=False):
+    """Response of the refund routes (HTTP 201)."""
+
+    #: On ``credit_document_only``: the refund-review item opened in the app.
+    incidentId: str
+    #: On ``POST /v1/payment-requests/:id/refund`` only.
+    payment_request_id: str
 
 
 #: Payment record as returned by the API (open — servers may add fields).
@@ -1897,10 +2041,11 @@ class PaymentRequestCreateParams(_PaymentRequestCreateRequired, total=False):
     ``phone``/``email`` (a matching contact is used, or created), OR a
     ``deal_id`` alone (the deal's contact pays).
 
-    **There is NO idempotency key on this resource** — a repeat POST mints
-    a second, independently payable link (cancel extras via
-    ``payment_requests.cancel``). Because of that, the SDK never
-    auto-retries this call on transient network errors.
+    Send ``idempotency_key`` to make retries safe: a replay returns the
+    original row with ``duplicate: True``. WITHOUT it a repeat POST mints a
+    second, independently payable link (cancel extras via
+    ``payment_requests.cancel``), and the SDK never auto-retries such a call
+    on transient network errors.
     """
 
     terminal_number: int
@@ -1939,6 +2084,19 @@ class PaymentRequestCreateParams(_PaymentRequestCreateRequired, total=False):
     vat_mode: PaymentVatMode
     #: With ``vat_mode``: VAT percent (0–100, ≤2 decimals).
     vat_rate: float
+    #: Catalog product — the title then derives from the product name (400
+    #: ``INVALID_PRODUCT`` / ``PRODUCT_INACTIVE``).
+    product_id: str
+    #: Collect for an existing sale of the payer (allocated when paid). 404
+    #: unknown sale; 409 ``PLAN_FEATURE_REQUIRED`` / ``SALE_CONTACT_MISMATCH``
+    #: / ``SALE_ALREADY_CANCELLED``; 400 ``CURRENCY_MISMATCH``.
+    sale_id: str
+    #: ≤200 chars, unique per workspace. A replay returns the original row
+    #: with ``duplicate: True``; the same key with a different payer, amount,
+    #: currency, ``sale_id`` or ``product_id`` → 409
+    #: ``IDEMPOTENCY_KEY_MISMATCH``; a concurrent request still in flight →
+    #: 409 ``IDEMPOTENCY_CLAIM_IN_FLIGHT``.
+    idempotency_key: str
 
 
 class PaymentRequestListParams(TypedDict, total=False):
@@ -1967,8 +2125,140 @@ class PaymentRequestListParams(TypedDict, total=False):
 #: with ``checkout_error`` set — the link still works; the hosted page
 #: retries the provider session on open). List rows join
 #: ``contact_name``/``contact_phone``/``contact_email`` and a computed
-#: ``refunded_total``.
+#: ``refunded_total``. Rows also carry ``sale_id``, the delivery facts
+#: ``channel`` / ``link_emailed_at`` / ``link_whatsapp_sent_at`` /
+#: ``link_sms_sent_at`` and, on saved-card charges, ``payment_method_id``;
+#: create responses carry ``duplicate`` (``True`` on an ``idempotency_key``
+#: replay).
 PaymentRequest = dict[str, Any]
+
+#: The channels a pay-link can be sent on.
+PayLinkChannel = Literal["email", "whatsapp", "sms"]
+
+
+class _PaymentRequestSendLinkRequired(TypedDict):
+    channel: PayLinkChannel
+
+
+class PaymentRequestSendLinkParams(_PaymentRequestSendLinkRequired, total=False):
+    """``POST /v1/payment-requests/:id/send-link``."""
+
+    #: Send again on a channel the link was already sent on — without it, a
+    #: second send on the same channel raises 409 ``LINK_ALREADY_SENT``.
+    resend: bool
+    #: A conversation of the request's contact to associate with the request.
+    conversation_id: str
+
+
+class PaymentRequestSendLinkResult(TypedDict):
+    sent: bool
+    channel: PayLinkChannel
+    #: The address or phone number the link went to.
+    to: str
+    #: WhatsApp / SMS message id when the channel reports one; ``None`` for
+    #: email.
+    message_id: Optional[str]
+
+
+class PaymentRequestRefundParams(_RefundRequired, total=False):
+    """``POST /v1/payment-requests/:id/refund`` — refunds the payment a paid
+    request settled. Requires an API key with refund access
+    (``allow_money_out``).
+    """
+
+    #: ≥ 0.01, in the request's currency; omitted → the full refundable
+    #: balance.
+    amount: float
+    #: ≤1000 chars.
+    note: str
+    #: ≤200 chars, unique per workspace — a replay returns the original refund.
+    idempotency_key: str
+
+
+# ─────────────────────────── Saved cards ───────────────────────────
+
+
+class SavedCard(TypedDict, total=False):
+    """A contact's card on file — display facts only, never card data.
+    Fields are camelCase.
+    """
+
+    #: Pass as ``method_id`` to ``contacts.charge_saved_card``.
+    id: str
+    provider: str
+    brand: Optional[str]
+    last4: Optional[str]
+    expiryMonth: Optional[int]
+    expiryYear: Optional[int]
+    tokenExpiresAt: Optional[str]
+    status: Literal["active", "revoked", "expired"]
+    isDefault: bool
+    consentSource: Optional[Literal["checkout_optin", "manual", "in_person", "payer_link"]]
+    consentedAt: Optional[str]
+    lastUsedAt: Optional[str]
+    createdAt: str
+
+
+class SavedCardList(TypedDict):
+    payment_methods: list[SavedCard]
+
+
+class _SavedCardChargeRequired(TypedDict):
+    #: Required, 8–124 chars, scoped to the API key. A replay answers the
+    #: original outcome with ``duplicate: True`` and never charges twice;
+    #: the same key with a different contact, amount or currency → 409
+    #: ``IDEMPOTENCY_KEY_MISMATCH``. A new attempt needs a new key.
+    idempotency_key: str
+    #: Major units (0.01 – 9,999,999,999.99, ≤2 decimals).
+    amount: float
+
+
+class SavedCardChargeParams(_SavedCardChargeRequired, total=False):
+    """``POST /v1/contacts/:id/charges`` — charge a saved card. Requires an
+    API key with saved-card charge access (``allow_charges``, off by
+    default, granted by the workspace owner) and the Workspace payments
+    feature. Card data is never accepted.
+    """
+
+    #: The saved card to charge; omitted → chosen by ``method_selection``.
+    method_id: str
+    #: ``default`` (the default card) or ``most_recent`` (the last charged card).
+    method_selection: Literal["default", "most_recent"]
+    #: Omitted → the workspace payment currency.
+    currency: PaymentRequestCurrency
+    #: ≤200 chars.
+    title: str
+    #: Catalog product — the title then derives from the product name.
+    product_id: str
+    #: ≤2000 chars.
+    note: str
+    document_kind: PaymentDocumentKind
+    auto_issue_document: bool
+    #: Card installments to charge with (1–36).
+    installments: int
+    #: Authorise-only test run — 400 when the provider has no test mode.
+    test_mode: bool
+    deal_id: str
+    #: Per-charge VAT override — always together with ``vat_rate``.
+    vat_mode: PaymentVatMode
+    vat_rate: float
+    #: An existing sale of this contact to collect for.
+    sale_id: str
+    #: Configured Cardcom terminal number; omitted → the default terminal.
+    terminal_number: int
+
+
+class SavedCardChargeResult(TypedDict, total=False):
+    """Response of ``POST /v1/contacts/:id/charges``: ``outcome: "paid"``
+    (HTTP 200, with ``payment_request``) or ``outcome: "processing"`` (HTTP
+    202, with ``payment_request_id`` — poll ``payment_requests.get``; never
+    retry with a new key). A decline raises 409 ``TOKEN_CHARGE_DECLINED``.
+    """
+
+    outcome: Literal["paid", "processing"]
+    duplicate: bool
+    payment_request: PaymentRequest
+    payment_request_id: str
 
 # ─────────────────────────── Contact documents ───────────────────────────
 
@@ -2130,6 +2420,11 @@ class OrderCreateParams(TypedDict, total=False):
     #: Link a deal of the SAME contact (404 ``ORDER_DEAL_NOT_FOUND`` when
     #: unknown, 409 ``ORDER_DEAL_CONTACT_MISMATCH`` for another contact's).
     deal_id: str
+    #: Fund an existing sale of the same contact instead of recording a new
+    #: one (create only). 404 unknown sale; 409 ``ORDER_SALE_CONTACT_MISMATCH``
+    #: / ``ORDER_SALE_ALREADY_LINKED`` / ``SALE_ALREADY_CANCELLED`` /
+    #: ``PLAN_FEATURE_REQUIRED``; 400 ``CURRENCY_MISMATCH``.
+    sale_id: str
     #: Idempotency key — one reference maps to one order. Max 255 chars.
     external_reference: str
 
@@ -2165,6 +2460,9 @@ class OrderMarkPaidParams(TypedDict, total=False):
     #: onto instead of recording a new payment. Link-only — the payment's
     #: amount is never rewritten. Max 255 chars.
     payment_reference: str
+    #: Fund an existing sale of the order's contact with the recorded
+    #: payment (same refusals as ``OrderCreateParams.sale_id``).
+    sale_id: str
 
 
 class OrderListParams(TypedDict, total=False):
@@ -2202,7 +2500,9 @@ class OrderListParams(TypedDict, total=False):
 #: include. Store-sync provenance fields (``store_connection_id``,
 #: ``store_domain``, ``external_order_id``, ``number``,
 #: ``external_updated_at``) are populated for orders synced from a
-#: connected store and are ``None`` otherwise.
+#: connected store and are ``None`` otherwise. ``sale_id`` is the sale the
+#: order is recorded as (or funds) — a paid order records a sale unless that
+#: is turned off in the workspace's Sales settings.
 #:
 #: Unlike the other create endpoints, ``POST /v1/orders`` responses carry
 #: NO top-level ``duplicate`` flag — create and upsert-match both answer

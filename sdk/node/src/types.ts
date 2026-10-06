@@ -798,6 +798,16 @@ export type PaymentRequestWebhookEventType =
   (typeof PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES)[number];
 
 /**
+ * The payment ledger event. Opt-in by listing, like the order events.
+ * `payment.refunded` fires once per refund entry recorded on a payment, from
+ * EVERY source (the refund routes, order refunds, in-app refunds, connected
+ * stores, refunds made in the payment provider's dashboard). A pending
+ * reversal is silent until the money is confirmed returned.
+ */
+export const PAYMENT_WEBHOOK_EVENT_TYPES = ["payment.refunded"] as const;
+export type PaymentWebhookEventType = (typeof PAYMENT_WEBHOOK_EVENT_TYPES)[number];
+
+/**
  * The four contact lifecycle + consent events. Opt-in by listing, like the
  * order events. created/updated/deleted fire for intentional writes only —
  * bulk edits, CSV-import updates, and contact merges are deliberately quiet
@@ -875,6 +885,7 @@ export type WebhookEventType =
   | EmailWebhookEventType
   | OrderWebhookEventType
   | PaymentRequestWebhookEventType
+  | PaymentWebhookEventType
   | ContactWebhookEventType
   | MessageWebhookEventType
   | DealWebhookEventType
@@ -887,7 +898,8 @@ export type WebhookEventType =
  * `events` defaults to the three delivery events (`email.delivered`,
  * `email.bounced`, `email.complained`); every other family is opt-in and
  * must be listed explicitly — the engagement types (`email.opened`,
- * `email.clicked`) and the `order.*`, `payment_request.*`, `contact.*`,
+ * `email.clicked`) and the `order.*`, `payment_request.*`,
+ * `payment.refunded`, `contact.*`,
  * `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`,
  * and `form.submitted` families. A pre-existing registration never starts
  * receiving a new family unasked. An empty array is rejected.
@@ -1059,6 +1071,8 @@ export interface PaymentRequestWebhookEventData {
   status: PaymentRequestStatus;
   contact_id: string | null;
   deal_id: string | null;
+  /** The sale the request collects for, or `null`. */
+  sale_id: string | null;
   provider: string;
   amount: number;
   currency: string;
@@ -1067,6 +1081,8 @@ export interface PaymentRequestWebhookEventData {
   vat_rate: number | null;
   test_mode: boolean;
   pay_url: string | null;
+  /** The channel the link was first sent on, or `null`. */
+  channel: PayLinkChannel | null;
   contact_payment_id: string | null;
   expires_at: string | null;
   paid_at: string | null;
@@ -1097,6 +1113,52 @@ export interface PaymentRequestCancelledEvent {
   type: "payment_request.cancelled";
   created_at: string;
   data: PaymentRequestWebhookEventData;
+}
+
+/**
+ * Payload `data` of `payment.refunded` — the payment header after the
+ * refund, the refund itself, and the payer. Absent values are explicit
+ * `null`s. `refund.amount` is POSITIVE (the ledger entry stores it
+ * negative).
+ */
+export interface PaymentRefundedWebhookEventData {
+  payment: {
+    id: string;
+    contact_id: string | null;
+    title: string | null;
+    total_amount: number | null;
+    currency: string | null;
+    arrangement_status: string | null;
+    /** Your `external_reference` from POST /v1/payments, or `null`. */
+    external_reference: string | null;
+  };
+  refund: {
+    /** The refund entry on the payment (`entries[]`). */
+    entry_id: string;
+    amount: number;
+    currency: string | null;
+    /** A {@link RefundReason} or a system reason (`order_refund`, `store_refund`, `legacy_mark`). */
+    reason: PaymentEntryReason | null;
+    note: string | null;
+    /** `true` = booked only; the money was returned outside oToK. */
+    recorded_outside: boolean;
+    /** `true` when the provider voided the original charge. */
+    is_void: boolean;
+    occurred_at: string | null;
+  };
+  contact: {
+    id: string | null;
+    name: string | null;
+    phone: string | null;
+    email: string | null;
+  };
+}
+
+export interface PaymentRefundedEvent {
+  id: string;
+  type: "payment.refunded";
+  created_at: string;
+  data: PaymentRefundedWebhookEventData;
 }
 
 /**
@@ -1392,6 +1454,7 @@ export type OtokWebhookEvent =
   | PaymentRequestPaidEvent
   | PaymentRequestExpiredEvent
   | PaymentRequestCancelledEvent
+  | PaymentRefundedEvent
   | ContactCreatedEvent
   | ContactUpdatedEvent
   | ContactDeletedEvent
@@ -2056,6 +2119,13 @@ export interface PaymentCreateParams {
   installment_count?: number;
   external_reference?: string;
   /**
+   * Fund an existing sale of the same contact with the recorded charge(s)
+   * (create only; requires the Sales feature). 404 unknown sale; 409
+   * `SALE_ALREADY_CANCELLED` / `SALE_CONTACT_MISMATCH` /
+   * `PLAN_FEATURE_REQUIRED`; 400 `CURRENCY_MISMATCH`.
+   */
+  sale_id?: string;
+  /**
    * Free-form JSON stored on the payment — max 2048 bytes serialized (400
    * over the cap). On an `external_reference` match the provided object
    * REPLACES the stored one (omit to keep it).
@@ -2101,12 +2171,113 @@ export interface PaymentListParams {
   offset?: number;
 }
 
+/** Why a refund is given — the values a caller may send. */
+export type RefundReason =
+  | "requested_by_customer"
+  | "duplicate"
+  | "fraudulent"
+  | "order_change"
+  | "product_unsatisfactory"
+  | "sale_cancelled"
+  | "refunded_outside"
+  | "chargeback"
+  | "other";
+
+/**
+ * The `reason` stored on a refund entry: a {@link RefundReason}, or one the
+ * system writes — `order_refund` (an order refund mirrored into the
+ * payment), `store_refund` (a refund made in a connected store),
+ * `legacy_mark` (a charge marked `refunded`).
+ */
+export type PaymentEntryReason =
+  | RefundReason
+  | "order_refund"
+  | "store_refund"
+  | "legacy_mark";
+
+/**
+ * `auto` — refund through the connected payment gateway when the charge was
+ * collected by it (a charge recorded by hand or through the API is booked
+ * only); `recorded_outside` — book the refund only, the money was (or will
+ * be) returned outside oToK.
+ */
+export type RefundMode = "auto" | "recorded_outside";
+
+/**
+ * POST /v1/payments/:id/refund. Requires an API key with refund access
+ * (`allow_money_out`, granted by the workspace owner) — 403
+ * `API_KEY_MONEY_OUT_DISABLED` otherwise.
+ */
 export interface PaymentRefundParams {
+  /** Required. */
+  reason: RefundReason;
+  /** Required. */
+  mode: RefundMode;
   /** The charge entry to refund; optional when the payment has one charge. */
   entry_id?: string;
   /** Partial amount; defaults to the full remaining refundable balance. */
   amount?: number;
+  /** ≤1000 chars. */
   note?: string;
+  /**
+   * ≤200 chars, unique per workspace. A replay returns the original refund
+   * with `duplicate: true` and refunds nothing; the same key for a different
+   * payment → 409 `IDEMPOTENCY_KEY_MISMATCH`. Makes network retries safe.
+   */
+  idempotency_key?: string;
+}
+
+/** One charge or refund in a payment's schedule (`entries[]`). */
+export interface PaymentEntry {
+  id: string;
+  payment_id: string;
+  sequence: number;
+  /** Negative on refund entries. */
+  amount: number | null;
+  currency: string | null;
+  status: PaymentEntryStatus;
+  kind: "charge" | "refund";
+  /** On refund entries, the charge being reversed. */
+  refunds_entry_id: string | null;
+  note: string | null;
+  /** Refund entries: why the refund was given. */
+  reason?: PaymentEntryReason | null;
+  /** Refund entries: booked only — the money moved outside oToK. */
+  recorded_outside?: boolean;
+  /** Refund entries: the provider voided the original charge. */
+  is_void?: boolean;
+  /** The `idempotency_key` the refund was requested with. */
+  client_idempotency_key?: string | null;
+  /** The payment request that collected this charge, when any. */
+  payment_request_id?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * How a refund was executed: `gateway_refunded` / `voided` (by the payment
+ * gateway), `credit_document_only` (the provider issued the credit document
+ * but the money is still to be returned — the entry is `pending`),
+ * `recorded_outside` / `ledger_only` (booked only), `duplicate` (a replay).
+ */
+export type RefundOutcome =
+  | "gateway_refunded"
+  | "voided"
+  | "credit_document_only"
+  | "recorded_outside"
+  | "ledger_only"
+  | "duplicate";
+
+/** Response of the refund routes (HTTP 201). */
+export interface RefundResult {
+  /** The full payment with `entries`, after the refund. */
+  payment: Payment;
+  /** The refund entry written (or, on a replay, the original one). */
+  entry: PaymentEntry | null;
+  outcome: RefundOutcome;
+  /** `true` when `idempotency_key` replayed an earlier refund. */
+  duplicate: boolean;
+  /** On `credit_document_only`: the refund-review item opened in the app. */
+  incidentId?: string;
 }
 
 export interface Payment {
@@ -2120,6 +2291,8 @@ export interface Payment {
   status: string;
   external_reference: string | null;
   created_at: string;
+  /** The charge/refund schedule, ordered by `sequence` (single-payment responses). */
+  entries?: PaymentEntry[];
   [key: string]: unknown;
 }
 
@@ -2130,6 +2303,8 @@ export interface Payment {
  */
 export interface PaymentCreateResult extends Payment {
   duplicate: boolean;
+  /** Present when `sale_id` was sent: how much of each charge funds the sale. */
+  sale_allocations?: { sale_id: string; entry_id: string; amount: number }[];
 }
 
 // ─────────────────────────── Payment requests ───────────────────────────
@@ -2164,10 +2339,10 @@ export type PaymentDocumentKind =
  * `phone`/`email` (a matching contact is used, or created), OR a `deal_id`
  * alone (the deal's contact pays).
  *
- * **There is NO idempotency key on this resource** — a repeat POST mints a
- * second, independently payable link (cancel extras via
- * `paymentRequests.cancel`). Because of that, the SDK never auto-retries
- * this call on transient network errors.
+ * Send `idempotency_key` to make retries safe: a replay returns the original
+ * row with `duplicate: true`. WITHOUT it a repeat POST mints a second,
+ * independently payable link (cancel extras via `paymentRequests.cancel`),
+ * and the SDK never auto-retries such a call on transient network errors.
  */
 export interface PaymentRequestCreateParams {
   /** Configured Cardcom terminal number; omitted uses the default. */
@@ -2217,6 +2392,24 @@ export interface PaymentRequestCreateParams {
   vat_mode?: PaymentVatMode;
   /** With `vat_mode`: VAT percent (0–100, ≤2 decimals). */
   vat_rate?: number;
+  /**
+   * Catalog product — the title then derives from the product name (400
+   * `INVALID_PRODUCT` / `PRODUCT_INACTIVE`).
+   */
+  product_id?: string;
+  /**
+   * Collect for an existing sale of the payer (allocated when paid). 404
+   * unknown sale; 409 `PLAN_FEATURE_REQUIRED` / `SALE_CONTACT_MISMATCH` /
+   * `SALE_ALREADY_CANCELLED`; 400 `CURRENCY_MISMATCH`.
+   */
+  sale_id?: string;
+  /**
+   * ≤200 chars, unique per workspace. A replay returns the original row with
+   * `duplicate: true`; the same key with a different payer, amount,
+   * currency, `sale_id` or `product_id` → 409 `IDEMPOTENCY_KEY_MISMATCH`; a
+   * concurrent request still in flight → 409 `IDEMPOTENCY_CLAIM_IN_FLIGHT`.
+   */
+  idempotency_key?: string;
 }
 
 /**
@@ -2249,9 +2442,11 @@ export interface PaymentRequest {
   workspace_id: string;
   contact_id: string | null;
   deal_id: string | null;
+  /** The sale the request collects for, when bound to one. */
+  sale_id?: string | null;
   provider: string;
   status: PaymentRequestStatus;
-  /** "checkout" = hosted pay-link; "token" = internal saved-card charge row. */
+  /** "checkout" = hosted pay-link; "token" = direct saved-card charge. */
   charge_kind: string;
   amount: number;
   currency: string;
@@ -2266,6 +2461,13 @@ export interface PaymentRequest {
   cancelled_at: string | null;
   /** The /v1/payments ledger row a verified payment landed on (once paid). */
   contact_payment_id: string | null;
+  /** The channel the link was first sent on; null until sent. */
+  channel?: PayLinkChannel | null;
+  link_emailed_at?: string | null;
+  link_whatsapp_sent_at?: string | null;
+  link_sms_sent_at?: string | null;
+  /** The saved card a `token` request was charged to. */
+  payment_method_id?: string | null;
   created_at: string;
   updated_at: string;
   /** Computed on create/get/list — absent on the cancel response. */
@@ -2285,7 +2487,148 @@ export interface PaymentRequest {
 export interface PaymentRequestCreateResult extends PaymentRequest {
   checkout_url: string | null;
   checkout_error: string | null;
+  /** `true` when `idempotency_key` replayed an earlier request — nothing new was minted. */
+  duplicate: boolean;
 }
+
+/** The channels a pay-link can be sent on. */
+export type PayLinkChannel = "email" | "whatsapp" | "sms";
+
+/** POST /v1/payment-requests/:id/send-link. */
+export interface PaymentRequestSendLinkParams {
+  channel: PayLinkChannel;
+  /**
+   * Send again on a channel the link was already sent on — without it, a
+   * second send on the same channel throws 409 `LINK_ALREADY_SENT`.
+   */
+  resend?: boolean;
+  /** A conversation of the request's contact to associate with the request. */
+  conversation_id?: string;
+}
+
+export interface PaymentRequestSendLinkResult {
+  sent: true;
+  channel: PayLinkChannel;
+  /** The address or phone number the link went to. */
+  to: string;
+  /** WhatsApp / SMS message id when the channel reports one; null for email. */
+  message_id: string | null;
+}
+
+/**
+ * POST /v1/payment-requests/:id/refund — refunds the payment a paid request
+ * settled. Requires an API key with refund access (`allow_money_out`).
+ */
+export interface PaymentRequestRefundParams {
+  reason: RefundReason;
+  mode: RefundMode;
+  /** ≥ 0.01, in the request's currency; omitted → the full refundable balance. */
+  amount?: number;
+  /** ≤1000 chars. */
+  note?: string;
+  /** ≤200 chars, unique per workspace — a replay returns the original refund. */
+  idempotency_key?: string;
+}
+
+export interface PaymentRequestRefundResult extends RefundResult {
+  payment_request_id: string;
+}
+
+// ─────────────────────────── Saved cards ───────────────────────────
+
+/**
+ * A contact's card on file (GET /v1/contacts/:id/payment-methods) — display
+ * facts only, never card data. Fields are camelCase.
+ */
+export interface SavedCard {
+  /** Pass as `method_id` to `contacts.chargeSavedCard`. */
+  id: string;
+  provider: string;
+  brand: string | null;
+  last4: string | null;
+  expiryMonth: number | null;
+  expiryYear: number | null;
+  tokenExpiresAt: string | null;
+  status: "active" | "revoked" | "expired";
+  isDefault: boolean;
+  consentSource: "checkout_optin" | "manual" | "in_person" | "payer_link" | null;
+  consentedAt: string | null;
+  lastUsedAt: string | null;
+  createdAt: string;
+  [key: string]: unknown;
+}
+
+export interface SavedCardList {
+  payment_methods: SavedCard[];
+}
+
+/**
+ * POST /v1/contacts/:id/charges — charge a saved card. Requires an API key
+ * with saved-card charge access (`allow_charges`, off by default, granted
+ * by the workspace owner) and the Workspace payments feature. Card data is
+ * never accepted.
+ */
+export interface SavedCardChargeParams {
+  /**
+   * Required, 8–124 chars, scoped to the API key. A replay answers the
+   * original outcome with `duplicate: true` and never charges twice; the
+   * same key with a different contact, amount or currency → 409
+   * `IDEMPOTENCY_KEY_MISMATCH`. A new attempt (e.g. after a decline) needs
+   * a new key.
+   */
+  idempotency_key: string;
+  /** Major units (0.01 – 9,999,999,999.99, ≤2 decimals). */
+  amount: number;
+  /** The saved card to charge; omitted → chosen by `method_selection`. */
+  method_id?: string;
+  /** `default` (the default card) or `most_recent` (the last charged card). */
+  method_selection?: "default" | "most_recent";
+  /** Omitted → the workspace payment currency. */
+  currency?: PaymentRequestCurrency;
+  /** ≤200 chars. */
+  title?: string;
+  /** Catalog product — the title then derives from the product name. */
+  product_id?: string;
+  /** ≤2000 chars. */
+  note?: string;
+  document_kind?: PaymentDocumentKind;
+  auto_issue_document?: boolean;
+  /** Card installments to charge with (1–36). */
+  installments?: number;
+  /** Authorise-only test run — 400 when the provider has no test mode. */
+  test_mode?: boolean;
+  deal_id?: string;
+  /** Per-charge VAT override — always together with `vat_rate`. */
+  vat_mode?: PaymentVatMode;
+  vat_rate?: number;
+  /** An existing sale of this contact to collect for. */
+  sale_id?: string;
+  /** Configured Cardcom terminal number; omitted → the default terminal. */
+  terminal_number?: number;
+}
+
+/** HTTP 200 — approved and verified. */
+export interface SavedCardChargePaid {
+  outcome: "paid";
+  duplicate: boolean;
+  payment_request: PaymentRequest;
+}
+
+/**
+ * HTTP 202 — the outcome is not known yet; the request settles on its own.
+ * Poll `paymentRequests.get(payment_request_id)`; never retry with a new key.
+ */
+export interface SavedCardChargeProcessing {
+  outcome: "processing";
+  duplicate: boolean;
+  payment_request_id: string;
+}
+
+/**
+ * Response of POST /v1/contacts/:id/charges. A decline throws 409
+ * `TOKEN_CHARGE_DECLINED` (body: `failure_reason`, `payment_request_id`).
+ */
+export type SavedCardChargeResult = SavedCardChargePaid | SavedCardChargeProcessing;
 
 // ─────────────────────────── Contact documents ───────────────────────────
 
@@ -2448,6 +2791,13 @@ export interface OrderCreateParams {
    * unknown, 409 `ORDER_DEAL_CONTACT_MISMATCH` for another contact's).
    */
   deal_id?: string;
+  /**
+   * Fund an existing sale of the same contact instead of recording a new one
+   * (create only). 404 unknown sale; 409 `ORDER_SALE_CONTACT_MISMATCH` /
+   * `ORDER_SALE_ALREADY_LINKED` / `SALE_ALREADY_CANCELLED` /
+   * `PLAN_FEATURE_REQUIRED`; 400 `CURRENCY_MISMATCH`.
+   */
+  sale_id?: string;
   /** Idempotency key — one reference maps to one order. Max 255 chars. */
   external_reference?: string;
 }
@@ -2483,6 +2833,11 @@ export interface OrderMarkPaidParams {
    * rewritten. Max 255 chars.
    */
   payment_reference?: string;
+  /**
+   * Fund an existing sale of the order's contact with the recorded payment
+   * (same refusals as `OrderCreateParams.sale_id`).
+   */
+  sale_id?: string;
 }
 
 /**
@@ -2599,6 +2954,11 @@ export interface Order {
   external_reference: string | null;
   /** Optional link to a deal of the same contact. */
   deal_id: string | null;
+  /**
+   * The sale this order is recorded as (or funds). A paid order records a
+   * sale unless that is turned off in the workspace's Sales settings.
+   */
+  sale_id?: string | null;
   financial_status: OrderFinancialStatus;
   fulfillment_status: OrderFulfillmentStatus;
   /** 3-letter uppercase; defaults to the workspace currency. */

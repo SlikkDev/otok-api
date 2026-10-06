@@ -84,6 +84,10 @@ import type {
   PaymentRequestCreateParams,
   PaymentRequestCreateResult,
   PaymentRequestListParams,
+  PaymentRequestRefundParams,
+  PaymentRequestRefundResult,
+  PaymentRequestSendLinkParams,
+  PaymentRequestSendLinkResult,
   PaymentUpdateParams,
   Pipeline,
   Product,
@@ -96,9 +100,13 @@ import type {
   ProductListParams,
   ProductUpdateParams,
   ProductUpsertResult,
+  RefundResult,
   ReportListParams,
   ReportRunParams,
   ReportRunResult,
+  SavedCardChargeParams,
+  SavedCardChargeResult,
+  SavedCardList,
   SavedReport,
   SenderProfile,
   SenderProfileListParams,
@@ -245,6 +253,33 @@ export class ContactsApi {
   ): Promise<Paginated<Acquisition>> {
     return this.http.request("GET", `/v1/contacts/${contactId}/acquisitions`, {
       query: { kind: params.kind, limit: params.limit, offset: params.offset },
+    });
+  }
+
+  // ── Saved cards ──
+
+  /**
+   * The contact's saved cards, newest first — display facts only (camelCase
+   * fields). Requires the Workspace payments feature.
+   */
+  listPaymentMethods(contactId: string): Promise<SavedCardList> {
+    return this.http.request("GET", `/v1/contacts/${contactId}/payment-methods`);
+  }
+
+  /**
+   * Charge one of the contact's saved cards. Resolves with `outcome: "paid"`
+   * (HTTP 200) or `outcome: "processing"` (HTTP 202 — poll
+   * `paymentRequests.get(payment_request_id)`); a decline throws 409
+   * `TOKEN_CHARGE_DECLINED`. `idempotency_key` is required, so a replay never
+   * charges twice. Requires an API key with saved-card charge access
+   * (`allow_charges`, off by default) — 403 `API_KEY_CHARGES_DISABLED`.
+   */
+  chargeSavedCard(
+    contactId: string,
+    params: SavedCardChargeParams,
+  ): Promise<SavedCardChargeResult> {
+    return this.http.request("POST", `/v1/contacts/${contactId}/charges`, {
+      body: params,
     });
   }
 
@@ -1231,8 +1266,17 @@ export class PaymentsApi {
     });
   }
 
-  /** Refund a payment (full or partial). */
-  refund(id: string, params: PaymentRefundParams = {}): Promise<Payment> {
+  /**
+   * Refund a payment (full or partial). `reason` and `mode` are required:
+   * `mode: "auto"` refunds a provider-collected charge through the payment
+   * gateway; `"recorded_outside"` books the refund only. Requires an API key
+   * with refund access (`allow_money_out`) — 403
+   * `API_KEY_MONEY_OUT_DISABLED` otherwise. Send `idempotency_key` to make
+   * retries safe (a replay answers `duplicate: true`). A 502
+   * `REFUND_INDETERMINATE` or 500 `REFUND_RECORD_FAILED` means the outcome is
+   * being verified — do not retry with a new key.
+   */
+  refund(id: string, params: PaymentRefundParams): Promise<RefundResult> {
     return this.http.request("POST", `/v1/payments/${id}/refund`, {
       body: params,
     });
@@ -1291,12 +1335,12 @@ export class PaymentRequestsApi {
    * Mint a hosted-checkout pay-link and return the row with its shareable
    * `pay_url`.
    *
-   * **NOT idempotent — there is no idempotency key on this resource.** A
-   * repeat POST mints a second, independently payable link, so the SDK
-   * NEVER auto-retries this call on transient network errors (unlike the
-   * keyed creates): a network failure surfaces for you to handle. If the
-   * outcome is uncertain, check `list()` for the link you may have already
-   * minted before minting again, and `cancel()` extras.
+   * Idempotent only with `idempotency_key`: a replay returns the original
+   * row with `duplicate: true`, and the SDK auto-retries such a call on
+   * transient network errors. WITHOUT a key a repeat POST mints a second,
+   * independently payable link, so the SDK never auto-retries it: a network
+   * failure surfaces for you to handle — check `list()` for the link you
+   * may have already minted before minting again, and `cancel()` extras.
    *
    * The payer resolves like payments/deals: `contact_id` wins, else
    * `phone`/`email` upsert a contact (409 `CONTACT_MERGE_REQUIRED` on
@@ -1317,6 +1361,44 @@ export class PaymentRequestsApi {
    */
   cancel(id: string): Promise<PaymentRequest> {
     return this.http.request("POST", `/v1/payment-requests/${id}/cancel`);
+  }
+
+  /**
+   * Send a PENDING request's pay-link to its contact by email, WhatsApp or
+   * SMS. Once per channel: a second send on the same channel throws 409
+   * `LINK_ALREADY_SENT` unless `resend: true`. Not auto-retried on network
+   * errors.
+   */
+  sendLink(
+    id: string,
+    params: PaymentRequestSendLinkParams,
+  ): Promise<PaymentRequestSendLinkResult> {
+    return this.http.request("POST", `/v1/payment-requests/${id}/send-link`, {
+      body: params,
+    });
+  }
+
+  /**
+   * Issue the tax document for a PAID request (when the automatic issue was
+   * off or failed). Returns the request with its `document`. A credit
+   * document kind requires an API key with refund access.
+   */
+  issueDocument(id: string): Promise<PaymentRequest> {
+    return this.http.request("POST", `/v1/payment-requests/${id}/document`);
+  }
+
+  /**
+   * Refund the payment a PAID request settled — the same refund path as
+   * `payments.refund`, addressed by the request. Requires an API key with
+   * refund access (`allow_money_out`).
+   */
+  refund(
+    id: string,
+    params: PaymentRequestRefundParams,
+  ): Promise<PaymentRequestRefundResult> {
+    return this.http.request("POST", `/v1/payment-requests/${id}/refund`, {
+      body: params,
+    });
   }
 }
 

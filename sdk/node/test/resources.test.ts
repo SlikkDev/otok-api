@@ -12,6 +12,7 @@ import {
   MESSAGE_WEBHOOK_EVENT_TYPES,
   ORDER_WEBHOOK_EVENT_TYPES,
   PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+  PAYMENT_WEBHOOK_EVENT_TYPES,
   type WebhookEventType,
 } from "../src/types";
 
@@ -73,6 +74,11 @@ describe("webhook event type constants", () => {
     for (const eventType of PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES) {
       expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
     }
+  });
+
+  it("payment.refunded is registrable but never defaulted", () => {
+    expect(PAYMENT_WEBHOOK_EVENT_TYPES).toEqual(["payment.refunded"]);
+    expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain("payment.refunded");
   });
 
   it("contact, message, deal, booking, attendance, and form families are registrable but never defaulted", () => {
@@ -886,27 +892,41 @@ describe("payment requests", () => {
     ]);
   });
 
-  it("create returns pay_url plus checkout diagnostics (no duplicate marker — not idempotent)", async () => {
-    // There is no idempotency key on this resource: a repeat POST mints a
-    // second payable link, so no `duplicate` field can exist.
-    const fetchMock = vi.fn(async () =>
-      json(201, {
+  it("create returns pay_url, checkout diagnostics and the duplicate marker", async () => {
+    // A replay of the same idempotency_key returns the original row with
+    // duplicate: true.
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({
+        contact_id: "c-1",
+        amount: 250,
+        product_id: "prod-1",
+        sale_id: "sale-1",
+        idempotency_key: "pr-key-1",
+      });
+      return json(201, {
         id: "pr-1",
         status: "pending",
         charge_kind: "checkout",
         amount: 250,
         currency: "ILS",
+        sale_id: "sale-1",
+        channel: null,
         pay_url: "https://app.otok.io/pay/pr_tok",
         checkout_url: "https://provider.example/checkout/1",
         checkout_error: null,
-      }),
-    );
+        duplicate: true,
+      });
+    });
     const otok = makeClient(fetchMock as any);
     const request = await otok.paymentRequests.create({
       contact_id: "c-1",
       amount: 250,
+      product_id: "prod-1",
+      sale_id: "sale-1",
+      idempotency_key: "pr-key-1",
     });
-    expect("duplicate" in request).toBe(false);
+    expect(request.duplicate).toBe(true);
+    expect(request.sale_id).toBe("sale-1");
     expect(request.pay_url).toBe("https://app.otok.io/pay/pr_tok");
     expect(request.checkout_url).toBe("https://provider.example/checkout/1");
     expect(request.checkout_error).toBeNull();
@@ -959,6 +979,81 @@ describe("payment requests", () => {
     expect(err.code).toBe("TOKEN_REQUEST_NOT_CANCELLABLE");
   });
 
+  it("sendLink, issueDocument and refund hit their routes", async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const responses = [
+      json(201, { sent: true, channel: "whatsapp", to: "0501234567", message_id: "wamid.1" }),
+      json(201, { id: "pr-1", status: "paid", document: { number: "1001" } }),
+      json(201, {
+        payment: { id: "pay-1" },
+        entry: { id: "e-2", kind: "refund", amount: -100 },
+        outcome: "gateway_refunded",
+        duplicate: false,
+        payment_request_id: "pr-1",
+      }),
+    ];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      calls.push({
+        method: init.method,
+        path: new URL(String(url)).pathname,
+        body: init.body === undefined ? undefined : JSON.parse(init.body),
+      });
+      return responses.shift()!;
+    });
+    const otok = makeClient(fetchMock as any);
+
+    const sent = await otok.paymentRequests.sendLink("pr-1", { channel: "whatsapp" });
+    expect(sent.to).toBe("0501234567");
+    const doc = await otok.paymentRequests.issueDocument("pr-1");
+    expect(doc.document).toEqual({ number: "1001" });
+    const refund = await otok.paymentRequests.refund("pr-1", {
+      reason: "requested_by_customer",
+      mode: "auto",
+      amount: 100,
+      idempotency_key: "pr-refund-1",
+    });
+    expect(refund.outcome).toBe("gateway_refunded");
+    expect(refund.payment_request_id).toBe("pr-1");
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/payment-requests/pr-1/send-link",
+        body: { channel: "whatsapp" },
+      },
+      { method: "POST", path: "/api/v1/payment-requests/pr-1/document", body: undefined },
+      {
+        method: "POST",
+        path: "/api/v1/payment-requests/pr-1/refund",
+        body: {
+          reason: "requested_by_customer",
+          mode: "auto",
+          amount: 100,
+          idempotency_key: "pr-refund-1",
+        },
+      },
+    ]);
+  });
+
+  it("sendLink surfaces LINK_ALREADY_SENT", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(409, {
+        statusCode: 409,
+        error: "Conflict",
+        error_code: "LINK_ALREADY_SENT",
+        sent_at: "2026-07-15T09:00:00.000Z",
+        message: "The pay-link was already sent on this channel",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.paymentRequests
+      .sendLink("pr-1", { channel: "email" })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("LINK_ALREADY_SENT");
+  });
+
   it("feature-gate 403 embeds the workspace_payments feature id", async () => {
     // Pay-links are gated by `workspace_payments`, NOT the `payments`
     // ledger feature — the message embeds whichever id is missing.
@@ -974,6 +1069,140 @@ describe("payment requests", () => {
     expect(err).toBeInstanceOf(OtokApiError);
     expect(err.status).toBe(403);
     expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
+  });
+});
+
+describe("payment refunds", () => {
+  it("payments.refund sends reason + mode and returns the refund result", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(new URL(String(url)).pathname).toBe("/api/v1/payments/pay-1/refund");
+      expect(JSON.parse(init.body)).toEqual({
+        reason: "duplicate",
+        mode: "recorded_outside",
+        amount: 50,
+        idempotency_key: "refund-1",
+      });
+      return json(201, {
+        payment: { id: "pay-1", entries: [{ id: "e-1" }, { id: "e-2" }] },
+        entry: { id: "e-2", kind: "refund", amount: -50, recorded_outside: true },
+        outcome: "recorded_outside",
+        duplicate: false,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.payments.refund("pay-1", {
+      reason: "duplicate",
+      mode: "recorded_outside",
+      amount: 50,
+      idempotency_key: "refund-1",
+    });
+    expect(result.outcome).toBe("recorded_outside");
+    expect(result.entry?.recorded_outside).toBe(true);
+    expect(result.payment.entries).toHaveLength(2);
+  });
+
+  it("surfaces API_KEY_MONEY_OUT_DISABLED", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(403, {
+        statusCode: 403,
+        error: "Forbidden",
+        error_code: "API_KEY_MONEY_OUT_DISABLED",
+        message: "This API key is not allowed to move money out",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.payments
+      .refund("pay-1", { reason: "other", mode: "auto" })
+      .catch((e) => e);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("API_KEY_MONEY_OUT_DISABLED");
+  });
+});
+
+describe("saved cards", () => {
+  it("lists a contact's payment methods", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(init.method).toBe("GET");
+      expect(new URL(String(url)).pathname).toBe("/api/v1/contacts/c-1/payment-methods");
+      return json(200, {
+        payment_methods: [
+          { id: "pm-1", provider: "cardcom", brand: "visa", last4: "4242", status: "active", isDefault: true },
+        ],
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.contacts.listPaymentMethods("c-1");
+    expect(result.payment_methods[0]!.last4).toBe("4242");
+    expect(result.payment_methods[0]!.isDefault).toBe(true);
+  });
+
+  it("charges a saved card — paid (200) and processing (202)", async () => {
+    const responses = [
+      json(200, { outcome: "paid", duplicate: false, payment_request: { id: "pr-9", status: "paid" } }),
+      json(202, { outcome: "processing", duplicate: true, payment_request_id: "pr-10" }),
+    ];
+    const bodies: unknown[] = [];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(new URL(String(url)).pathname).toBe("/api/v1/contacts/c-1/charges");
+      bodies.push(JSON.parse(init.body));
+      return responses.shift()!;
+    });
+    const otok = makeClient(fetchMock as any);
+
+    const paid = await otok.contacts.chargeSavedCard("c-1", {
+      idempotency_key: "charge-0001",
+      amount: 250,
+      method_selection: "most_recent",
+    });
+    expect(paid.outcome).toBe("paid");
+    if (paid.outcome === "paid") expect(paid.payment_request.id).toBe("pr-9");
+
+    const processing = await otok.contacts.chargeSavedCard("c-1", {
+      idempotency_key: "charge-0002",
+      amount: 100,
+    });
+    expect(processing.outcome).toBe("processing");
+    if (processing.outcome === "processing") {
+      expect(processing.payment_request_id).toBe("pr-10");
+      expect(processing.duplicate).toBe(true);
+    }
+    expect(bodies).toEqual([
+      { idempotency_key: "charge-0001", amount: 250, method_selection: "most_recent" },
+      { idempotency_key: "charge-0002", amount: 100 },
+    ]);
+  });
+
+  it("surfaces a decline and a missing capability as typed errors", async () => {
+    const responses = [
+      json(409, {
+        statusCode: 409,
+        error: "Conflict",
+        error_code: "TOKEN_CHARGE_DECLINED",
+        failure_reason: "Card declined",
+        payment_request_id: "pr-11",
+        message: "The card was declined",
+      }),
+      json(403, {
+        statusCode: 403,
+        error: "Forbidden",
+        error_code: "API_KEY_CHARGES_DISABLED",
+        message: "This API key is not allowed to charge saved cards",
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    const otok = makeClient(fetchMock as any);
+
+    let err = await otok.contacts
+      .chargeSavedCard("c-1", { idempotency_key: "charge-0003", amount: 10 })
+      .catch((e) => e);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("TOKEN_CHARGE_DECLINED");
+
+    err = await otok.contacts
+      .chargeSavedCard("c-1", { idempotency_key: "charge-0004", amount: 10 })
+      .catch((e) => e);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("API_KEY_CHARGES_DISABLED");
   });
 });
 

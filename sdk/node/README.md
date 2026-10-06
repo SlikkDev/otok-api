@@ -201,6 +201,8 @@ Order lifecycle events — `order.created`, `order.paid`, `order.refunded`, `ord
 
 Payment-request lifecycle events — `payment_request.created`, `payment_request.paid`, `payment_request.expired`, `payment_request.cancelled` — are opt-in by listing too (`PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES`). They fire for hosted pay-links from every mint source (API and in-app), never for direct saved-card charges or internal dunning-recovery links. Payloads follow the order-event conventions (full field set, explicit `null`s); `data.test_mode` is always present — check it before recording revenue, and treat a late `payment_request.paid` after a cancel as authoritative.
 
+`payment.refunded` (`PAYMENT_WEBHOOK_EVENT_TYPES`, opt-in by listing) fires once per refund recorded on a payment, from every source — the refund routes, order refunds, in-app refunds, connected stores and refunds made in the payment provider's dashboard. `data.refund.amount` is positive; `data.refund.recorded_outside` says whether the money moved through the gateway.
+
 Events are POSTed with an `X-Otok-Signature: t=<unix>,v1=<hex>` header (HMAC-SHA256 of `"{t}.{body}"` with your secret). Failed deliveries retry for ≈16 hours. **Always verify against the raw request body** — parsing and re-stringifying changes the bytes.
 
 #### Express
@@ -285,7 +287,7 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 
 | Namespace | Endpoints |
 |---|---|
-| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id`; acquisitions: `GET /v1/contacts/:id/acquisitions` (Attribution feature) |
+| `otok.contacts` | `GET/POST /v1/contacts`, `GET/PATCH /v1/contacts/:id` (POST = upsert by phone/email); consent: `GET /v1/contacts/:id/consent`, `PUT /v1/contacts/:id/consent/:channel`; documents: `GET /v1/contacts/:id/documents` (Payments feature); saved cards: `GET /v1/contacts/:id/payment-methods`, `POST /v1/contacts/:id/charges` (`workspace_payments` feature); notes: `GET/POST /v1/contacts/:id/notes`, `PATCH/DELETE /v1/notes/:id`; acquisitions: `GET /v1/contacts/:id/acquisitions` (Attribution feature) |
 | `otok.tags` | `GET/POST /v1/tags`, `GET/PATCH /v1/tags/:id` |
 | `otok.contactGroups` | `GET/POST /v1/contact-groups`, `GET/PATCH /v1/contact-groups/:id` |
 | `otok.pipelines` | `GET /v1/pipelines` (with ordered stages) |
@@ -301,7 +303,7 @@ You can also call `verifyWebhookSignature(payload, header, secret, { toleranceSe
 | `otok.templates` | `GET /v1/templates`, `GET /v1/templates/:id`, `POST /v1/templates/:id/send` (WhatsApp) |
 | `otok.events` | `GET/POST /v1/events`, `GET /v1/events/:id` (POST = idempotent upsert by `external_id`); attendances: `GET/POST /v1/events/:id/attendances`, `PATCH /v1/attendances/:id` |
 | `otok.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
-| `otok.paymentRequests` | `GET/POST /v1/payment-requests`, `GET /v1/payment-requests/:id`, `POST …/cancel` — hosted pay-links (`workspace_payments` feature; create is **not** idempotent) |
+| `otok.paymentRequests` | `GET/POST /v1/payment-requests`, `GET /v1/payment-requests/:id`, `POST …/cancel`, `POST …/send-link`, `POST …/document`, `POST …/refund` — hosted pay-links (`workspace_payments` feature; create is idempotent only with `idempotency_key`) |
 | `otok.orders` | `GET/POST /v1/orders`, `GET /v1/orders/:id`, `POST …/refunds`, `POST …/mark-paid`, `POST …/cancel` |
 | `otok.meetingTypes` | `GET /v1/meeting-types`, `GET /v1/meeting-types/:id`, `GET /v1/meeting-types/:id/slots`, `GET /v1/meeting-types/:id/embed` |
 | `otok.bookings` | `GET/POST /v1/bookings`, `GET /v1/bookings/:id`, `POST …/cancel`, `POST …/reschedule`, `POST …/reassign` |
@@ -324,9 +326,9 @@ Every namespace with a paginated `list()` (contacts, tags, contact groups, deals
 - `429` and `5xx` responses are retried up to `maxRetries` times (default 2) with exponential backoff + full jitter, honoring the `Retry-After` header. This applies to **all** requests: the server answered, so the retry semantics are unchanged from v0.1.
 - **Transient network errors are retried too — but only when replaying is safe.** Connection reset/refusal (`ECONNRESET`/`ECONNREFUSED`), DNS failures (`ENOTFOUND`/`EAI_AGAIN`), socket timeouts (`ETIMEDOUT`, and the SDK's own `OtokTimeoutError`), and similar transport-level failures share the same bounded backoff schedule (`maxRetries`, exponential + full jitter) **if and only if** the request is:
   - a **safe method** (`GET`/`HEAD`), or
-  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`otok.emails.send`), `external_reference` (`otok.deals.create`, `otok.payments.create`, `otok.orders.create`, `otok.emailCampaigns.create`, `otok.newsletters.createIssue`), or `external_refund_id` (`otok.orders.createRefund`).
+  - a **write carrying its own idempotency key**: a body with a non-empty `idempotency_key` (`otok.emails.send`, `otok.paymentRequests.create`, `otok.contacts.chargeSavedCard`, the refund calls), `external_reference` (`otok.deals.create`, `otok.payments.create`, `otok.orders.create`, `otok.emailCampaigns.create`, `otok.newsletters.createIssue`), or `external_refund_id` (`otok.orders.createRefund`).
 
-  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, …) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is thrown for you to handle. In particular, **`otok.paymentRequests.create` is never auto-retried**: the endpoint has no idempotency key at all, and a replay would mint a second, independently payable link — check `otok.paymentRequests.list()` before minting again after a failure. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `otok.commerce.trackOrder`) or retry at the call site.
+  Any other write (contact upserts, tag/group/campaign writes, bookings, stage moves, …) is **never** network-retried — a network error is ambiguous (the request may have reached the server), so the error is thrown for you to handle. In particular, **`otok.paymentRequests.create` without an `idempotency_key` is never auto-retried**: a replay would mint a second, independently payable link — send a key, or check `otok.paymentRequests.list()` before minting again after a failure. To make such flows retry-safe, use the idempotent surfaces (`external_reference`, `idempotency_key`, `otok.commerce.trackOrder`) or retry at the call site.
 - Rate limits are enforced per API key (default 100 requests/min; `POST /v1/emails` allows 300/min).
 
 ```ts
@@ -421,6 +423,39 @@ const result = await otok.reports.run(reportId, { page: { size: 50, offset: 0 } 
 ```
 
 [Cycles](../../docs/api/product-cycles.md) support list, iteration, get, create/upsert and update. [Reports](../../docs/api/reports.md) support list, iteration and run; only shared, unarchived reports are available, and runs use workspace-wide data. Product scheduling fields, deal `cycle_id` and payment-request `terminal_number` are typed.
+
+## Refunds, pay-link delivery and saved cards
+
+Refunds take a required `reason` and `mode` (`"auto"` refunds a provider-collected charge through the payment gateway; `"recorded_outside"` books it only) and need an API key with refund access, granted by the workspace owner. An `idempotency_key` makes a retry safe:
+
+```ts
+const result = await otok.payments.refund(paymentId, {
+  reason: "requested_by_customer",
+  mode: "auto",
+  amount: 100,
+  idempotency_key: "refund-88123-1",
+});
+result.outcome; // "gateway_refunded" | "voided" | "credit_document_only" | "recorded_outside" | "ledger_only" | "duplicate"
+await otok.paymentRequests.refund(requestId, { reason: "duplicate", mode: "auto" });
+```
+
+Pay-links can be sent and documented from the API, and saved cards charged with a required idempotency key (the API key needs saved-card charge access, off by default):
+
+```ts
+await otok.paymentRequests.sendLink(requestId, { channel: "whatsapp" });
+await otok.paymentRequests.issueDocument(requestId);
+const { payment_methods } = await otok.contacts.listPaymentMethods(contactId);
+const charge = await otok.contacts.chargeSavedCard(contactId, {
+  idempotency_key: "charge-0001",
+  amount: 250,
+  method_id: payment_methods[0]?.id,
+});
+if (charge.outcome === "processing") {
+  // HTTP 202 — poll otok.paymentRequests.get(charge.payment_request_id)
+}
+```
+
+Payments, payment requests and orders accept `sale_id` to fund an existing sale. See [Payments](../../docs/api/payments.md), [Payment requests](../../docs/api/payment-requests.md) and [Contacts](../../docs/api/contacts.md#saved-cards-and-charges).
 
 SDK development checks require Node.js 20.19 or newer for the JavaScript test runner.
 

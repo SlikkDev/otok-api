@@ -57,6 +57,7 @@ Header fields:
 | `external_updated_at` | ISO 8601 or `null` | Store-sync snapshot clock — `null` for API- and app-created orders |
 | `payment_reference` | string or `null` | Reference of the recorded payment backing this order (see [mark-paid](#post-apiv1ordersidmark-paid)) |
 | `payment_synced_at` | ISO 8601 or `null` | Payment-recording convergence stamp (informational) |
+| `sale_id` | UUID or `null` | The [sale](sales.md) this order belongs to — the one named with `sale_id`, or the sale recorded when the order was paid |
 | `note` | string or `null` | |
 | `metadata` | object or `null` | Read-only via the API — not settable on any `/v1` route |
 | `created_by` | UUID or `null` | `null` for API writes |
@@ -170,7 +171,12 @@ Creates an order — or, when `external_reference` matches an existing order, **
 | `coupon_codes` | string[] | no | ≤50 entries |
 | `note` | string | no | ≤5000 |
 | `deal_id` | UUID | no | Must be a deal of the **same contact** — 404 `ORDER_DEAL_NOT_FOUND` when unknown to the workspace, 409 `ORDER_DEAL_CONTACT_MISMATCH` when it belongs to another contact |
+| `sale_id` | UUID | no | An existing [sale](sales.md) this order belongs to — see [orders and sales](#orders-and-sales). A create-time link only: an `external_reference` match never re-points it |
 | `external_reference` | string | no | ≤255 — **the idempotency key**, unique per workspace |
+
+### Orders and sales
+
+When an order is **paid** (a paid create, or [mark-paid](#post-apiv1ordersidmark-paid)), oToK records the payment and — unless the workspace switched it off in its Sales settings — also records the order as a [sale](sales.md), and stamps the order's `sale_id`. Pass `sale_id` (on create or on mark-paid) to have the payment **fund an existing sale** instead of recording a new one. The sale must belong to the order's contact, be in the order's currency and not be cancelled, and the workspace's plan must include Sales.
 
 ### Item shape
 
@@ -324,6 +330,12 @@ Response `201`:
 | 404 | `"Contact not found"` | `contact_id` not in this workspace |
 | 404 | `ORDER_DEAL_NOT_FOUND` | `deal_id` unknown to the workspace |
 | 409 | `ORDER_DEAL_CONTACT_MISMATCH` | `deal_id` belongs to another contact |
+| 400 | `CURRENCY_MISMATCH` | `sale_id` names a sale in another currency |
+| 404 | `"Sale not found"` | `sale_id` unknown to the workspace |
+| 409 | `PLAN_FEATURE_REQUIRED` | `sale_id` sent while the plan has no Sales feature |
+| 409 | `SALE_ALREADY_CANCELLED` | `sale_id` names a cancelled sale |
+| 409 | `ORDER_SALE_CONTACT_MISMATCH` | `sale_id` belongs to another contact |
+| 409 | `ORDER_SALE_ALREADY_LINKED` | The order already belongs to a different sale |
 | 409 | `CONTACT_MERGE_REQUIRED` | Phone and email resolve to two different contacts |
 | 409 | `ORDER_REFERENCE_EXISTS` | Reference collision — normally resolved automatically as an update; not typically observable |
 
@@ -331,11 +343,13 @@ Response `201`:
 
 ### Side effects
 
-Creation fires the workspace's **order-created automations** (plus **order-paid** when created as `paid`), writes the contact's activity timeline, and emits registered `order.created` (and `order.paid`) [webhooks](webhooks.md#order-events). A paid create also records a completed payment for the full order total, in the order's currency, on the contact's payment history. API writes are attributed to source `api` with no acting user.
+Creation fires the workspace's **order-created automations** (plus **order-paid** when created as `paid`), writes the contact's activity timeline, and emits registered `order.created` (and `order.paid`) [webhooks](webhooks.md#order-events). A paid create also records a completed payment for the full order total, in the order's currency, on the contact's payment history, and a sale (see [orders and sales](#orders-and-sales)). API writes are attributed to source `api` with no acting user.
 
 ## POST /api/v1/orders/:id/refunds
 
-Appends to the order's refund ledger, rolls the financial status to `partially_refunded`/`refunded`, mirrors the refund into the recorded payment, and fires the **order-refunded automations** + the `order.refunded` webhook.
+Appends to the order's refund ledger, rolls the financial status to `partially_refunded`/`refunded`, mirrors the refund into the recorded payment, and fires the **order-refunded automations** + the `order.refunded` webhook (and, for the mirrored payment refund, the [`payment.refunded`](webhooks.md#payment-events) webhook).
+
+This route **records** a refund — it never moves money at a payment gateway. Requires an API key with [refund access](payments.md#payments) (`403 API_KEY_MONEY_OUT_DISABLED` otherwise). When the order's payment was collected through the connected payment provider, refund it from the payment instead ([`POST /v1/payments/:id/refund`](payments.md#post-apiv1paymentsidrefund), which can refund at the gateway or record the refund as returned outside oToK) — this route answers 409 `REFUND_VIA_PROVIDER_REQUIRED` with the `payment_id` to use; the order's refund ledger follows that payment refund automatically.
 
 ### Request body
 
@@ -387,7 +401,8 @@ curl -X POST "https://app.otok.io/api/v1/orders/0a1b2c3d-4e5f-6071-8293-a4b5c6d7
 
 ### Semantics
 
-- Refunds require the order to have **ever been paid** (`paid_at` set — a `partially_paid` order qualifies). Never-paid → 400 `error_code: "ORDER_NEVER_PAID"`, message `"Cannot refund an order that was never paid."`.
+- Refunds require the order to have **ever been paid** (`paid_at` set). Never-paid → 400 `error_code: "ORDER_NEVER_PAID"`, message `"Cannot refund an order that was never paid."`.
+- Only a **fully captured** order — `paid`, `partially_refunded` or `refunded` — can be refunded here; a `partially_paid` (deposit-only) or `voided` order answers 409 `ORDER_NOT_CAPTURED` (with its `financial_status`).
 - A refund that exhausts the remaining total moves `financial_status` to `refunded`; a partial one to `partially_refunded`. These states are reachable **only** through refunds — never through a status endpoint.
 - Refunding a cancelled-but-paid order is allowed — cancellation doesn't touch the money axis.
 - `refunded_at` is stamped on the order header with each refund.
@@ -399,18 +414,23 @@ curl -X POST "https://app.otok.io/api/v1/orders/0a1b2c3d-4e5f-6071-8293-a4b5c6d7
 |---|---|
 | 400 | `ORDER_NEVER_PAID`; `"Refund amount must be a positive number"`; `"Refund amount exceeds the order's remaining total (…)"`; `"refundedAt is not a valid date"`; validation array |
 | 403 | `FEATURE_NOT_INCLUDED_IN_PLAN` |
+| 403 | `API_KEY_MONEY_OUT_DISABLED` — the API key lacks [refund access](payments.md#payments) |
 | 404 | `"Order not found"` |
+| 409 | `ORDER_NOT_CAPTURED` — the order is `partially_paid` or `voided` |
+| 409 | `REFUND_VIA_PROVIDER_REQUIRED` — the order's payment was collected through the payment provider; refund the payment named by `payment_id` |
+| 409 | `REFUND_IN_STORE` — the order's payment came from a connected store; refund it in the store |
 | 409 | `STORE_SYNCED_READ_ONLY` — [store-synced orders](#store-provenance-fields) only |
 
 ## POST /api/v1/orders/:id/mark-paid
 
-Moves the financial status to `paid`, records the payment (a completed one-time payment for the full order total, in the order's currency, on the contact's payment history) — or **links onto an existing payment** via `payment_reference` — and fires the **order-paid automations** + the `order.paid` webhook.
+Moves the financial status to `paid`, records the payment (a completed one-time payment for the full order total, in the order's currency, on the contact's payment history) — or **links onto an existing payment** via `payment_reference` — records the sale (see [orders and sales](#orders-and-sales)), and fires the **order-paid automations** + the `order.paid` webhook.
 
 ### Request body (all optional)
 
 | Field | Type | Notes |
 |---|---|---|
 | `payment_reference` | string | ≤255 — the `external_reference` of an **existing** payment (e.g. one your system already recorded via [`POST /v1/payments`](payments.md)) to link the order onto instead of recording a new payment. Link-only — the payment's amount is never rewritten |
+| `sale_id` | UUID | An existing [sale](sales.md) this payment funds — no new sale is recorded. Same checks as on [create](#errors) |
 
 ```bash
 curl -X POST "https://app.otok.io/api/v1/orders/0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9/mark-paid" \
@@ -445,6 +465,7 @@ The `ORDER_PAYMENT_*` codes validate `payment_reference` and are checked **befor
 | 409 | `ORDER_PAYMENT_CONTACT_MISMATCH` | The payment belongs to another contact |
 | 409 | `ORDER_PAYMENT_NOT_LINKABLE` | Not a one-time payment with a completed charge |
 | 409 | `ORDER_PAYMENT_ALREADY_LINKED` | The order is already linked to a **different** payment reference (re-sending the same reference is fine) |
+| 400 / 404 / 409 | `CURRENCY_MISMATCH` / `"Sale not found"` / `PLAN_FEATURE_REQUIRED`, `SALE_ALREADY_CANCELLED`, `ORDER_SALE_CONTACT_MISMATCH`, `ORDER_SALE_ALREADY_LINKED` | `sale_id` checks — as on [create](#errors) |
 | 409 | `STORE_SYNCED_READ_ONLY` | [Store-synced orders](#store-provenance-fields) only |
 
 ## POST /api/v1/orders/:id/cancel
