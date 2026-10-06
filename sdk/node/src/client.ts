@@ -17,6 +17,7 @@ import {
   PipelinesApi,
   ProductsApi,
   ProductCyclesApi,
+  SalesApi,
   EventsApi,
   ReportsApi,
   SenderProfilesApi,
@@ -68,6 +69,7 @@ export class OtokClient {
   readonly payments: PaymentsApi;
   readonly paymentRequests: PaymentRequestsApi;
   readonly orders: OrdersApi;
+  readonly sales: SalesApi;
   readonly meetingTypes: MeetingTypesApi;
   readonly bookings: BookingsApi;
   readonly webhookEndpoints: WebhookEndpointsApi;
@@ -98,6 +100,7 @@ export class OtokClient {
     this.payments = new PaymentsApi(this.http);
     this.paymentRequests = new PaymentRequestsApi(this.http);
     this.orders = new OrdersApi(this.http);
+    this.sales = new SalesApi(this.http);
     this.meetingTypes = new MeetingTypesApi(this.http);
     this.bookings = new BookingsApi(this.http);
     this.webhookEndpoints = new WebhookEndpointsApi(this.http);

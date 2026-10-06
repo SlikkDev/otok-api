@@ -1,8 +1,8 @@
 # Webhooks
 
-Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), **payment-request events** (lifecycle events for [pay-links](payment-requests.md)), **contact events** (lifecycle + [consent](consent-and-suppressions.md) changes), **message events** (inbound WhatsApp messages), **deal events** (lifecycle events for [deals](deals.md)), **booking events** (lifecycle events for [bookings](bookings.md)), **event-attendance events**, and **form-submission events**. Events are signed, retried, and deduplicable by event id.
+Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), **payment-request events** (lifecycle events for [pay-links](payment-requests.md)), **contact events** (lifecycle + [consent](consent-and-suppressions.md) changes), **message events** (inbound WhatsApp messages), **deal events** (lifecycle events for [deals](deals.md)), **sale events** (recorded / cancelled / paid / refunded [sales](sales.md)), **booking events** (lifecycle events for [bookings](bookings.md)), **event-attendance events**, and **form-submission events**. Events are signed, retried, and deduplicable by event id.
 
-**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links. **Contact, message, deal, booking, attendance, and form events** fire for every intentional write source too — their quiet paths are documented per family below.
+**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links. **Contact, message, deal, sale, booking, attendance, and form events** fire for every intentional write source too — their quiet paths are documented per family below.
 
 All management endpoints require [authentication](getting-started.md#authentication). Errors use the structured envelope `{"error": {"code", "message"}}`.
 
@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
+| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `sale.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -152,6 +152,17 @@ Four [deal](deals.md) lifecycle events. All are **opt-in** (delivered only to en
 | `deal.stage_changed` | opt-in | The deal moved to another stage — `data.from_stage_id`/`from_stage_name` carry the origin (they are `null` on every other deal event) |
 | `deal.won` | opt-in | The deal was marked won (`data.closed_at` stamped; the deal keeps its last stage) |
 | `deal.lost` | opt-in | The deal was marked lost — `data.lost_reason` carries the stored reason (or `null`) |
+
+### Sale events
+
+Four [sales ledger](sales.md) events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`). They fire for **every** write source — API, in-app, automations, and the sales the app records from quotes, orders, pay-links, bookings and event registrations — `data.sale.source` says where the sale came from.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `sale.recorded` | opt-in | A sale was recorded — once per sale (an `external_reference` replay does not fire it again) |
+| `sale.cancelled` | opt-in | A sale **item** was cancelled — **once per cancelled item**, and `data.sale` is the item (see [below](#sale-event-data)). Reinstating an item fires nothing |
+| `sale.paid` | opt-in | The sale's `settlement_status` became `paid` — the allocated money now covers the total |
+| `sale.refunded` | opt-in | Money was refunded from the sale — fires when the refund settles (a refund still pending fires nothing until then) |
 
 ### Booking events
 
@@ -462,6 +473,97 @@ All four deal events carry the same `data` fields (a snapshot of the deal at eve
 | `data.external_reference` | The [`/v1/deals`](deals.md) idempotency reference, when set |
 | `data.source` | Which surface performed the write — `manual`, `api`, `automation`, `salesforce`. Tolerate unknown values |
 | `data.expected_close_at` / `data.closed_at` / `data.lost_reason` | ISO 8601 UTC or `null` |
+
+### Sale event `data`
+
+`sale.recorded`, `sale.paid` and `sale.refunded` carry the sale header with its items, plus the buyer (full field set, explicit `null`s):
+
+```json
+{
+  "id": "f6071829-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+  "type": "sale.paid",
+  "created_at": "2026-10-02T12:30:00.000Z",
+  "data": {
+    "sale": {
+      "id": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d",
+      "number": 1042,
+      "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "deal_id": null,
+      "owner_user_id": "708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f",
+      "status": "active",
+      "settlement_status": "paid",
+      "currency": "ILS",
+      "total_amount": 350,
+      "paid_total": 350,
+      "refunded_total": 0,
+      "pending_refund_total": 0,
+      "sold_at": "2026-10-01T09:00:00.000Z",
+      "source": "api",
+      "external_reference": "crm-invoice-4471",
+      "items": [
+        {
+          "id": "6b7c8d9e-0f1a-4b2c-9d3e-4f5a6b7c8d9e",
+          "position": 0,
+          "product_id": "2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a",
+          "cycle_id": null,
+          "title": "Onboarding session",
+          "quantity": 1,
+          "unit_amount": 350,
+          "discount_percent": null,
+          "line_total": 350,
+          "status": "active"
+        }
+      ]
+    },
+    "contact": {
+      "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "name": "Dana Levi",
+      "phone": "+972501234567",
+      "email": "dana@example.com"
+    },
+    "settlement": {
+      "transition_id": "0718293a-4b5c-4d6e-9f80-1a2b3c4d5e6f",
+      "paid_total": 350,
+      "total_amount": 350,
+      "payment": {
+        "payment_id": "8192a3b4-c5d6-4e7f-8091-a2b3c4d5e6f7",
+        "entry_id": "92a3b4c5-d6e7-4f80-91a2-b3c4d5e6f708",
+        "amount": 350
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `data.sale.id` / `data.sale.number` | The sale and its per-workspace number |
+| `data.sale.contact_id` | The buyer |
+| `data.sale.deal_id` / `data.sale.owner_user_id` | The linked deal and the owning team member, or `null` |
+| `data.sale.status` | `active` / `partially_cancelled` / `cancelled` |
+| `data.sale.settlement_status` | `untracked` / `unpaid` / `partially_paid` / `paid` / `partially_refunded` / `refunded` |
+| `data.sale.currency` / `total_amount` / `paid_total` / `refunded_total` / `pending_refund_total` | **JSON numbers** in the sale's currency; `total_amount` is `null` while no active item has a price |
+| `data.sale.sold_at` | ISO 8601 UTC |
+| `data.sale.source` | Where the sale was recorded — `api`, `manual`, `automation`, or the record that created it (`quote`, `order`, `payment_request`, …). Tolerate unknown values |
+| `data.sale.external_reference` | The [`/v1/sales`](sales.md) idempotency reference, when set |
+| `data.sale.items[]` | Every item in line order, cancelled ones included: `id`, `position`, `product_id`, `cycle_id`, `title`, `quantity`, `unit_amount`, `discount_percent`, `line_total`, `status` (`active` / `cancelled`) |
+| `data.contact` | The buyer: `id`, `name`, `phone`, `email` |
+| `data.settlement` | **`sale.paid` only.** `transition_id` (identifies this settlement change), `paid_total`, `total_amount`, and `payment` — the payment entry that completed the sale (`payment_id`, `entry_id`, `amount`), or `null` |
+| `data.refund` | **`sale.refunded` only.** `payment_id`, `entry_id` (the refund entry), `amount` (refunded from this sale — a **positive** number), `reason` (the refund reason, or `null`), `recorded_outside` (`true` when recorded as returned outside oToK), and `refunded_total` (the sale's total refunded after this refund) |
+
+**`sale.cancelled` is per item.** Its `data.sale` is the cancelled **item**, not the header — `data.sale.id` is the **item** id and `data.sale.sale_id` the sale's id:
+
+| Field | Meaning |
+|---|---|
+| `data.sale.id` / `data.sale.sale_id` | The item, and the sale it belongs to |
+| `data.sale.position` / `contact_id` / `product_id` / `cycle_id` / `title` | The line — `contact_id` is the buyer |
+| `data.sale.quantity` / `unit_amount` / `discount_percent` / `line_total` / `currency` | JSON numbers (or `null` while unpriced) |
+| `data.sale.purchased_at` / `cancelled_at` | ISO 8601 UTC |
+| `data.sale.status` | `cancelled` |
+| `data.sale.cancel_reason` / `cancel_note` | `customer_request`, `duplicate`, `mistake`, `not_delivered`, `payment_failed`, `fraud`, or `other`; the note or `null` |
+| `data.contact` | The buyer: `id`, `name`, `phone`, `email` |
+
+Sale payloads never carry payment-provider references, refund idempotency keys, or the team member who performed the write.
 
 ### Booking event `data`
 

@@ -12,6 +12,7 @@ import {
   MESSAGE_WEBHOOK_EVENT_TYPES,
   ORDER_WEBHOOK_EVENT_TYPES,
   PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+  SALE_WEBHOOK_EVENT_TYPES,
   type WebhookEventType,
 } from "../src/types";
 
@@ -109,6 +110,18 @@ describe("webhook event type constants", () => {
       ...EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES,
       ...FORM_WEBHOOK_EVENT_TYPES,
     ]) {
+      expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
+    }
+  });
+
+  it("sale event types are registrable but never defaulted", () => {
+    expect(SALE_WEBHOOK_EVENT_TYPES).toEqual([
+      "sale.recorded",
+      "sale.cancelled",
+      "sale.paid",
+      "sale.refunded",
+    ]);
+    for (const eventType of SALE_WEBHOOK_EVENT_TYPES) {
       expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
     }
   });
@@ -1187,5 +1200,125 @@ describe("contact acquisitions", () => {
       kind: "api",
       limit: "20",
     });
+  });
+});
+
+describe("sales", () => {
+  it("list serializes every documented filter", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe("/api/v1/sales");
+      expect(Object.fromEntries(parsed.searchParams)).toEqual({
+        contact_id: "c-1",
+        owner_user_id: "u-1",
+        status: "active",
+        settlement_status: "unpaid",
+        external_reference: "crm-invoice-4471",
+        limit: "10",
+        offset: "20",
+      });
+      return json(200, { data: [], total: 0, limit: 10, offset: 20 });
+    });
+    const otok = makeClient(fetchMock as any);
+    await otok.sales.list({
+      contact_id: "c-1",
+      owner_user_id: "u-1",
+      status: "active",
+      settlement_status: "unpaid",
+      external_reference: "crm-invoice-4471",
+      limit: 10,
+      offset: 20,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("iter pages with the deals/payments cap of 100", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      const parsed = new URL(String(url));
+      expect(parsed.searchParams.get("limit")).toBe("100");
+      return json(200, { data: [{ id: "s-1" }], total: 1, limit: 100, offset: 0 });
+    });
+    const otok = makeClient(fetchMock as any);
+    const ids: string[] = [];
+    for await (const sale of otok.sales.iter()) ids.push(sale.id);
+    expect(ids).toEqual(["s-1"]);
+  });
+
+  it("issues the documented verb + path + body for each method", async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      calls.push({
+        method: init.method,
+        path: new URL(String(url)).pathname,
+        body: init.body === undefined ? undefined : JSON.parse(init.body),
+      });
+      return json(200, { id: "s-1" });
+    });
+    const otok = makeClient(fetchMock as any);
+
+    await otok.sales.create({
+      contact_id: "c-1",
+      items: [{ product_id: "p-1", quantity: 2 }],
+      currency: "ILS",
+      external_reference: "crm-invoice-4471",
+    });
+    await otok.sales.get("s-1");
+    await otok.sales.update("s-1", { note: null });
+    await otok.sales.cancel("s-1", {
+      reason: "customer_request",
+      money: { mode: "refund" },
+    });
+    await otok.sales.reinstate("s-1");
+    await otok.sales.refund("s-1", {
+      reason: "requested_by_customer",
+      mode: "auto",
+      amount: 100,
+      idempotency_key: "crm-refund-1",
+    });
+    await otok.sales.setOwner("s-1", null);
+    await otok.sales.linkDeal("s-1", "d-1");
+    await otok.sales.allocate("s-1", { payment_entry_id: "e-1" });
+    await otok.sales.unallocate("s-1", "a-1");
+    await otok.sales.delete("s-1");
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/sales",
+        body: {
+          contact_id: "c-1",
+          items: [{ product_id: "p-1", quantity: 2 }],
+          currency: "ILS",
+          external_reference: "crm-invoice-4471",
+        },
+      },
+      { method: "GET", path: "/api/v1/sales/s-1", body: undefined },
+      { method: "PATCH", path: "/api/v1/sales/s-1", body: { note: null } },
+      {
+        method: "POST",
+        path: "/api/v1/sales/s-1/cancel",
+        body: { reason: "customer_request", money: { mode: "refund" } },
+      },
+      { method: "POST", path: "/api/v1/sales/s-1/reinstate", body: {} },
+      {
+        method: "POST",
+        path: "/api/v1/sales/s-1/refund",
+        body: {
+          reason: "requested_by_customer",
+          mode: "auto",
+          amount: 100,
+          idempotency_key: "crm-refund-1",
+        },
+      },
+      { method: "PUT", path: "/api/v1/sales/s-1/owner", body: { owner_user_id: null } },
+      { method: "PUT", path: "/api/v1/sales/s-1/deal", body: { deal_id: "d-1" } },
+      {
+        method: "POST",
+        path: "/api/v1/sales/s-1/allocations",
+        body: { payment_entry_id: "e-1" },
+      },
+      { method: "DELETE", path: "/api/v1/sales/s-1/allocations/a-1", body: undefined },
+      { method: "DELETE", path: "/api/v1/sales/s-1", body: undefined },
+    ]);
   });
 });

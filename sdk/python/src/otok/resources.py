@@ -90,6 +90,21 @@ from .types import (
     ReportListParams,
     ReportRunParams,
     ReportRunResult,
+    Sale,
+    SaleAllocateParams,
+    SaleAllocation,
+    SaleCancelParams,
+    SaleCancelResult,
+    SaleCreateParams,
+    SaleCreateResult,
+    SaleListParams,
+    SaleRefundParams,
+    SaleRefundResult,
+    SaleReinstateParams,
+    SaleReinstateResult,
+    SaleUnallocateResult,
+    SaleUpdateParams,
+    SaleView,
     SenderProfileListParams,
     SetConsentParams,
     SlotsParams,
@@ -1509,6 +1524,136 @@ class OrdersApi:
         success.
         """
         return cast(Order, self._http.request("POST", f"/v1/orders/{order_id}/cancel"))
+
+
+# ─────────────────────────── Sales ───────────────────────────
+
+
+class SalesApi:
+    """The sales ledger — what each contact bought. Recording a sale never
+    charges anyone; money is linked by allocating payment entries to it.
+
+    Requires the Sales feature (``sales``) on the workspace's plan. Refunds
+    (and cancelling with a money mode) need a key with the "Allow refunds"
+    capability (``allow_money_out`` — 403 ``API_KEY_MONEY_OUT_DISABLED``);
+    the two DELETE routes need "Allow permanent deletion through the API"
+    (``allow_hard_delete`` — 403 ``HARD_DELETE_OWNER_ONLY``). Both are
+    granted per key by the workspace owner.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[SaleListParams] = None) -> Paginated:
+        """List sale headers, newest ``sold_at`` first. Pages like
+        deals/payments (default 25, cap 100); an unknown ``status`` /
+        ``settlement_status`` 400s.
+        """
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/sales", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[SaleListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching sale, auto-paginating ``GET /v1/sales``."""
+        p: SaleListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(SaleListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, sale_id: str) -> SaleView:
+        """The full sale view — items, allocations, pay-links, documents,
+        timeline."""
+        return cast(SaleView, self._http.request("GET", f"/v1/sales/{sale_id}"))
+
+    def create(self, params: SaleCreateParams) -> SaleCreateResult:
+        """Record a sale (never charges the buyer). Idempotent via
+        ``external_reference``: a replay writes nothing and returns the
+        original sale with ``duplicate: True``.
+        """
+        return cast(SaleCreateResult, self._http.request("POST", "/v1/sales", body=params))
+
+    def update(self, sale_id: str, params: SaleUpdateParams) -> Sale:
+        """Edit the sale's note — the only editable header field."""
+        return cast(Sale, self._http.request("PATCH", f"/v1/sales/{sale_id}", body=params))
+
+    def delete(self, sale_id: str) -> dict[str, Any]:
+        """Permanently delete an unfunded, unlinked sale (409
+        ``SALE_HAS_ALLOCATIONS`` otherwise). Needs the key's "Allow permanent
+        deletion through the API" capability. Returns ``{"success": True}``.
+        """
+        return cast(dict[str, Any], self._http.request("DELETE", f"/v1/sales/{sale_id}"))
+
+    def cancel(self, sale_id: str, params: SaleCancelParams) -> SaleCancelResult:
+        """Cancel every active item, or the listed ones. Money stays on the
+        sale unless ``money["mode"]`` says otherwise (needs "Allow refunds"
+        and a full cancel). A refused refund does not undo the cancel — see
+        ``refunds``.
+        """
+        return cast(
+            SaleCancelResult,
+            self._http.request("POST", f"/v1/sales/{sale_id}/cancel", body=params),
+        )
+
+    def reinstate(
+        self, sale_id: str, params: Optional[SaleReinstateParams] = None
+    ) -> SaleReinstateResult:
+        """Reinstate every cancelled item, or the listed ones. Money is
+        untouched."""
+        return cast(
+            SaleReinstateResult,
+            self._http.request("POST", f"/v1/sales/{sale_id}/reinstate", body=dict(params or {})),
+        )
+
+    def refund(self, sale_id: str, params: SaleRefundParams) -> SaleRefundResult:
+        """Refund one charge that funds this sale (the items stay active).
+        Needs the key's "Allow refunds" capability. Pass an
+        ``idempotency_key`` to make retries safe.
+        """
+        return cast(
+            SaleRefundResult,
+            self._http.request("POST", f"/v1/sales/{sale_id}/refund", body=params),
+        )
+
+    def set_owner(self, sale_id: str, owner_user_id: Optional[str]) -> Sale:
+        """Assign the sale to an active team member, or ``None`` for
+        unowned."""
+        return cast(
+            Sale,
+            self._http.request(
+                "PUT", f"/v1/sales/{sale_id}/owner", body={"owner_user_id": owner_user_id}
+            ),
+        )
+
+    def link_deal(self, sale_id: str, deal_id: Optional[str]) -> Sale:
+        """Link one of the buyer's deals, or ``None`` to unlink."""
+        return cast(
+            Sale,
+            self._http.request("PUT", f"/v1/sales/{sale_id}/deal", body={"deal_id": deal_id}),
+        )
+
+    def allocate(self, sale_id: str, params: SaleAllocateParams) -> SaleAllocation:
+        """Allocate an existing charge (a payment entry) to the sale.
+        Nothing is charged."""
+        return cast(
+            SaleAllocation,
+            self._http.request("POST", f"/v1/sales/{sale_id}/allocations", body=params),
+        )
+
+    def unallocate(self, sale_id: str, allocation_id: str) -> SaleUnallocateResult:
+        """Release a charge allocation (and its refunds on this sale). No
+        money moves. Needs the key's "Allow permanent deletion through the
+        API" capability.
+        """
+        return cast(
+            SaleUnallocateResult,
+            self._http.request("DELETE", f"/v1/sales/{sale_id}/allocations/{allocation_id}"),
+        )
 
 
 # ─────────────────────────── Bookings ───────────────────────────

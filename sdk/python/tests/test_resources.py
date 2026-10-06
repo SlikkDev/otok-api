@@ -20,6 +20,7 @@ from otok import (
     MESSAGE_WEBHOOK_EVENT_TYPES,
     ORDER_WEBHOOK_EVENT_TYPES,
     PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+    SALE_WEBHOOK_EVENT_TYPES,
     AudienceListParams,
     OtokAPIError,
     OtokClient,
@@ -433,6 +434,17 @@ class TestEmailsAndWebhookEndpoints:
         )
         assert len(new_family_types) == 15
         for event_type in new_family_types:
+            assert event_type not in defaults
+
+    def test_sale_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert SALE_WEBHOOK_EVENT_TYPES == (
+            "sale.recorded",
+            "sale.cancelled",
+            "sale.paid",
+            "sale.refunded",
+        )
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        for event_type in SALE_WEBHOOK_EVENT_TYPES:
             assert event_type not in defaults
 
     def test_new_family_events_are_listed_verbatim_at_registration(self) -> None:
@@ -2349,3 +2361,107 @@ class TestContactAcquisitions:
         assert request.method == "GET"
         assert urlsplit(request.url).path == "/api/v1/contacts/c-1/acquisitions"
         assert query_of(request) == {"kind": ["api"], "limit": ["20"]}
+
+
+class TestSales:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client()
+        client.sales.list(
+            {
+                "contact_id": "c-1",
+                "owner_user_id": "u-1",
+                "status": "active",
+                "settlement_status": "unpaid",
+                "external_reference": "crm-invoice-4471",
+                "limit": 10,
+                "offset": 20,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/sales"
+        assert query_of(request) == {
+            "contact_id": ["c-1"],
+            "owner_user_id": ["u-1"],
+            "status": ["active"],
+            "settlement_status": ["unpaid"],
+            "external_reference": ["crm-invoice-4471"],
+            "limit": ["10"],
+            "offset": ["20"],
+        }
+
+    def test_iter_pages_with_the_deals_payments_cap(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [{"id": "s-1"}], "total": 1, "limit": 100, "offset": 0})
+        )
+        assert [sale["id"] for sale in client.sales.iter()] == ["s-1"]
+        assert query_of(last_request(transport))["limit"] == ["100"]
+
+    def test_writes_issue_the_documented_verb_path_and_body(self) -> None:
+        client, transport = make_client(json_response(200, {"id": "s-1"}))
+        client.sales.create(
+            {
+                "contact_id": "c-1",
+                "items": [{"product_id": "p-1", "quantity": 2}],
+                "currency": "ILS",
+                "external_reference": "crm-invoice-4471",
+            }
+        )
+        client.sales.get("s-1")
+        client.sales.update("s-1", {"note": None})
+        client.sales.cancel("s-1", {"reason": "customer_request", "money": {"mode": "refund"}})
+        client.sales.reinstate("s-1")
+        client.sales.refund(
+            "s-1",
+            {
+                "reason": "requested_by_customer",
+                "mode": "auto",
+                "amount": 100,
+                "idempotency_key": "crm-refund-1",
+            },
+        )
+        client.sales.set_owner("s-1", None)
+        client.sales.link_deal("s-1", "d-1")
+        client.sales.allocate("s-1", {"payment_entry_id": "e-1"})
+        client.sales.unallocate("s-1", "a-1")
+        client.sales.delete("s-1")
+
+        calls = [
+            (request.method, transport.request_path(i), transport.request_body(i))
+            for i, request in enumerate(transport.requests)
+        ]
+        assert calls == [
+            (
+                "POST",
+                "/api/v1/sales",
+                {
+                    "contact_id": "c-1",
+                    "items": [{"product_id": "p-1", "quantity": 2}],
+                    "currency": "ILS",
+                    "external_reference": "crm-invoice-4471",
+                },
+            ),
+            ("GET", "/api/v1/sales/s-1", None),
+            ("PATCH", "/api/v1/sales/s-1", {"note": None}),
+            (
+                "POST",
+                "/api/v1/sales/s-1/cancel",
+                {"reason": "customer_request", "money": {"mode": "refund"}},
+            ),
+            ("POST", "/api/v1/sales/s-1/reinstate", {}),
+            (
+                "POST",
+                "/api/v1/sales/s-1/refund",
+                {
+                    "reason": "requested_by_customer",
+                    "mode": "auto",
+                    "amount": 100,
+                    "idempotency_key": "crm-refund-1",
+                },
+            ),
+            ("PUT", "/api/v1/sales/s-1/owner", {"owner_user_id": None}),
+            ("PUT", "/api/v1/sales/s-1/deal", {"deal_id": "d-1"}),
+            ("POST", "/api/v1/sales/s-1/allocations", {"payment_entry_id": "e-1"}),
+            ("DELETE", "/api/v1/sales/s-1/allocations/a-1", None),
+            ("DELETE", "/api/v1/sales/s-1", None),
+        ]

@@ -6,8 +6,8 @@ info:
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
     per-channel marketing consent), tags and groups, WhatsApp campaigns and templates, deals
-    and pipelines, the product catalog, payments, payment requests (pay-links), orders,
-    transactional email, broadcast email campaigns, newsletters, email suppressions,
+    and pipelines, the product catalog, payments, payment requests (pay-links), orders, the
+    sales ledger, transactional email, broadcast email campaigns, newsletters, email suppressions,
     read-only audience and sender-profile discovery, product cycles, shared saved reports,
     outbound webhooks, and bookings.
 
@@ -25,7 +25,8 @@ info:
 
     Endpoint groups that mirror a plan-gated product area additionally require that feature on
     the workspace's plan — deals/pipelines (`deals`), payments and contact documents
-    (`payments`), payment requests (`workspace_payments`), orders (`orders`), campaigns
+    (`payments`), payment requests (`workspace_payments`), orders (`orders`), sales
+    (`sales`), campaigns
     (`campaigns`), email campaigns (`email_marketing`), newsletters (`newsletters`),
     bookings/meeting-types (`booking`). Every route in a gated group answers
     `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` (a body **without** a `statusCode`
@@ -65,6 +66,10 @@ info:
     `DELETE /v1/suppressions/{id}` (which lifts a send-time block — it deletes no
     contact data and resubscribes no one), and `DELETE /v1/newsletter-issues/{id}`
     (drafts and scheduled issues only — published issues are never deletable).
+    `DELETE /v1/sales/{id}` (an unfunded, unlinked sale) and
+    `DELETE /v1/sales/{id}/allocations/{allocationId}` additionally need the
+    **Allow permanent deletion through the API** key capability (`allow_hard_delete`),
+    granted per key by the workspace owner — 403 `HARD_DELETE_OWNER_ONLY` otherwise.
 
     ## Rate limits
 
@@ -80,7 +85,7 @@ info:
     ## Pagination
 
     Most list endpoints return `{ "data", "total", "limit", "offset" }` with `limit`
-    default 50 (hard cap 500). `GET /v1/deals`, `GET /v1/payments`,
+    default 50 (hard cap 500). `GET /v1/deals`, `GET /v1/payments`, `GET /v1/sales`,
     `GET /v1/payment-requests`, `GET /v1/orders`, and the
     email-campaign/newsletter/audience/sender-profile lists use dedicated query
     parameters with `limit` default 25 (cap 100); absent or
@@ -99,6 +104,9 @@ info:
     - Contacts upsert by `phone`/`email`.
     - Deals, payments, and orders upsert by `external_reference`; products upsert by
       `external_id`.
+    - Sales are idempotent by `external_reference` — a replay writes nothing and returns
+      the original sale with `duplicate: true`. Sale refunds are idempotent per
+      `idempotency_key` — only when you supply one.
     - Email campaigns and newsletter issues upsert by `external_reference` — a replay
       updates content/fields while the record is still editable and never touches
       `status`, `scheduled_at`, or an issue's number.
@@ -284,6 +292,8 @@ tags:
     description: Read-only listing of a contact's financial documents (invoices, receipts, credit documents), aggregated from stored document pointers with an opt-in live provider lookup. Requires the `payments` feature.
   - name: Orders
     description: E-commerce-grade orders on contacts — idempotent create via `external_reference`, refund ledger, mark-paid, cancel. No update or delete routes.
+  - name: Sales
+    description: "The sales ledger — record sales (idempotent via `external_reference`), cancel / reinstate items, refund, allocate existing charges. Recording a sale never charges the buyer. Requires the `sales` feature."
   - name: Emails
     description: "`POST /v1/emails` — idempotent raw transactional sends with opt-in tracking."
   - name: Suppressions
@@ -297,7 +307,7 @@ tags:
   - name: Newsletters
     description: Smart newsletters and their sequenced issues — create, author, publish, schedule. Idempotent issue create via `external_reference`; issue numbers are assigned at publish. Requires the `newsletters` feature.
   - name: Webhook endpoints
-    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, plus the opt-in `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` families.
+    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, plus the opt-in `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `sale.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` families.
   - name: Meeting types
     description: Read meeting types and query open slots.
   - name: Bookings
@@ -3701,6 +3711,652 @@ paths:
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
+  # ───────────────────────────── Sales ─────────────────────────────
+  /v1/sales:
+    get:
+      operationId: listSales
+      tags: [Sales]
+      summary: List sales
+      description: |
+        Sale headers, newest `sold_at` first (no items, allocations or buyer details).
+        Pages like deals/payments (`limit` default 25, cap 100 — larger values are clamped;
+        malformed paging returns 400). Unlike deals/payments, an unknown `status` or
+        `settlement_status` value returns 400. **Requires the `sales` plan feature.**
+      parameters:
+        - name: contact_id
+          in: query
+          description: 'The buyer. Malformed → 400 `"Invalid contact_id: must be a UUID"`.'
+          schema:
+            type: string
+            format: uuid
+        - name: owner_user_id
+          in: query
+          description: Malformed → 400.
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          description: Unknown values → 400 `"Invalid sale status"`.
+          schema:
+            $ref: "#/components/schemas/SaleStatus"
+        - name: settlement_status
+          in: query
+          description: Unknown values → 400 `"Invalid settlement status"`.
+          schema:
+            $ref: "#/components/schemas/SaleSettlementStatus"
+        - name: external_reference
+          in: query
+          description: Exact match — look a sale up by your own key.
+          schema:
+            type: string
+        - $ref: "#/components/parameters/ClampedLimitParam"
+        - $ref: "#/components/parameters/ClampedOffsetParam"
+      responses:
+        "200":
+          description: Paginated sale list (headers only).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Sale"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createSale
+      tags: [Sales]
+      summary: Record a sale (idempotent via external_reference)
+      description: |
+        Records a sale — a header over 1–100 line items, each an active catalog product.
+        **Recording a sale does not charge the buyer.** A repeated `external_reference`
+        writes nothing and returns the original sale with `duplicate: true` (201 either
+        way). References starting with `order:`, `quote:`, `pr:`, `cycle:`, `store:`,
+        `cardcom:`, `form:`, `booking:` or `event:` are reserved for sales the app records
+        itself (400 `RESERVED_EXTERNAL_REFERENCE`).
+
+        Fires the sale-recorded automations and the `sale.recorded` webhook.
+        **Requires the `sales` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaleCreate"
+      responses:
+        "201":
+          description: The recorded (or replayed) sale.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaleCreateResult"
+        "400":
+          description: |
+            Validation, or `error_code` `INVALID_PRODUCT`, `PRODUCT_INACTIVE`,
+            `INVALID_CYCLE`, `CYCLE_PRODUCT_MISMATCH`, `CYCLE_ARCHIVED`, `CYCLE_CANCELLED`,
+            `CYCLE_REQUIRED`, `SALE_PRICE_LOCKED`, `RESERVED_EXTERNAL_REFERENCE`,
+            `INVALID_CONTACT_OWNER`; `"vat_mode and vat_rate must be provided together"`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Contact not found"` / `"Deal not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code` `SALE_DEAL_CONTACT_MISMATCH` (the deal belongs to another
+            contact), `CYCLE_FULL`, or `CONTACT_ANONYMISED`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getSale
+      tags: [Sales]
+      summary: Get a sale with its items, payments and documents
+      description: |
+        The full sale view. `tier` is `1` for an ordinary key and `2` for a key with the
+        **Allow refunds** capability (`allow_money_out`), which adds `money` and
+        `incidents` and provider details on `pay_links`. Sections that do not apply are
+        omitted, not `null`. **Requires the `sales` plan feature.**
+      responses:
+        "200":
+          description: The sale view.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaleView"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Sale not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateSale
+      tags: [Sales]
+      summary: Edit a sale's note
+      description: |
+        The note is the only editable header field — money, items and the buyer are fixed
+        once recorded. An empty body returns 400 `"Provide a note to update (null clears
+        it)."`. **Requires the `sales` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                note:
+                  type: [string, "null"]
+                  maxLength: 2000
+                  description: "`null` clears it."
+      responses:
+        "200":
+          description: The updated sale.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sale"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Sale not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    delete:
+      operationId: deleteSale
+      tags: [Sales]
+      summary: Delete an unfunded, unlinked sale
+      description: |
+        Permanently deletes a sale recorded by mistake, with its items. **Needs the
+        "Allow permanent deletion through the API" key capability** (`allow_hard_delete`,
+        granted by the workspace owner) — 403 `HARD_DELETE_OWNER_ONLY` otherwise. A sale
+        with allocated money, or one a quote, order or pay-link points at, cannot be
+        deleted (409 `SALE_HAS_ALLOCATIONS` — cancel it instead). Fires no webhook.
+        **Requires the `sales` plan feature.**
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+                    const: true
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            `error_code: "HARD_DELETE_OWNER_ONLY"` (the key lacks the capability), or the
+            feature gate.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/CodedError"
+                  - $ref: "#/components/schemas/FeatureGateError"
+        "404":
+          description: '`"Sale not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: '`error_code: "SALE_HAS_ALLOCATIONS"` — the sale has money or links.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: cancelSale
+      tags: [Sales]
+      summary: Cancel a sale (or some of its items)
+      description: |
+        Cancels every active item, or the listed ones. Money stays on the sale by default.
+        A `money.mode` of `refund` or `recorded_outside` needs the **Allow refunds** key
+        capability (`allow_money_out`; 403 `API_KEY_MONEY_OUT_DISABLED`, checked before
+        anything is cancelled) and a **full** cancel (400 `PARTIAL_CANCEL_KEEPS_MONEY`).
+
+        The items are cancelled first; the refunds run afterwards, one per funding charge.
+        A refused refund does not undo the cancellation — it is reported in `refunds[]`.
+        A full cancel also withdraws the sale's pending pay-links, waives an unpaid
+        booking deposit the sale was created for, and — per the workspace's sales
+        settings — cancels the order the sale was created from. Each cancelled item fires
+        the sale-cancelled automations and a `sale.cancelled` webhook.
+        **Requires the `sales` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaleCancelRequest"
+      responses:
+        "201":
+          description: The cancel outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaleCancelResult"
+        "400":
+          description: 'Validation, or `error_code: "PARTIAL_CANCEL_KEEPS_MONEY"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: |
+            `error_code: "API_KEY_MONEY_OUT_DISABLED"` (a money mode without the Allow
+            refunds capability), or the feature gate.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/CodedError"
+                  - $ref: "#/components/schemas/FeatureGateError"
+        "404":
+          description: '`"Sale not found"` / `"Purchase not found"` (a listed item is not on this sale).'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: '`error_code` `SALE_ALREADY_CANCELLED` or `PURCHASE_ALREADY_CANCELLED`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}/reinstate:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: reinstateSale
+      tags: [Sales]
+      summary: Reinstate cancelled sale items
+      description: |
+        Reinstates every cancelled item, or the listed ones. Money is not touched; no
+        webhook fires. **Requires the `sales` plan feature.**
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                items:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: string
+                    format: uuid
+                  description: Item ids of this sale. Omitted → every cancelled item.
+      responses:
+        "201":
+          description: The sale and the reinstated items.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sale, reinstated]
+                properties:
+                  sale:
+                    $ref: "#/components/schemas/Sale"
+                  reinstated:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SaleItem"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Sale not found"` / `"Purchase not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: '`error_code` `SALE_NOT_CANCELLED`, `PURCHASE_NOT_CANCELLED`, or `CYCLE_FULL`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}/refund:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: refundSale
+      tags: [Sales]
+      summary: Refund a charge that funds this sale
+      description: |
+        Refunds one funding charge, directed at this sale; the items stay active.
+        **Needs the Allow refunds key capability** (`allow_money_out`) — 403
+        `API_KEY_MONEY_OUT_DISABLED` otherwise. `entry_id` may be omitted only when one
+        charge funds the sale; `amount` defaults to that charge's remaining share of this
+        sale. An `idempotency_key` replay returns the original refund with
+        `duplicate: true`. **Requires the `sales` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaleRefundRequest"
+      responses:
+        "201":
+          description: The refund.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaleRefundResult"
+        "400":
+          description: |
+            Validation; `"Select a charge entry that funds this sale."`; `"Refund exceeds
+            this charge's remaining allocation to the sale."`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: '`error_code: "API_KEY_MONEY_OUT_DISABLED"`, or the feature gate.'
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/CodedError"
+                  - $ref: "#/components/schemas/FeatureGateError"
+        "404":
+          description: '`"Sale not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code` `IDEMPOTENCY_KEY_MISMATCH` (the key was used for a different
+            sale, charge or amount), `PLAN_FEATURE_REQUIRED` (`mode: "auto"` on a provider
+            charge without the `workspace_payments` feature — retry with
+            `recorded_outside`), `PROVIDER_NOT_CONNECTED`, `REFUND_IN_STORE` (refund it in
+            the online store), or `REQUEST_NOT_REFUNDABLE` (a test-mode charge).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}/owner:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    put:
+      operationId: setSaleOwner
+      tags: [Sales]
+      summary: Assign or clear the sale's owner
+      description: |
+        Does not change the contact's owner. **Requires the `sales` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [owner_user_id]
+              properties:
+                owner_user_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: An active team member, or `null` for unowned.
+      responses:
+        "200":
+          description: The updated sale.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sale"
+        "400":
+          description: 'Validation, or `error_code: "INVALID_CONTACT_OWNER"` (not an active member).'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Sale not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}/deal:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    put:
+      operationId: linkSaleDeal
+      tags: [Sales]
+      summary: Link or unlink the buyer's deal
+      description: "**Requires the `sales` plan feature.**"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deal_id]
+              properties:
+                deal_id:
+                  type: [string, "null"]
+                  format: uuid
+                  description: A deal of the sale's buyer, or `null` to unlink.
+      responses:
+        "200":
+          description: The updated sale.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Sale"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Sale not found"` / `"Deal not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: '`error_code: "SALE_DEAL_CONTACT_MISMATCH"` — the deal belongs to another contact.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}/allocations:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: allocateSalePayment
+      tags: [Sales]
+      summary: Allocate an existing charge to this sale
+      description: |
+        Links a charge entry from the payments ledger (`/v1/payments` → `entries[].id`) to
+        the sale. Nothing is charged. The charge's earlier refunds are linked too (as
+        negative allocations). `amount` defaults to the smaller of what the charge has
+        not allocated elsewhere and what the sale can still take.
+        **Requires the `sales` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaleAllocationCreate"
+      responses:
+        "201":
+          description: The new allocation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SaleAllocation"
+        "400":
+          description: |
+            Validation, or `error_code` `CURRENCY_MISMATCH`, `SALE_TOTAL_UNKNOWN` (the
+            sale's total is open — pass an `amount`), `INVALID_ALLOCATION_AMOUNT`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: '`"Sale not found"` / `"Payment entry not found"`.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code` `ENTRY_NOT_ALLOCATABLE` (a refund, or a charge that is not
+            pending/completed), `NOTHING_TO_ALLOCATE`, `ALLOCATION_EXCEEDS_ENTRY`,
+            `ALLOCATION_EXCEEDS_SALE`, or `ALLOCATION_EXISTS`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/sales/{id}/allocations/{allocationId}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+      - name: allocationId
+        in: path
+        required: true
+        description: Allocation UUID. A non-UUID value returns 400.
+        schema:
+          type: string
+          format: uuid
+    delete:
+      operationId: releaseSaleAllocation
+      tags: [Sales]
+      summary: Release a payment allocation
+      description: |
+        The charge no longer funds this sale; its refunds on this sale are released with
+        it. No money moves. **Needs the "Allow permanent deletion through the API" key
+        capability** (`allow_hard_delete`) — 403 `HARD_DELETE_OWNER_ONLY` otherwise.
+        **Requires the `sales` plan feature.**
+      responses:
+        "200":
+          description: The released allocation and the refund allocations released with it.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [released, twins]
+                properties:
+                  released:
+                    $ref: "#/components/schemas/SaleAllocation"
+                  twins:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SaleAllocation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: '`error_code: "HARD_DELETE_OWNER_ONLY"`, or the feature gate.'
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/CodedError"
+                  - $ref: "#/components/schemas/FeatureGateError"
+        "404":
+          description: '`"Allocation not found"` — unknown, or not an allocation of this sale.'
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FrameworkError"
+        "409":
+          description: |
+            `error_code` `ALLOCATION_IS_REFUND` (released with its charge, never alone) or
+            `REFUND_IN_FLIGHT` (a provider refund of this charge is in progress).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   # ───────────────────────────── Emails ─────────────────────────────
   /v1/emails:
     post:
@@ -5104,7 +5760,8 @@ paths:
                     contact lifecycle + consent events (`contact.created`,
                     `contact.updated`, `contact.deleted`, `contact.consent_changed`),
                     the inbound message event (`message.received`), the four `deal.*`
-                    lifecycle events, the four `booking.*` lifecycle events, the
+                    lifecycle events, the four `sale.*` events, the four `booking.*`
+                    lifecycle events, the
                     event-attendance event (`event.attendance.changed`), and the form
                     submission event (`form.submitted`). A pre-existing registration
                     never starts receiving a new family unasked. `email.failed` is
@@ -6293,6 +6950,132 @@ webhooks:
       responses:
         "200":
           description: Return any 2xx within 10 seconds to settle the delivery.
+  sale.recorded:
+    post:
+      operationId: saleRecordedEvent
+      tags: [Webhook endpoints]
+      summary: sale.recorded — a sale was recorded
+      description: |
+        Opt-in sale event — delivered only to endpoints that list it explicitly in
+        `events`. Fires once per sale, for every source (API, in-app, automations, and
+        the sales the app records from quotes, orders, pay-links, bookings and event
+        registrations). An `external_reference` replay does not fire it again.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaleRecordedEvent"
+            examples:
+              recorded:
+                value:
+                  id: f6071829-3a4b-4c5d-8e9f-0a1b2c3d4e5f
+                  type: sale.recorded
+                  created_at: "2026-10-01T09:00:01.000Z"
+                  data:
+                    sale:
+                      id: 5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d
+                      number: 1042
+                      contact_id: 9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c
+                      deal_id: null
+                      owner_user_id: 708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f
+                      status: active
+                      settlement_status: unpaid
+                      currency: ILS
+                      total_amount: 350
+                      paid_total: 0
+                      refunded_total: 0
+                      pending_refund_total: 0
+                      sold_at: "2026-10-01T09:00:00.000Z"
+                      source: api
+                      external_reference: crm-invoice-4471
+                      items:
+                        - id: 6b7c8d9e-0f1a-4b2c-9d3e-4f5a6b7c8d9e
+                          position: 0
+                          product_id: 2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a
+                          cycle_id: null
+                          title: Onboarding session
+                          quantity: 1
+                          unit_amount: 350
+                          discount_percent: null
+                          line_total: 350
+                          status: active
+                    contact:
+                      id: 9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c
+                      name: Dana Levi
+                      phone: "+972501234567"
+                      email: dana@example.com
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  sale.cancelled:
+    post:
+      operationId: saleCancelledEvent
+      tags: [Webhook endpoints]
+      summary: sale.cancelled — a sale item was cancelled
+      description: |
+        Opt-in sale event — delivered only to endpoints that list it explicitly in
+        `events`. Fires **once per cancelled item**: cancelling a three-item sale
+        delivers three events. Unlike the other sale events, `data.sale` is the
+        **item** (`data.sale.id` is the item id, `data.sale.sale_id` the sale's id).
+        Reinstating an item fires nothing.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaleCancelledEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  sale.paid:
+    post:
+      operationId: salePaidEvent
+      tags: [Webhook endpoints]
+      summary: sale.paid — a sale became fully paid
+      description: |
+        Opt-in sale event — delivered only to endpoints that list it explicitly in
+        `events`. Fires when the sale's `settlement_status` becomes `paid`; the
+        `settlement` block names the payment that completed it (or `null`).
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SalePaidEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  sale.refunded:
+    post:
+      operationId: saleRefundedEvent
+      tags: [Webhook endpoints]
+      summary: sale.refunded — money was refunded from a sale
+      description: |
+        Opt-in sale event — delivered only to endpoints that list it explicitly in
+        `events`. Fires when the sale's settled refunded total grows; a refund that is
+        still pending fires once it settles. The `refund` block describes the refund.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SaleRefundedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
   booking.created:
     post:
       operationId: bookingCreatedEvent
@@ -6618,7 +7401,7 @@ components:
       description: |
         The workspace's plan lacks the feature this resource group requires — deals,
         payments (payments + contact documents), workspace_payments (payment requests),
-        orders, campaigns, email_marketing (email campaigns + suppressions + sender
+        orders, sales, campaigns, email_marketing (email campaigns + suppressions + sender
         profiles), newsletters, or booking — and answers with the
         `FEATURE_NOT_INCLUDED_IN_PLAN` body (note: no `statusCode` field; the message
         embeds the lowercase feature id, so key on `error_code`). A plan without API
@@ -7403,7 +8186,7 @@ components:
         Returned with `403` when the workspace's plan lacks the feature a gated resource
         group requires (deals/pipelines → `deals`, payments and contact documents →
         `payments`, payment requests → `workspace_payments`, orders →
-        `orders`, campaigns → `campaigns`, email campaigns → `email_marketing`,
+        `orders`, sales → `sales`, campaigns → `campaigns`, email campaigns → `email_marketing`,
         newsletters → `newsletters`, bookings/meeting-types → `booking`). Unlike
         the standard framework
         shape there is **no `statusCode` field**. The message embeds the lowercase
@@ -10944,6 +11727,778 @@ components:
           maximum: 100
           description: Percent-only per-line discount.
 
+    # ── Sales ──
+    SaleStatus:
+      type: string
+      title: Sale status
+      enum: [active, partially_cancelled, cancelled]
+      description: |
+        `partially_cancelled` = some items are cancelled; `cancelled` = every item is.
+    SaleSettlementStatus:
+      type: string
+      title: Sale settlement status
+      enum: [untracked, unpaid, partially_paid, paid, partially_refunded, refunded]
+      description: |
+        Derived from the money allocated to the sale — never set directly. `untracked` =
+        `expects_payment: false` and no money linked.
+    Sale:
+      type: object
+      title: Sale
+      description: |
+        A sale header. Money fields are JSON numbers rounded to 2 decimals in the sale's
+        currency. Read responses may carry additional fields — tolerate unknown keys.
+      additionalProperties: true
+      required: [id, number, contact_id, currency, status, settlement_status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        number:
+          type: integer
+          description: Per-workspace running sale number.
+        contact_id:
+          type: string
+          format: uuid
+          description: The buyer.
+        deal_id:
+          type: [string, "null"]
+          format: uuid
+        owner_user_id:
+          type: [string, "null"]
+          format: uuid
+        created_by:
+          type: [string, "null"]
+          format: uuid
+          description: "`null` for API- and automation-recorded sales."
+        currency:
+          type: string
+        vat_mode:
+          type: [string, "null"]
+          enum: [inclusive, exclusive, null]
+        vat_rate:
+          type: [number, "null"]
+        expects_payment:
+          type: boolean
+        sold_at:
+          type: string
+          format: date-time
+        note:
+          type: [string, "null"]
+        source:
+          type: string
+          description: |
+            Where the sale was recorded — `api`, `manual`, `automation`, or the record
+            that created it (`quote`, `order`, `payment_request`, `recurring`, `booking`,
+            `event`, `form`, `store`, …). Tolerate unknown values.
+        external_reference:
+          type: [string, "null"]
+        status:
+          $ref: "#/components/schemas/SaleStatus"
+        line_count:
+          type: integer
+        total_amount:
+          type: [number, "null"]
+          description: Sum of the active priced items; `null` while no active item has a price.
+        has_unpriced_lines:
+          type: boolean
+        paid_total:
+          type: number
+        refunded_total:
+          type: number
+        pending_refund_total:
+          type: number
+        settlement_status:
+          $ref: "#/components/schemas/SaleSettlementStatus"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SaleItem:
+      type: object
+      title: Sale item
+      additionalProperties: true
+      required: [id, sale_id, position, title, quantity, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sale_id:
+          type: string
+          format: uuid
+        position:
+          type: integer
+        contact_id:
+          type: string
+          format: uuid
+          description: The buyer.
+        recipient_contact_id:
+          type: [string, "null"]
+          format: uuid
+          description: Who receives the product when it is not the buyer.
+        product_id:
+          type: [string, "null"]
+          format: uuid
+        cycle_id:
+          type: [string, "null"]
+          format: uuid
+        title:
+          type: string
+          description: The product's name, frozen at the time of sale.
+        quantity:
+          type: integer
+        unit_amount:
+          type: [number, "null"]
+        discount_percent:
+          type: [number, "null"]
+        line_total:
+          type: [number, "null"]
+          description: "`quantity × unit_amount × (1 − discount_percent / 100)`, rounded to the cent; `null` while unpriced."
+        currency:
+          type: string
+        purchased_at:
+          type: string
+          format: date-time
+        note:
+          type: [string, "null"]
+        source:
+          type: string
+        status:
+          type: string
+          enum: [active, cancelled]
+        cancelled_at:
+          type: [string, "null"]
+          format: date-time
+        cancel_reason:
+          type: [string, "null"]
+        cancel_note:
+          type: [string, "null"]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SaleAllocation:
+      type: object
+      title: Sale allocation
+      description: Links part of a payment entry to a sale. Negative `amount` = a refund.
+      additionalProperties: true
+      required: [id, sale_id, payment_entry_id, payment_id, amount, currency]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sale_id:
+          type: string
+          format: uuid
+        payment_entry_id:
+          type: string
+          format: uuid
+        payment_id:
+          type: string
+          format: uuid
+        amount:
+          type: number
+        currency:
+          type: string
+        source:
+          type: string
+        created_by:
+          type: [string, "null"]
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+    SaleItemCreate:
+      type: object
+      title: Sale item (create)
+      additionalProperties: false
+      required: [product_id]
+      properties:
+        product_id:
+          type: string
+          format: uuid
+          description: An active catalog product.
+        cycle_id:
+          type: [string, "null"]
+          format: uuid
+          description: An open cycle of this product.
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 100000
+          default: 1
+        unit_amount:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 1000000000
+          description: |
+            Omitted → the catalog price (the cycle's, else the product's). A different
+            price needs a product (or cycle) that allows price overrides — else 400
+            `SALE_PRICE_LOCKED`. `null` records the line unpriced.
+        discount_percent:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 100
+        recipient_contact_id:
+          type: string
+          format: uuid
+    SaleCreate:
+      type: object
+      title: Sale create
+      additionalProperties: false
+      required: [contact_id, items]
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+          description: The buyer.
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/SaleItemCreate"
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          description: Omitted → the workspace payment currency.
+        sold_at:
+          type: string
+          format: date-time
+          description: Omitted → now.
+        note:
+          type: [string, "null"]
+          maxLength: 2000
+        deal_id:
+          type: [string, "null"]
+          format: uuid
+          description: A deal of the same buyer.
+        owner_user_id:
+          type: [string, "null"]
+          format: uuid
+          description: Omitted → the buyer's owner (while still a member), else unowned; `null` → unowned.
+        external_reference:
+          type: [string, "null"]
+          maxLength: 200
+          description: Idempotency key, unique per workspace.
+        vat_mode:
+          type: [string, "null"]
+          enum: [inclusive, exclusive, null]
+          description: Always together with `vat_rate`.
+        vat_rate:
+          type: [number, "null"]
+          minimum: 0
+          maximum: 100
+        expects_payment:
+          type: boolean
+          default: true
+    SaleCreateResult:
+      type: object
+      title: Sale create result
+      required: [sale, items, duplicate]
+      properties:
+        sale:
+          $ref: "#/components/schemas/Sale"
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/SaleItem"
+        duplicate:
+          type: boolean
+          description: "`true` when `external_reference` replayed an existing sale (nothing was written)."
+    SaleView:
+      type: object
+      title: Sale view
+      description: |
+        The full sale view returned by `GET /v1/sales/{id}`. `money` and `incidents` are
+        present only for a key with the Allow refunds capability (`tier: 2`). Sections
+        that do not apply are omitted. Tolerate unknown keys, timeline kinds and actions.
+      additionalProperties: true
+      required: [tier, sale, items, allocations]
+      properties:
+        tier:
+          type: integer
+          enum: [1, 2]
+        sale:
+          allOf:
+            - $ref: "#/components/schemas/Sale"
+            - type: object
+              properties:
+                buyer:
+                  type: [object, "null"]
+                  additionalProperties: true
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                    name:
+                      type: [string, "null"]
+                    phone:
+                      type: [string, "null"]
+                    email:
+                      type: [string, "null"]
+                    owner_user_id:
+                      type: [string, "null"]
+                      format: uuid
+                    anonymised_at:
+                      type: [string, "null"]
+                      format: date-time
+                owner:
+                  $ref: "#/components/schemas/SaleUserRef"
+                created_by_user:
+                  $ref: "#/components/schemas/SaleUserRef"
+                outstanding:
+                  type: [number, "null"]
+                  description: "`total_amount − paid_total + refunded_total`; `null` while the total is open."
+                allocatable:
+                  type: [number, "null"]
+                  description: How much more money the sale can take; `null` while the total is open.
+                possible_duplicates:
+                  type: array
+                  description: |
+                    Other non-cancelled sales of the same buyer sharing a product within 30
+                    days either side, where at least one was created automatically from
+                    another record. Informational.
+                  items:
+                    type: object
+                    additionalProperties: true
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      number:
+                        type: integer
+                      source:
+                        type: string
+                      sold_at:
+                        type: string
+                        format: date-time
+                      status:
+                        $ref: "#/components/schemas/SaleStatus"
+                      shared_product_ids:
+                        type: array
+                        items:
+                          type: string
+                          format: uuid
+                fx:
+                  type: object
+                  description: Present only when the sale's currency differs from the workspace currency.
+                  additionalProperties: true
+                  properties:
+                    workspace_currency:
+                      type: string
+                    rate:
+                      type: [number, "null"]
+                    converted_total:
+                      type: [number, "null"]
+                    warning:
+                      type: [string, "null"]
+        items:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/SaleItem"
+              - type: object
+                properties:
+                  product:
+                    type: [object, "null"]
+                    additionalProperties: true
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      name:
+                        type: string
+                      is_active:
+                        type: boolean
+                  cycle:
+                    type: [object, "null"]
+                    additionalProperties: true
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      name:
+                        type: string
+                      starts_on:
+                        type: [string, "null"]
+                      ends_on:
+                        type: [string, "null"]
+        allocations:
+          type: array
+          description: One row per charge funding the sale.
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              allocation:
+                $ref: "#/components/schemas/SaleAllocation"
+              entry:
+                type: object
+                additionalProperties: true
+                description: The payment entry the allocation points at.
+              payment:
+                type: object
+                additionalProperties: true
+                description: That entry's payment.
+              payer:
+                type: [object, "null"]
+                additionalProperties: true
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: [string, "null"]
+              payer_is_other_contact:
+                type: boolean
+              remaining:
+                type: number
+                description: The charge's remaining refundable balance.
+              twins:
+                type: array
+                description: That charge's refunds on this sale.
+                items:
+                  type: object
+                  additionalProperties: true
+                  properties:
+                    allocation:
+                      $ref: "#/components/schemas/SaleAllocation"
+                    entry:
+                      type: object
+                      additionalProperties: true
+        pay_links:
+          type: array
+          description: Payment requests minted for this sale.
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              id:
+                type: string
+                format: uuid
+              status:
+                type: string
+              amount:
+                type: number
+              currency:
+                type: string
+              title:
+                type: [string, "null"]
+              charge_kind:
+                type: string
+              contact_id:
+                type: string
+                format: uuid
+              contact_payment_id:
+                type: [string, "null"]
+                format: uuid
+              expires_at:
+                type: [string, "null"]
+                format: date-time
+              paid_at:
+                type: [string, "null"]
+                format: date-time
+              cancelled_at:
+                type: [string, "null"]
+                format: date-time
+              created_at:
+                type: string
+                format: date-time
+        related:
+          type: object
+          additionalProperties: true
+          properties:
+            deal:
+              type: [object, "null"]
+              additionalProperties: true
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                title:
+                  type: [string, "null"]
+                status:
+                  type: string
+            quotes:
+              type: array
+              items:
+                $ref: "#/components/schemas/SaleRelatedRecord"
+            orders:
+              type: array
+              items:
+                $ref: "#/components/schemas/SaleRelatedRecord"
+        documents:
+          type: array
+          items:
+            $ref: "#/components/schemas/ContactDocument"
+        timeline:
+          type: array
+          description: "The sale's history, newest last. `kind` = `activity`, `settlement`, or `item_transition`; tolerate unknown kinds."
+          items:
+            type: object
+            additionalProperties: true
+            properties:
+              kind:
+                type: string
+              at:
+                type: string
+                format: date-time
+              id:
+                type: string
+        actions:
+          type: object
+          description: |
+            Per action (`cancel`, `reinstate`, `refund`, `allocate`, `unallocate`,
+            `setOwner`, `linkDeal`, `edit`, `delete`, …), a prediction of whether the route
+            would accept the call now. Informational — the routes stay authoritative.
+          additionalProperties:
+            type: object
+            additionalProperties: true
+            properties:
+              allowed:
+                type: boolean
+              blockers:
+                type: array
+                items:
+                  type: string
+        money:
+          type: object
+          description: Allow refunds keys only. One entry per charge funding the sale.
+          additionalProperties: true
+          properties:
+            charges:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+                properties:
+                  paymentId:
+                    type: string
+                    format: uuid
+                  entryId:
+                    type: string
+                    format: uuid
+                    description: Pass as `entry_id` to the refund route.
+                  net:
+                    type: number
+                  remaining:
+                    type: number
+                  amount:
+                    type: number
+                  route:
+                    type: string
+                    description: "`gateway`, `recorded_outside`, `ledger_only`, or `blocked`."
+                  blockers:
+                    type: array
+                    items:
+                      type: string
+        incidents:
+          type: array
+          description: Allow refunds keys only. Open payment issues on the sale's charges that need follow-up in the app.
+          items:
+            type: object
+            additionalProperties: true
+    SaleUserRef:
+      type: [object, "null"]
+      title: Sale team member
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          format: uuid
+        full_name:
+          type: [string, "null"]
+        email:
+          type: [string, "null"]
+    SaleRelatedRecord:
+      type: object
+      title: Sale related record
+      additionalProperties: true
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: [integer, string, "null"]
+        status:
+          type: string
+    SaleRefundReason:
+      type: string
+      title: Sale refund reason
+      enum:
+        - requested_by_customer
+        - duplicate
+        - fraudulent
+        - order_change
+        - product_unsatisfactory
+        - sale_cancelled
+        - refunded_outside
+        - chargeback
+        - other
+    SaleRefundOutcome:
+      type: string
+      title: Refund outcome
+      enum: [gateway_refunded, voided, credit_document_only, recorded_outside, ledger_only, duplicate]
+      description: |
+        `gateway_refunded` = the payment provider returned the money; `voided` = the
+        provider cancelled the charge before it settled; `credit_document_only` = a credit
+        document was issued but the money must still be returned (follow up in the app);
+        `recorded_outside` = recorded as returned outside oToK; `ledger_only` = the charge
+        did not go through a provider; `duplicate` = an `idempotency_key` replay.
+        Tolerate unknown values.
+    SaleCancelRequest:
+      type: object
+      title: Sale cancel request
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          enum: [customer_request, duplicate, mistake, not_delivered, payment_failed, fraud, other]
+        items:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            format: uuid
+          description: Item ids of this sale. Omitted → every active item.
+        note:
+          type: [string, "null"]
+          maxLength: 2000
+        money:
+          type: object
+          additionalProperties: false
+          required: [mode]
+          description: 'Omitted = `{ "mode": "keep" }`.'
+          properties:
+            mode:
+              type: string
+              enum: [keep, refund, recorded_outside]
+              description: |
+                `keep` = money stays on the sale; `refund` = refund every funding charge
+                (through the connected provider where possible); `recorded_outside` =
+                record the refunds as returned outside oToK. Any mode but `keep` needs the
+                Allow refunds capability and a full cancel.
+            reason:
+              $ref: "#/components/schemas/SaleRefundReason"
+    SaleCancelResult:
+      type: object
+      title: Sale cancel result
+      required: [sale, cancelled, refunds, pay_links_cancelled]
+      properties:
+        sale:
+          $ref: "#/components/schemas/Sale"
+        cancelled:
+          type: array
+          items:
+            $ref: "#/components/schemas/SaleItem"
+        refunds:
+          type: array
+          description: One outcome per funding charge (empty for `keep`).
+          items:
+            type: object
+            additionalProperties: true
+            required: [paymentId, entryId, amount, mode]
+            properties:
+              paymentId:
+                type: string
+                format: uuid
+              entryId:
+                type: string
+                format: uuid
+              amount:
+                type: number
+              remaining:
+                type: number
+              mode:
+                type: string
+                enum: [auto, recorded_outside]
+              outcome:
+                $ref: "#/components/schemas/SaleRefundOutcome"
+              refundEntryId:
+                type: string
+                format: uuid
+              incidentId:
+                type: string
+                format: uuid
+              errorCode:
+                type: string
+                description: A refused refund — e.g. `NOTHING_TO_REFUND`.
+              error:
+                type: string
+        pay_links_cancelled:
+          type: integer
+    SaleRefundRequest:
+      type: object
+      title: Sale refund request
+      additionalProperties: false
+      required: [reason, mode]
+      properties:
+        reason:
+          $ref: "#/components/schemas/SaleRefundReason"
+        mode:
+          type: string
+          enum: [auto, recorded_outside]
+          description: |
+            `auto` = refund through the connected payment provider when the charge was
+            taken through one (needs the `workspace_payments` feature); `recorded_outside`
+            = record only.
+        entry_id:
+          type: string
+          format: uuid
+          description: The charge entry. May be omitted only when exactly one charge funds the sale.
+        amount:
+          type: number
+          exclusiveMinimum: 0
+          description: Omitted → the charge's whole remaining share of this sale.
+        note:
+          type: string
+          maxLength: 1000
+        idempotency_key:
+          type: string
+          maxLength: 200
+          description: "Unique per workspace; a replay returns the original refund with `duplicate: true`."
+    SaleRefundResult:
+      type: object
+      title: Sale refund result
+      required: [payment, entry, outcome, duplicate]
+      properties:
+        payment:
+          $ref: "#/components/schemas/PaymentWithEntries"
+        entry:
+          $ref: "#/components/schemas/PaymentEntry"
+        outcome:
+          $ref: "#/components/schemas/SaleRefundOutcome"
+        incidentId:
+          type: string
+          format: uuid
+          description: Present when the outcome needs follow-up in the app.
+        duplicate:
+          type: boolean
+    SaleAllocationCreate:
+      type: object
+      title: Sale allocation create
+      additionalProperties: false
+      required: [payment_entry_id]
+      properties:
+        payment_entry_id:
+          type: string
+          format: uuid
+          description: A charge entry in `pending` or `completed` status, in the sale's currency.
+        amount:
+          type: number
+          minimum: 0.01
+          maximum: 1000000000
+          description: Omitted → the smaller of what the charge has left and what the sale can still take.
+
     # ── Emails ──
     EmailSendRequest:
       type: object
@@ -11818,6 +13373,10 @@ components:
         - deal.stage_changed
         - deal.won
         - deal.lost
+        - sale.recorded
+        - sale.cancelled
+        - sale.paid
+        - sale.refunded
         - booking.created
         - booking.rescheduled
         - booking.cancelled
@@ -11830,14 +13389,15 @@ components:
         events (see `OrderEventType`), the four `payment_request.*` pay-link
         lifecycle events (see `PaymentRequestEventType`), the four contact lifecycle +
         consent events (`contact.*`), the inbound message event (`message.received`),
-        the four `deal.*` lifecycle events (see `DealEventType`), the four `booking.*`
+        the four `deal.*` lifecycle events (see `DealEventType`), the four `sale.*`
+        events (see `SaleEventType`), the four `booking.*`
         lifecycle events (see `BookingEventType`), the event-attendance event
         (`event.attendance.changed`), and the form submission event
         (`form.submitted`) — payloads under this spec's webhooks section.
         Every non-email family rides the same signing, retry schedule, and delivery
         behavior as the email events, and is received only when explicitly listed at
         registration — a pre-existing endpoint never starts receiving a new family
-        unasked. Order and deal events fire for **every** write source (API, in-app,
+        unasked. Order, deal and sale events fire for **every** write source (API, in-app,
         automations, integrations) — order events never fire for historical imports.
     EmailEventType:
       type: string
@@ -11912,6 +13472,21 @@ components:
         `booking.no_show` deliberately do not exist as webhooks — those statuses are
         sweep-derived (a cron inferring the past), not user actions. Payload shape:
         `BookingEventBase`.
+    SaleEventType:
+      type: string
+      title: Sale event type
+      enum:
+        - sale.recorded
+        - sale.cancelled
+        - sale.paid
+        - sale.refunded
+      description: |
+        The four sale events. All are **opt-in**: delivered only to endpoints that list
+        them explicitly in `events`. They fire for **every** sale write source — API,
+        in-app, automations, and the sales the app records from other records.
+        `sale.cancelled` fires once per cancelled item; reinstating fires nothing.
+        Payload shapes: `SaleRecordedEvent`, `SaleCancelledEvent`, `SalePaidEvent`,
+        `SaleRefundedEvent`.
     WebhookEndpoint:
       type: object
       title: Webhook endpoint
@@ -12826,6 +14401,323 @@ components:
           properties:
             type:
               const: deal.lost
+
+    # ── Sale webhook events ──
+    SaleEventContact:
+      type: object
+      title: Sale event contact
+      description: The buyer's identifiers at event time.
+      additionalProperties: true
+      required: [id, name, phone, email]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: [string, "null"]
+        phone:
+          type: [string, "null"]
+        email:
+          type: [string, "null"]
+    SaleEventRecord:
+      type: object
+      title: Sale event sale
+      description: |
+        Snapshot of the sale header at event time, with every item in line order
+        (cancelled ones included — their `status` says so). Money is a JSON number in
+        the sale's currency.
+      additionalProperties: true
+      required:
+        - id
+        - number
+        - contact_id
+        - deal_id
+        - owner_user_id
+        - status
+        - settlement_status
+        - currency
+        - total_amount
+        - paid_total
+        - refunded_total
+        - pending_refund_total
+        - sold_at
+        - source
+        - external_reference
+        - items
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: integer
+        contact_id:
+          type: string
+          format: uuid
+          description: The buyer.
+        deal_id:
+          type: [string, "null"]
+          format: uuid
+        owner_user_id:
+          type: [string, "null"]
+          format: uuid
+        status:
+          $ref: "#/components/schemas/SaleStatus"
+        settlement_status:
+          $ref: "#/components/schemas/SaleSettlementStatus"
+        currency:
+          type: string
+        total_amount:
+          type: [number, "null"]
+        paid_total:
+          type: number
+        refunded_total:
+          type: number
+        pending_refund_total:
+          type: number
+        sold_at:
+          type: [string, "null"]
+          format: date-time
+        source:
+          type: string
+          description: Where the sale was recorded. Tolerate unknown values.
+        external_reference:
+          type: [string, "null"]
+        items:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+            required: [id, position, product_id, cycle_id, title, quantity, unit_amount, discount_percent, line_total, status]
+            properties:
+              id:
+                type: string
+                format: uuid
+              position:
+                type: integer
+              product_id:
+                type: [string, "null"]
+                format: uuid
+              cycle_id:
+                type: [string, "null"]
+                format: uuid
+              title:
+                type: string
+              quantity:
+                type: integer
+              unit_amount:
+                type: [number, "null"]
+              discount_percent:
+                type: [number, "null"]
+              line_total:
+                type: [number, "null"]
+              status:
+                type: string
+                enum: [active, cancelled]
+    SaleEventEnvelope:
+      type: object
+      title: Sale event (envelope)
+      description: |
+        Every delivery is an HTTP POST with this JSON body — the same envelope
+        (`id`/`type`/`created_at`/`data`), headers, signing, and retry policy as the
+        email events (see `EmailEventBase`). `data` always carries the full field set —
+        absent values are explicit `null`s, never omitted keys.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it as
+            your dedup key.
+        type:
+          $ref: "#/components/schemas/SaleEventType"
+        created_at:
+          type: string
+          format: date-time
+          description: When the event occurred.
+    SaleRecordedEvent:
+      title: sale.recorded event
+      allOf:
+        - $ref: "#/components/schemas/SaleEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: sale.recorded
+            data:
+              type: object
+              additionalProperties: true
+              required: [sale, contact]
+              properties:
+                sale:
+                  $ref: "#/components/schemas/SaleEventRecord"
+                contact:
+                  $ref: "#/components/schemas/SaleEventContact"
+    SaleCancelledEvent:
+      title: sale.cancelled event
+      allOf:
+        - $ref: "#/components/schemas/SaleEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: sale.cancelled
+            data:
+              type: object
+              additionalProperties: true
+              required: [sale, contact]
+              properties:
+                sale:
+                  type: object
+                  description: The cancelled **item** — `id` is the item id, `sale_id` the sale's id.
+                  additionalProperties: true
+                  required:
+                    - id
+                    - sale_id
+                    - position
+                    - contact_id
+                    - product_id
+                    - cycle_id
+                    - title
+                    - quantity
+                    - unit_amount
+                    - discount_percent
+                    - line_total
+                    - currency
+                    - purchased_at
+                    - status
+                    - cancelled_at
+                    - cancel_reason
+                    - cancel_note
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                      description: The item id.
+                    sale_id:
+                      type: [string, "null"]
+                      format: uuid
+                      description: The sale's id.
+                    position:
+                      type: integer
+                    contact_id:
+                      type: string
+                      format: uuid
+                    product_id:
+                      type: [string, "null"]
+                      format: uuid
+                    cycle_id:
+                      type: [string, "null"]
+                      format: uuid
+                    title:
+                      type: string
+                    quantity:
+                      type: integer
+                    unit_amount:
+                      type: [number, "null"]
+                    discount_percent:
+                      type: [number, "null"]
+                    line_total:
+                      type: [number, "null"]
+                    currency:
+                      type: string
+                    purchased_at:
+                      type: [string, "null"]
+                      format: date-time
+                    status:
+                      type: string
+                      enum: [active, cancelled]
+                    cancelled_at:
+                      type: [string, "null"]
+                      format: date-time
+                    cancel_reason:
+                      type: [string, "null"]
+                      description: "`customer_request`, `duplicate`, `mistake`, `not_delivered`, `payment_failed`, `fraud`, or `other`."
+                    cancel_note:
+                      type: [string, "null"]
+                contact:
+                  $ref: "#/components/schemas/SaleEventContact"
+    SalePaidEvent:
+      title: sale.paid event
+      allOf:
+        - $ref: "#/components/schemas/SaleEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: sale.paid
+            data:
+              type: object
+              additionalProperties: true
+              required: [sale, contact, settlement]
+              properties:
+                sale:
+                  $ref: "#/components/schemas/SaleEventRecord"
+                contact:
+                  $ref: "#/components/schemas/SaleEventContact"
+                settlement:
+                  type: object
+                  additionalProperties: true
+                  required: [transition_id, paid_total, total_amount, payment]
+                  properties:
+                    transition_id:
+                      type: string
+                      format: uuid
+                      description: Identifies this settlement change — a stable dedup key.
+                    paid_total:
+                      type: number
+                    total_amount:
+                      type: [number, "null"]
+                    payment:
+                      type: [object, "null"]
+                      description: The payment entry that completed the sale, or `null`.
+                      additionalProperties: true
+                      properties:
+                        payment_id:
+                          type: string
+                          format: uuid
+                        entry_id:
+                          type: string
+                          format: uuid
+                        amount:
+                          type: number
+    SaleRefundedEvent:
+      title: sale.refunded event
+      allOf:
+        - $ref: "#/components/schemas/SaleEventEnvelope"
+        - type: object
+          properties:
+            type:
+              const: sale.refunded
+            data:
+              type: object
+              additionalProperties: true
+              required: [sale, contact, refund]
+              properties:
+                sale:
+                  $ref: "#/components/schemas/SaleEventRecord"
+                contact:
+                  $ref: "#/components/schemas/SaleEventContact"
+                refund:
+                  type: object
+                  additionalProperties: true
+                  required: [payment_id, entry_id, amount, reason, recorded_outside, refunded_total]
+                  properties:
+                    payment_id:
+                      type: [string, "null"]
+                      format: uuid
+                    entry_id:
+                      type: [string, "null"]
+                      format: uuid
+                      description: The refund entry.
+                    amount:
+                      type: number
+                      description: The amount refunded from this sale (positive).
+                    reason:
+                      type: [string, "null"]
+                    recorded_outside:
+                      type: boolean
+                      description: "`true` when the refund was recorded as returned outside oToK."
+                    refunded_total:
+                      type: number
+                      description: The sale's refunded total after this refund.
 
     # ── Booking webhook events ──
     BookingEventBase:

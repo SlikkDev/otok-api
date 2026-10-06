@@ -46,6 +46,7 @@ Endpoint groups that mirror a plan-gated product area additionally require that 
 | `/v1/payments*` (all routes, including `/refund`) and `GET /v1/contacts/:id/documents` | Payments (`payments`) |
 | `/v1/payment-requests*` (all routes) | Workspace payments (`workspace_payments`) |
 | `/v1/orders*` (all routes, including the action routes) | Orders |
+| `/v1/sales*` (all routes, including the action routes) | Sales (`sales`) |
 | `/v1/campaigns*` (all routes, including `/execute`) | Campaigns |
 | `/v1/bookings*` and `/v1/meeting-types*` (all routes) | Booking |
 | `/v1/email-campaigns*` and `/v1/suppressions*` (all routes) | Email marketing (`email_marketing`) |
@@ -244,12 +245,12 @@ curl -G "https://app.otok.io/api/v1/contacts" \
 
 ### Where deals and payments differ
 
-`GET /v1/deals`, `GET /v1/payments`, and `GET /v1/payment-requests` use dedicated query parameters instead of `filter`, and paginate differently:
+`GET /v1/deals`, `GET /v1/payments`, `GET /v1/sales`, and `GET /v1/payment-requests` use dedicated query parameters instead of `filter`, and paginate differently:
 
 - `limit` **default 25, cap 100**; `offset` min 0 (default 0).
 - Absent or empty `limit`/`offset` values default; a **malformed value returns 400** — `"Invalid limit: must be a non-negative integer"` (`Invalid offset: …` for `offset`).
 - UUID query parameters on `GET /v1/deals` (`pipeline_id`, `stage_id`, `contact_id`, `owner_user_id`) and `GET /v1/payment-requests` (`contact_id`, `deal_id`) are validated — a malformed value returns 400 `"Invalid pipeline_id: must be a UUID"`; an empty value (`?pipeline_id=`) is treated as absent, not an error.
-- Unrecognized enum filter values (e.g. `status=bogus`) are silently ignored on deals and payments; `GET /v1/payment-requests` instead rejects an unknown `status` with 400.
+- Unrecognized enum filter values (e.g. `status=bogus`) are silently ignored on deals and payments; `GET /v1/payment-requests` instead rejects an unknown `status` with 400, and `GET /v1/sales` an unknown `status` or `settlement_status`.
 
 `GET /v1/orders` belongs to the same family (dedicated query parameters, default 25 / cap 100, no `filter`), with three differences:
 
@@ -266,7 +267,7 @@ See [Deals](deals.md), [Payments](payments.md), [Orders](orders.md), [Email Camp
 - `GET` / `PATCH` → **200**.
 - `POST` → **201**, including action-style routes (`/stage`, `/status`, `/cancel`, `/refund`, booking `/reschedule`, etc.). Treat any 2xx as success.
 - `POST /v1/campaigns/:id/execute` → **200** on success; failures use real error statuses (404/409 — see [Campaigns](campaigns.md)). The email-campaign and newsletter-issue lifecycle routes (`…/send`, `…/schedule`, `…/unschedule`, `…/publish`) also answer **200**.
-- `DELETE /v1/webhook-endpoints/:id` and `DELETE /v1/suppressions/:id` → **204** (no body); `DELETE /v1/notes/:id` and `DELETE /v1/newsletter-issues/:id` → **200** with `{"success": true}`. These are the **only** DELETE endpoints: the API never deletes customer data — contacts, deals, products, payments, orders, campaigns, tags, and contact groups have no DELETE routes (a newsletter issue is deletable only while never published; removing a suppression deletes no contact data).
+- `DELETE /v1/webhook-endpoints/:id` and `DELETE /v1/suppressions/:id` → **204** (no body); `DELETE /v1/notes/:id`, `DELETE /v1/newsletter-issues/:id` and `DELETE /v1/sales/:id` → **200** with `{"success": true}`; `DELETE /v1/sales/:id/allocations/:allocationId` → **200** with the released allocations. The two sales DELETE routes need a key with the owner-granted **Allow permanent deletion through the API** capability (see [Sales](sales.md#api-key-capabilities)). These are the **only** DELETE endpoints: the API never deletes customer data — contacts, deals, products, payments, orders, campaigns, tags, and contact groups have no DELETE routes (a newsletter issue is deletable only while never published; removing a suppression deletes no contact data).
 - The idempotent create routes (`POST /v1/contacts`, `/v1/deals`, `/v1/payments`, `/v1/orders`, `/v1/bookings`, `/v1/email-campaigns`, `/v1/products` — by `external_id` — and issue creation `POST /v1/newsletters/:id/issues`) return **201 for both** a fresh create and an upsert/replay. All of them except orders carry a top-level boolean **`duplicate`** field (`false` on a fresh create, `true` when the call matched an existing record); **`POST /v1/orders` carries no `duplicate` field** — both outcomes return the same full-order body (see [Orders](orders.md#post-apiv1orders)). Order **refunds** (`POST /v1/orders/:id/refunds`) do return `{ duplicate, order }` on their `external_refund_id` idempotency.
 - **`POST /v1/payment-requests` is deliberately NOT idempotent** — there is no idempotency key on the resource, and a repeat POST mints a second, independently payable link (see [Payment Requests](payment-requests.md)).
 - `POST /v1/emails` is the one idempotent route whose status code also splits: **201** for a fresh send, **200** for an idempotent replay (its body carries the same `duplicate` field).

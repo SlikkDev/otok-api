@@ -56,7 +56,7 @@ for contact in client.contacts.iter({"filter": {"lifecycle_stage": "customer"}})
     print(contact["email"])
 ```
 
-Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, payment requests, orders, email campaigns, and newsletters (including newsletter issues), which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
+Pages are requested at each endpoint's **documented `limit` cap** — 500 for the standard lists (contacts, tags, contact groups, campaigns, templates, meeting types, bookings), 100 for deals, payments, sales, payment requests, orders, email campaigns, and newsletters (including newsletter issues), which paginate differently. Pass a smaller `limit` to override the page size (a larger one is clamped to the cap); `offset` sets the starting position:
 
 ```python
 for deal in client.deals.iter({"status": "open", "limit": 50}):
@@ -164,6 +164,26 @@ List and iterate with dedicated filters, newest `placed_at` first:
 for order in client.orders.iter({"status": "paid", "placed_from": "2026-07-01T00:00:00Z"}):
     ...  # pages of 100 through GET /v1/orders
 ```
+
+### Sales (record, cancel, refund)
+
+A sale records what a contact bought — items from the product catalog — and **never charges anyone**. Money is linked to it by allocating payment entries; its `settlement_status` follows. Requires the **Sales** plan feature.
+
+```python
+result = client.sales.create(
+    {
+        "contact_id": contact["id"],
+        "items": [{"product_id": "2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a", "quantity": 1}],
+        "external_reference": "crm-invoice-4471",  # idempotent: a replay writes nothing
+    }
+)
+sale = result["sale"]
+
+client.sales.allocate(sale["id"], {"payment_entry_id": entry_id})  # link an existing charge
+client.sales.cancel(sale["id"], {"reason": "customer_request"})   # money stays on the sale
+```
+
+`refund()` and `cancel()` with a `money` mode other than `keep` need a key with the owner-granted **Allow refunds** capability (`403` with `err.code == "API_KEY_MONEY_OUT_DISABLED"` otherwise); `delete()` and `unallocate()` need **Allow permanent deletion through the API** (`HARD_DELETE_OWNER_ONLY`). Pass an `idempotency_key` to `refund()` so retries never refund twice.
 
 ### Send a transactional email
 
@@ -314,6 +334,7 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 | `client.payments` | `GET/POST /v1/payments`, `GET/PATCH /v1/payments/:id`, `POST …/cancel`, `POST …/entries/:entryId/mark`, `POST …/refund` |
 | `client.payment_requests` | `GET/POST /v1/payment-requests`, `GET /v1/payment-requests/:id`, `POST …/cancel` — hosted pay-links (`workspace_payments` feature; create is **not** idempotent) |
 | `client.orders` | `GET/POST /v1/orders`, `GET /v1/orders/:id`, `POST …/refunds`, `POST …/mark-paid`, `POST …/cancel` |
+| `client.sales` | `GET/POST /v1/sales`, `GET/PATCH/DELETE /v1/sales/:id`, `POST …/cancel`, `POST …/reinstate`, `POST …/refund`, `PUT …/owner`, `PUT …/deal`, `POST …/allocations`, `DELETE …/allocations/:allocationId` — the sales ledger (`sales` feature; POST = idempotent by `external_reference`) |
 | `client.meeting_types` | `GET /v1/meeting-types`, `GET /v1/meeting-types/:id`, `GET /v1/meeting-types/:id/slots`, `GET /v1/meeting-types/:id/embed` |
 | `client.bookings` | `GET/POST /v1/bookings`, `GET /v1/bookings/:id`, `POST …/cancel`, `POST …/reschedule`, `POST …/reassign` |
 | `client.webhook_endpoints` | `GET/POST /v1/webhook-endpoints`, `DELETE /v1/webhook-endpoints/:id` |
@@ -321,12 +342,12 @@ You can also call `verify_webhook_signature(payload, header, secret, tolerance_s
 
 Request/response field names match the wire contract (snake_case) exactly, so the interactive API reference at `https://app.otok.io/api/v1/docs` applies 1:1. The `commerce` layer accepts friendlier flat dicts and maps them for you.
 
-Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, audiences, sender profiles, email campaigns, newsletters, campaigns, templates, payments, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — plus `client.newsletters.iter_issues(newsletter_id)` for one newsletter's issues. Events and attendances are the exception: those lists page by `limit`/`offset` without a `total`, so walk them yourself until a short page comes back. See [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
+Every namespace with a paginated `list()` (contacts, tags, contact groups, deals, products, suppressions, audiences, sender profiles, email campaigns, newsletters, campaigns, templates, payments, sales, payment requests, orders, meeting types, bookings) also has an auto-paginating `iter()` — plus `client.newsletters.iter_issues(newsletter_id)` for one newsletter's issues. Events and attendances are the exception: those lists page by `limit`/`offset` without a `total`, so walk them yourself until a short page comes back. See [Iterate a whole collection](#iterate-a-whole-collection-auto-pagination).
 
 ## Errors, timeouts, retries
 
 - Non-2xx responses raise **`OtokAPIError`** with `status`, `code` (machine-readable, when present), and the parsed `body`. `code` comes from the `{"error": {"code", "message"}}` envelope (e.g. `endpoint_not_found`, `SLOT_TAKEN`, `campaign_not_found`, `campaign_not_scheduled`) or from a top-level `error_code` field (e.g. `FEATURE_NOT_INCLUDED_IN_PLAN`, `CONTACT_MERGE_REQUIRED`). Key your handling on `status` + `code`, never on the message text.
-- **Plan-feature gating (403):** the endpoint groups that mirror plan-gated product areas — deals + pipelines (Deals), payments (`client.payments` + `client.contacts.list_documents`), payment requests (`client.payment_requests`, gated by the separate `workspace_payments` feature), orders (Orders), campaigns (Campaigns), bookings + meeting types (Booking), email campaigns + suppressions + sender profiles (`client.email_campaigns` + `client.suppressions` + `client.sender_profiles`, all gated by `email_marketing`), newsletters (`client.newsletters`, gated by `newsletters`) — answer every call with a `403` with `err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"` when the workspace's plan lacks the feature. Contacts (including consent, except the documents sub-route), tags, contact groups, templates, products, audiences, notes, emails, and webhook endpoints are not feature-gated.
+- **Plan-feature gating (403):** the endpoint groups that mirror plan-gated product areas — deals + pipelines (Deals), payments (`client.payments` + `client.contacts.list_documents`), payment requests (`client.payment_requests`, gated by the separate `workspace_payments` feature), orders (Orders), sales (`client.sales`, gated by `sales`), campaigns (Campaigns), bookings + meeting types (Booking), email campaigns + suppressions + sender profiles (`client.email_campaigns` + `client.suppressions` + `client.sender_profiles`, all gated by `email_marketing`), newsletters (`client.newsletters`, gated by `newsletters`) — answer every call with a `403` with `err.code == "FEATURE_NOT_INCLUDED_IN_PLAN"` when the workspace's plan lacks the feature. Contacts (including consent, except the documents sub-route), tags, contact groups, templates, products, audiences, notes, emails, and webhook endpoints are not feature-gated.
 - **Invalid `filter` values (400):** list-endpoint `filter` values are type-checked against the target field — a mistyped date/UUID/enum/number/boolean returns a `400` with a descriptive message (e.g. `Invalid filter value for "created_at": "not-a-date" is not a date`) instead of a server error.
 - **Duplicate names (409):** creating or renaming a tag / contact group to a name that already exists in the workspace (case-insensitive) returns a `409` (`A tag with this name already exists`).
 - **Contact identity conflicts (409):** `PATCH /v1/contacts/:id` now behaves like `POST /v1/contacts` when a `phone`/`email` change collides with an identifier another contact holds (or previously held): the write is **not** applied — a merge request is parked for review in oToK and the `409` raises with `err.code == "CONTACT_MERGE_REQUIRED"`; its `merge_request_id` is on `err.body`. Non-identity fields sent in the same PATCH are held on the merge request and applied when it is resolved.

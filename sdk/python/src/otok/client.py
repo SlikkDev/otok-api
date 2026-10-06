@@ -30,6 +30,7 @@ from .resources import (
     ProductCyclesApi,
     ProductsApi,
     ReportsApi,
+    SalesApi,
     SenderProfilesApi,
     SuppressionsApi,
     TagsApi,
@@ -107,6 +108,7 @@ class OtokClient:
         self.payments = PaymentsApi(self._http)
         self.payment_requests = PaymentRequestsApi(self._http)
         self.orders = OrdersApi(self._http)
+        self.sales = SalesApi(self._http)
         self.meeting_types = MeetingTypesApi(self._http)
         self.bookings = BookingsApi(self._http)
         self.webhook_endpoints = WebhookEndpointsApi(self._http)

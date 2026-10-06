@@ -34,6 +34,7 @@ const GUIDES = [
   ["payments", "Payments"],
   ["payment-requests", "Payment Requests"],
   ["orders", "Orders"],
+  ["sales", "Sales"],
   ["emails", "Transactional Emails"],
   ["email-campaigns", "Email Campaigns"],
   ["newsletters", "Newsletters"],
