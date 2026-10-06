@@ -579,7 +579,7 @@ curl -X POST "https://app.otok.io/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f
   -H "Authorization: Bearer otok_live_abc123..." \
   -H "Content-Type: application/json" \
   -d '{
-    "idempotency_key": "renewal-2026-08-9c2f1a4e",
+    "idempotency_key": "plan-renewal-2026-08",
     "amount": 250,
     "title": "August membership",
     "method_selection": "default"
