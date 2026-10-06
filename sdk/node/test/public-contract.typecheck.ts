@@ -69,3 +69,44 @@ export const refundSystemReason: PaymentRefundParams = { reason: "legacy_mark", 
 export const chargeParams: SavedCardChargeParams = { idempotency_key: "charge-0001", amount: 250 };
 // @ts-expect-error A saved-card charge always carries an idempotency key.
 export const chargeWithoutKey: SavedCardChargeParams = { amount: 250 };
+// ── Priced events, booking deposits, catalog pricing ──
+import type { AttendancePayment, BookingDeposit, ProductCreateParams, ProductCycleUpdateParams } from "../src";
+
+export const pricedEvent: OtokEventUpsertParams = { name: "Paid workshop", collect_payment_on_registration: true };
+export const unpaidRegistration: AttendancePayment = {
+  sale_id: "sale-1", sale_status: "active", settlement_status: "unpaid", pay_url: null,
+};
+export const releasedDeposit: BookingDeposit = { state: "released", amount: 50, hold_until: null, sale_id: "sale-2" };
+export const fixedProduct: ProductCreateParams = { name: "Course", dynamic_pricing: false, recurring_sale_policy: "fill_one" };
+export const rearm: ProductCycleUpdateParams = { ends_on: "2026-12-01", rearm_date_triggers: true };
+// @ts-expect-error Only fill_one and per_period exist.
+export const badPolicy: ProductCreateParams = { name: "X", recurring_sale_policy: "monthly" };
+// @ts-expect-error A deposit state never goes back to "refunded".
+export const badDeposit: BookingDeposit = { state: "refunded", amount: null, hold_until: null, sale_id: null };
+// ── Customer tickets ──
+import type {
+  OtokWebhookEvent,
+  TicketCreateParams,
+  TicketReplyParams,
+  TicketUpdateParams,
+} from "../src";
+
+export const ticketOpen: TicketCreateParams = {
+  contact: { email: "jane@example.com" },
+  subject: "Can't log in",
+  body: "Access denied.",
+  external_reference: "helpdesk-88213",
+};
+export const ticketReply: TicketReplyParams = { body: "Fixed.", idempotency_key: "reply-1" };
+export const ticketUnassign: TicketUpdateParams = { assigned_user_id: null, category: null };
+
+// @ts-expect-error A ticket needs its opening message.
+export const bodilessTicket: TicketCreateParams = { contact_id: "c-1", subject: "Hi" };
+// @ts-expect-error `pending` comes only from a reply.
+export const pendingByPatch: TicketUpdateParams = { status: "pending" };
+
+export function ticketChange(event: OtokWebhookEvent): string | null {
+  if (event.type === "ticket.status_changed") return event.data.change.status.to;
+  if (event.type === "ticket.message_created") return event.data.message.origin;
+  return null;
+}

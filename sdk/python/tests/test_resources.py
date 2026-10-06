@@ -21,6 +21,8 @@ from otok import (
     ORDER_WEBHOOK_EVENT_TYPES,
     PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
     PAYMENT_WEBHOOK_EVENT_TYPES,
+    SALE_WEBHOOK_EVENT_TYPES,
+    TICKET_WEBHOOK_EVENT_TYPES,
     AudienceListParams,
     OtokAPIError,
     OtokClient,
@@ -439,6 +441,28 @@ class TestEmailsAndWebhookEndpoints:
         )
         assert len(new_family_types) == 15
         for event_type in new_family_types:
+            assert event_type not in defaults
+
+    def test_ticket_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert TICKET_WEBHOOK_EVENT_TYPES == (
+            "ticket.created",
+            "ticket.message_created",
+            "ticket.status_changed",
+            "ticket.assigned",
+        )
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        for event_type in TICKET_WEBHOOK_EVENT_TYPES:
+            assert event_type not in defaults
+
+    def test_sale_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert SALE_WEBHOOK_EVENT_TYPES == (
+            "sale.recorded",
+            "sale.cancelled",
+            "sale.paid",
+            "sale.refunded",
+        )
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        for event_type in SALE_WEBHOOK_EVENT_TYPES:
             assert event_type not in defaults
 
     def test_new_family_events_are_listed_verbatim_at_registration(self) -> None:
@@ -2601,3 +2625,264 @@ class TestContactAcquisitions:
         assert request.method == "GET"
         assert urlsplit(request.url).path == "/api/v1/contacts/c-1/acquisitions"
         assert query_of(request) == {"kind": ["api"], "limit": ["20"]}
+
+
+class TestTickets:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 50, "offset": 0})
+        )
+        client.tickets.list(
+            {
+                "status": "open",
+                "assignee": "unassigned",
+                "category": "Access",
+                "priority": "high",
+                "source": "api",
+                "external_reference": "helpdesk-88213",
+                "created_from": "2026-09-01T00:00:00Z",
+                "sort": "-created_at",
+                "limit": 20,
+                "offset": 40,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/tickets"
+        assert query_of(request) == {
+            "status": ["open"],
+            "assignee": ["unassigned"],
+            "category": ["Access"],
+            "priority": ["high"],
+            "source": ["api"],
+            "external_reference": ["helpdesk-88213"],
+            "created_from": ["2026-09-01T00:00:00Z"],
+            "sort": ["-created_at"],
+            "limit": ["20"],
+            "offset": ["40"],
+        }
+
+    def test_iter_pages_at_the_ticket_list_cap(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [{"id": "t-1"}], "total": 1, "limit": 200, "offset": 0})
+        )
+        ids = [ticket["id"] for ticket in client.tickets.iter({"limit": 1000})]
+        assert ids == ["t-1"]
+        assert query_of(last_request(transport))["limit"] == ["200"]
+
+    def test_get_pages_the_conversation(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "id": "t-1",
+                    "messages": [{"id": "m-2", "side": "team", "origin": "api"}],
+                    "messages_has_more": True,
+                    "messages_next_before": "m-2",
+                    "last_customer_email": None,
+                },
+            )
+        )
+        ticket = client.tickets.get("t-1", {"messages_limit": 1, "messages_before": "m-3"})
+        request = last_request(transport)
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1"
+        assert query_of(request) == {"messages_limit": ["1"], "messages_before": ["m-3"]}
+        assert ticket["messages_next_before"] == "m-2"
+
+    def test_create_posts_the_inline_contact_and_reports_the_outcome(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "t-1",
+                    "duplicate": False,
+                    "customer_email_skipped": "no_verified_sender",
+                },
+            )
+        )
+        result = client.tickets.create(
+            {
+                "contact": {"email": "jane@example.com", "name": "Jane"},
+                "subject": "Can't log in",
+                "body": "Access denied after a reset.",
+                "opened_by": "customer",
+                "external_reference": "helpdesk-88213",
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "POST"
+        assert urlsplit(request.url).path == "/api/v1/tickets"
+        assert transport.request_body() == {
+            "contact": {"email": "jane@example.com", "name": "Jane"},
+            "subject": "Can't log in",
+            "body": "Access denied after a reset.",
+            "opened_by": "customer",
+            "external_reference": "helpdesk-88213",
+        }
+        assert result["duplicate"] is False
+        assert result["customer_email_skipped"] == "no_verified_sender"
+
+    def test_reply_posts_to_the_replies_route(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "message": {"id": "m-9", "origin": "api"},
+                    "ticket": {"id": "t-1", "status": "pending"},
+                    "duplicate": True,
+                },
+            )
+        )
+        result = client.tickets.reply(
+            "t-1",
+            {
+                "body": "Your access is back.",
+                "author_email": "dana@example.com",
+                "idempotency_key": "reply-1",
+            },
+        )
+        request = last_request(transport)
+        assert request.method == "POST"
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1/replies"
+        assert transport.request_body() == {
+            "body": "Your access is back.",
+            "author_email": "dana@example.com",
+            "idempotency_key": "reply-1",
+        }
+        assert result["duplicate"] is True
+        assert result["ticket"]["status"] == "pending"
+
+    def test_update_patches_triage_fields_with_null_unassign(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200, {"id": "t-1", "status": "resolved", "customer_email_skipped": "capped"}
+            )
+        )
+        result = client.tickets.update(
+            "t-1", {"status": "resolved", "category": None, "assigned_user_id": None}
+        )
+        request = last_request(transport)
+        assert request.method == "PATCH"
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1"
+        assert transport.request_body() == {
+            "status": "resolved",
+            "category": None,
+            "assigned_user_id": None,
+        }
+        assert result["customer_email_skipped"] == "capped"
+
+    def test_refusal_surfaces_the_envelope_code(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {"error": {"code": "ticket_is_spam", "message": "No replies in spam"}},
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.tickets.reply("t-1", {"body": "Hi"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "ticket_is_spam"
+
+
+class TestSales:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client()
+        client.sales.list(
+            {
+                "contact_id": "c-1",
+                "owner_user_id": "u-1",
+                "status": "active",
+                "settlement_status": "unpaid",
+                "external_reference": "crm-invoice-4471",
+                "limit": 10,
+                "offset": 20,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/sales"
+        assert query_of(request) == {
+            "contact_id": ["c-1"],
+            "owner_user_id": ["u-1"],
+            "status": ["active"],
+            "settlement_status": ["unpaid"],
+            "external_reference": ["crm-invoice-4471"],
+            "limit": ["10"],
+            "offset": ["20"],
+        }
+
+    def test_iter_pages_with_the_deals_payments_cap(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [{"id": "s-1"}], "total": 1, "limit": 100, "offset": 0})
+        )
+        assert [sale["id"] for sale in client.sales.iter()] == ["s-1"]
+        assert query_of(last_request(transport))["limit"] == ["100"]
+
+    def test_writes_issue_the_documented_verb_path_and_body(self) -> None:
+        client, transport = make_client(json_response(200, {"id": "s-1"}))
+        client.sales.create(
+            {
+                "contact_id": "c-1",
+                "items": [{"product_id": "p-1", "quantity": 2}],
+                "currency": "ILS",
+                "external_reference": "crm-invoice-4471",
+            }
+        )
+        client.sales.get("s-1")
+        client.sales.update("s-1", {"note": None})
+        client.sales.cancel("s-1", {"reason": "customer_request", "money": {"mode": "refund"}})
+        client.sales.reinstate("s-1")
+        client.sales.refund(
+            "s-1",
+            {
+                "reason": "requested_by_customer",
+                "mode": "auto",
+                "amount": 100,
+                "idempotency_key": "crm-refund-1",
+            },
+        )
+        client.sales.set_owner("s-1", None)
+        client.sales.link_deal("s-1", "d-1")
+        client.sales.allocate("s-1", {"payment_entry_id": "e-1"})
+        client.sales.unallocate("s-1", "a-1")
+        client.sales.delete("s-1")
+
+        calls = [
+            (request.method, transport.request_path(i), transport.request_body(i))
+            for i, request in enumerate(transport.requests)
+        ]
+        assert calls == [
+            (
+                "POST",
+                "/api/v1/sales",
+                {
+                    "contact_id": "c-1",
+                    "items": [{"product_id": "p-1", "quantity": 2}],
+                    "currency": "ILS",
+                    "external_reference": "crm-invoice-4471",
+                },
+            ),
+            ("GET", "/api/v1/sales/s-1", None),
+            ("PATCH", "/api/v1/sales/s-1", {"note": None}),
+            (
+                "POST",
+                "/api/v1/sales/s-1/cancel",
+                {"reason": "customer_request", "money": {"mode": "refund"}},
+            ),
+            ("POST", "/api/v1/sales/s-1/reinstate", {}),
+            (
+                "POST",
+                "/api/v1/sales/s-1/refund",
+                {
+                    "reason": "requested_by_customer",
+                    "mode": "auto",
+                    "amount": 100,
+                    "idempotency_key": "crm-refund-1",
+                },
+            ),
+            ("PUT", "/api/v1/sales/s-1/owner", {"owner_user_id": None}),
+            ("PUT", "/api/v1/sales/s-1/deal", {"deal_id": "d-1"}),
+            ("POST", "/api/v1/sales/s-1/allocations", {"payment_entry_id": "e-1"}),
+            ("DELETE", "/api/v1/sales/s-1/allocations/a-1", None),
+            ("DELETE", "/api/v1/sales/s-1", None),
+        ]

@@ -229,6 +229,8 @@ Conflicting identifiers, historical split matches, and pairs awaiting or preserv
 
 The non-identity fields of your request are parked with the merge request and applied when it is resolved. Retry after the merge request is resolved in the app. Repeated conflicting requests for the same pair reuse the same merge request.
 
+**Retrying after "Keep separate".** When someone resolves the conflict in the app by keeping the contacts separate and choosing which one the submission belongs to, your retry of the same submission is applied to that chosen contact (201, `duplicate: true`) instead of opening another merge request. None of the submitted identifiers are moved onto it — the phone, email and national ID stay with the contacts that hold them — but the rest of the request (fields, tags, groups, `acquisition`, `inquiry`) lands on the chosen contact. If the identifiers point at contacts for which no such choice was made, the request still answers 409 `CONTACT_MERGE_REQUIRED`.
+
 ### Example
 
 ```bash
@@ -332,6 +334,7 @@ Response `200` — the updated contact object.
 | 400 | `error_code: "PHONE_BLACKLISTED"` | Only when the patch *changes* the phone to a blacklisted number |
 | 404 | `"Contact <id> not found"` | Unknown in this workspace |
 | 409 | `error_code: "CONTACT_MERGE_REQUIRED"` | The new phone/email belongs (or previously belonged) to another contact — see above |
+| 409 | `error_code: "CONTACT_ANONYMISED"` | The contact was anonymised (erased for privacy compliance in the app). Its profile can no longer be changed; only `owner_user_id`, `tags` and `groups` are still accepted |
 
 ---
 

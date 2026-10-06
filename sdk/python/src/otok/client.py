@@ -30,10 +30,12 @@ from .resources import (
     ProductCyclesApi,
     ProductsApi,
     ReportsApi,
+    SalesApi,
     SenderProfilesApi,
     SuppressionsApi,
     TagsApi,
     TemplatesApi,
+    TicketsApi,
     WebhookEndpointsApi,
 )
 
@@ -107,8 +109,10 @@ class OtokClient:
         self.payments = PaymentsApi(self._http)
         self.payment_requests = PaymentRequestsApi(self._http)
         self.orders = OrdersApi(self._http)
+        self.sales = SalesApi(self._http)
         self.meeting_types = MeetingTypesApi(self._http)
         self.bookings = BookingsApi(self._http)
+        self.tickets = TicketsApi(self._http)
         self.webhook_endpoints = WebhookEndpointsApi(self._http)
         #: High-level e-commerce helpers (identify_customer, track_order).
         self.commerce = CommerceApi(self.contacts, self.deals, self.emails)

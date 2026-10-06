@@ -21,6 +21,7 @@ Quick links:
 - [Products](docs/api/products.md) — the product catalog shared by deals and payments
 - [Payment Requests](docs/api/payment-requests.md) — hosted pay-links through your own provider
 - [Orders](docs/api/orders.md) — e-commerce orders: line items, refunds, mark-paid/cancel
+- [Sales](docs/api/sales.md) — the sales ledger: record sales, cancel, refund, allocate payments
 - [Transactional Emails](docs/api/emails.md) and [Webhooks](docs/api/webhooks.md)
 - [Consent & Suppressions](docs/api/consent-and-suppressions.md) — per-channel consent + the email suppression list
 - [Bookings & Meeting Types](docs/api/bookings.md)
@@ -28,6 +29,7 @@ Quick links:
 - [Product cycles](docs/api/product-cycles.md) — cohorts, scheduling and capacity
 - [Shared reports](docs/api/reports.md) — discover and run workspace reports
 - [Events](docs/api/events.md) — events and registrations, with the Zoom join-link push
+- [Customer Tickets](docs/api/tickets.md) — open, read, answer and triage customer tickets
 
 ## At a glance
 

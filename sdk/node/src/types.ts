@@ -538,7 +538,7 @@ export interface DealCreateResult extends Deal {
 
 /**
  * A row of the workspace product catalog, shared by deals and customer
- * payments. `price` null = dynamic pricing. `vat_mode`/`vat_rate` are one
+ * payments. `price` null = no default price. `vat_mode`/`vat_rate` are one
  * both-or-neither pair (`null`s = the workspace payments default applies).
  */
 export interface Product {
@@ -550,8 +550,13 @@ export interface Product {
   /** Per-workspace-unique id in your system — the POST idempotency key. */
   external_id: string | null;
   description: string | null;
-  /** JSON number in the workspace payment currency; null = dynamic pricing. */
+  /** JSON number in the workspace payment currency; null = no default price. */
   price: number | null;
+  /**
+   * `true` (default): cycle prices — and sales without a cycle — may override
+   * `price`. `false` fixes the price.
+   */
+  dynamic_pricing?: boolean;
   vat_mode: PaymentVatMode | null;
   vat_rate: number | null;
   is_active: boolean;
@@ -564,8 +569,18 @@ export interface Product {
   manual_status?: "archived" | "cancelled" | null;
   enforce_cycle_capacity?: boolean;
   require_cycle?: boolean;
+  /** Read-only here (set in the app): a sale registers the buyer for the product's matching upcoming events. */
+  attendance_on_sale?: boolean;
+  recurring_sale_policy?: RecurringSalePolicy;
   [key: string]: unknown;
 }
+
+/**
+ * How a recurring payment plan for a product records sales: `fill_one` keeps
+ * paying into one sale until it is fully paid; `per_period` opens a new sale
+ * for every billing period. A plan keeps the policy it started with.
+ */
+export type RecurringSalePolicy = "fill_one" | "per_period";
 
 /**
  * POST /v1/products — create a product (idempotent upsert via `external_id`).
@@ -585,8 +600,16 @@ export interface ProductCreateParams {
   /** Per-workspace-unique idempotency key. Max 200 chars. */
   external_id?: string | null;
   description?: string | null;
-  /** Default price; null = dynamic pricing (deals need an explicit amount). */
+  /** Default price; null = no default price (deals need an explicit amount). */
   price?: number | null;
+  /**
+   * Default true. `false` fixes the price: a different cycle price is refused
+   * with 400 `PRODUCT_PRICE_LOCKED`, a sale at a different unit amount with
+   * 400 `SALE_PRICE_LOCKED`.
+   */
+  dynamic_pricing?: boolean;
+  /** Default `fill_one`; a change applies to new recurring plans only. */
+  recurring_sale_policy?: RecurringSalePolicy;
   /** Both-or-neither with `vat_rate`; send both null to clear the override. */
   vat_mode?: PaymentVatMode | null;
   /** VAT percent (0–100, max 2 decimals); paired with `vat_mode`. */
@@ -849,6 +872,20 @@ export const DEAL_WEBHOOK_EVENT_TYPES = [
 export type DealWebhookEventType = (typeof DEAL_WEBHOOK_EVENT_TYPES)[number];
 
 /**
+ * The four sale events. Opt-in by listing. They fire for EVERY sale write
+ * source — API, in-app, automations, and the sales the app records from
+ * other records. `sale.cancelled` fires once per cancelled item;
+ * reinstating fires nothing.
+ */
+export const SALE_WEBHOOK_EVENT_TYPES = [
+  "sale.recorded",
+  "sale.cancelled",
+  "sale.paid",
+  "sale.refunded",
+] as const;
+export type SaleWebhookEventType = (typeof SALE_WEBHOOK_EVENT_TYPES)[number];
+
+/**
  * The four booking lifecycle events. Opt-in by listing, like the order
  * events. `booking.completed`/`booking.no_show` deliberately do not exist as
  * webhooks — those statuses are sweep-derived, not user actions.
@@ -880,6 +917,24 @@ export type EventAttendanceWebhookEventType =
 export const FORM_WEBHOOK_EVENT_TYPES = ["form.submitted"] as const;
 export type FormWebhookEventType = (typeof FORM_WEBHOOK_EVENT_TYPES)[number];
 
+/**
+ * The four customer-ticket events. Opt-in by listing, and sent only while the
+ * plan includes Customer tickets. `ticket.created` carries the opening
+ * message (no separate `message_created` for it); `ticket.message_created`
+ * fires for every customer or team message, never an internal note;
+ * `ticket.status_changed` fires for every explicit status change (a move a
+ * reply causes rides `message_created`'s `ticket.status`); `ticket.assigned`
+ * fires when triage changes the assignee.
+ */
+export const TICKET_WEBHOOK_EVENT_TYPES = [
+  "ticket.created",
+  "ticket.message_created",
+  "ticket.status_changed",
+  "ticket.assigned",
+] as const;
+export type TicketWebhookEventType =
+  (typeof TICKET_WEBHOOK_EVENT_TYPES)[number];
+
 /** Any event type registrable on a webhook endpoint. */
 export type WebhookEventType =
   | EmailWebhookEventType
@@ -889,9 +944,11 @@ export type WebhookEventType =
   | ContactWebhookEventType
   | MessageWebhookEventType
   | DealWebhookEventType
+  | SaleWebhookEventType
   | BookingWebhookEventType
   | EventAttendanceWebhookEventType
-  | FormWebhookEventType;
+  | FormWebhookEventType
+  | TicketWebhookEventType;
 
 /**
  * POST /v1/webhook-endpoints (max 3 per workspace).
@@ -899,9 +956,9 @@ export type WebhookEventType =
  * `email.bounced`, `email.complained`); every other family is opt-in and
  * must be listed explicitly — the engagement types (`email.opened`,
  * `email.clicked`) and the `order.*`, `payment_request.*`,
- * `payment.refunded`, `contact.*`,
- * `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`,
- * and `form.submitted` families. A pre-existing registration never starts
+ * `payment.refunded`, `contact.*`, `message.received`, `deal.*`, `sale.*`,
+ * `booking.*`, `event.attendance.changed`, `form.submitted`, and `ticket.*`
+ * families. A pre-existing registration never starts
  * receiving a new family unasked. An empty array is rejected.
  * `email.failed` is deprecated — accepted when listed, never delivered.
  */
@@ -1336,6 +1393,128 @@ export interface DealLostEvent {
 }
 
 /**
+ * Payload `data.sale` of `sale.recorded` / `sale.paid` / `sale.refunded` —
+ * the header with every item in line order (cancelled ones included).
+ */
+export interface SaleWebhookSale {
+  id: string;
+  number: number;
+  contact_id: string;
+  deal_id: string | null;
+  owner_user_id: string | null;
+  status: SaleStatus;
+  settlement_status: SaleSettlementStatus;
+  currency: string;
+  total_amount: number | null;
+  paid_total: number;
+  refunded_total: number;
+  pending_refund_total: number;
+  sold_at: string | null;
+  /** Where the sale was recorded. Tolerate unknown values. */
+  source: string;
+  external_reference: string | null;
+  items: Array<{
+    id: string;
+    position: number;
+    product_id: string | null;
+    cycle_id: string | null;
+    title: string;
+    quantity: number;
+    unit_amount: number | null;
+    discount_percent: number | null;
+    line_total: number | null;
+    status: SaleItemStatus;
+  }>;
+}
+
+/** The buyer's identifiers on every `sale.*` event. */
+export interface SaleWebhookContact {
+  id: string;
+  name: string | null;
+  phone: string | null;
+  email: string | null;
+}
+
+export interface SaleRecordedEvent {
+  id: string;
+  type: "sale.recorded";
+  created_at: string;
+  data: { sale: SaleWebhookSale; contact: SaleWebhookContact };
+}
+
+/**
+ * `sale.cancelled` fires ONCE PER CANCELLED ITEM, and `data.sale` is the
+ * ITEM: `id` is the item id, `sale_id` the sale's id.
+ */
+export interface SaleCancelledEvent {
+  id: string;
+  type: "sale.cancelled";
+  created_at: string;
+  data: {
+    sale: {
+      id: string;
+      sale_id: string | null;
+      position: number;
+      contact_id: string;
+      product_id: string | null;
+      cycle_id: string | null;
+      title: string;
+      quantity: number;
+      unit_amount: number | null;
+      discount_percent: number | null;
+      line_total: number | null;
+      currency: string;
+      purchased_at: string | null;
+      status: SaleItemStatus;
+      cancelled_at: string | null;
+      cancel_reason: SaleCancelReason | null;
+      cancel_note: string | null;
+    };
+    contact: SaleWebhookContact;
+  };
+}
+
+/** `sale.paid` — the sale's settlement status became `paid`. */
+export interface SalePaidEvent {
+  id: string;
+  type: "sale.paid";
+  created_at: string;
+  data: {
+    sale: SaleWebhookSale;
+    contact: SaleWebhookContact;
+    settlement: {
+      transition_id: string;
+      paid_total: number;
+      total_amount: number | null;
+      /** The payment entry that completed the sale, or null. */
+      payment: { payment_id: string; entry_id: string; amount: number } | null;
+    };
+  };
+}
+
+/** `sale.refunded` — fires when a refund from the sale settles. */
+export interface SaleRefundedEvent {
+  id: string;
+  type: "sale.refunded";
+  created_at: string;
+  data: {
+    sale: SaleWebhookSale;
+    contact: SaleWebhookContact;
+    refund: {
+      payment_id: string | null;
+      /** The refund entry. */
+      entry_id: string | null;
+      /** Refunded from this sale (positive). */
+      amount: number;
+      reason: SaleRefundReason | null;
+      recorded_outside: boolean;
+      /** The sale's refunded total after this refund. */
+      refunded_total: number;
+    };
+  };
+}
+
+/**
  * Payload `data` of every `booking.*` event — a snapshot of the booking at
  * event time (full field set, explicit nulls). The booking module is
  * deliberately multi-timezone, so BOTH the host and invitee timezones ride
@@ -1438,6 +1617,79 @@ export interface FormSubmittedEvent {
   };
 }
 
+/** A message as a `ticket.*` webhook carries it — full text, never a file link. */
+export interface TicketWebhookMessage {
+  id: string;
+  side: TicketMessageSide;
+  origin: TicketMessageOrigin;
+  author: TicketMessageAuthor | null;
+  body: string | null;
+  /** Attachment metadata — fetch a fresh signed link from `tickets.get`. */
+  attachment: {
+    filename: string | null;
+    mime_type: string | null;
+    size: number | null;
+  } | null;
+  created_at: string;
+}
+
+/** Who changed a ticket's status (`ticket.status_changed`). */
+export type TicketChangeOrigin = TicketMessageOrigin | "system";
+
+/**
+ * The `data` of every `ticket.*` event. `ticket` is exactly the
+ * `/v1/tickets` ticket object at the moment of the change; `contact`
+ * repeats its `contact` block.
+ */
+export interface TicketWebhookEventData {
+  ticket: Ticket;
+  contact: TicketContact | null;
+  /** `ticket.created` (the opening message) and `ticket.message_created`. */
+  message?: TicketWebhookMessage;
+  /** `ticket.status_changed` (`status` + `origin`) and `ticket.assigned` (`assignee`). */
+  change?: {
+    status?: { from: TicketStatus; to: TicketStatus };
+    /** `agent` | `customer` | `automation` | `api` | `system`. Tolerate unknown values. */
+    origin?: TicketChangeOrigin;
+    assignee?: { from_user_id: string | null; to_user_id: string | null };
+  };
+}
+
+export interface TicketCreatedEvent {
+  id: string;
+  type: "ticket.created";
+  created_at: string;
+  data: TicketWebhookEventData & { message: TicketWebhookMessage };
+}
+
+export interface TicketMessageCreatedEvent {
+  id: string;
+  type: "ticket.message_created";
+  created_at: string;
+  data: TicketWebhookEventData & { message: TicketWebhookMessage };
+}
+
+export interface TicketStatusChangedEvent {
+  id: string;
+  type: "ticket.status_changed";
+  created_at: string;
+  data: TicketWebhookEventData & {
+    change: {
+      status: { from: TicketStatus; to: TicketStatus };
+      origin: TicketChangeOrigin;
+    };
+  };
+}
+
+export interface TicketAssignedEvent {
+  id: string;
+  type: "ticket.assigned";
+  created_at: string;
+  data: TicketWebhookEventData & {
+    change: { assignee: { from_user_id: string | null; to_user_id: string | null } };
+  };
+}
+
 export type OtokWebhookEvent =
   | EmailDeliveredEvent
   | EmailBouncedEvent
@@ -1464,12 +1716,20 @@ export type OtokWebhookEvent =
   | DealStageChangedEvent
   | DealWonEvent
   | DealLostEvent
+  | SaleRecordedEvent
+  | SaleCancelledEvent
+  | SalePaidEvent
+  | SaleRefundedEvent
   | BookingCreatedEvent
   | BookingRescheduledEvent
   | BookingCancelledEvent
   | BookingReassignedEvent
   | EventAttendanceChangedEvent
-  | FormSubmittedEvent;
+  | FormSubmittedEvent
+  | TicketCreatedEvent
+  | TicketMessageCreatedEvent
+  | TicketStatusChangedEvent
+  | TicketAssignedEvent;
 
 // ─────────────────────────── Campaigns ───────────────────────────
 
@@ -3012,6 +3272,396 @@ export interface OrderRefundResult {
   order: Order;
 }
 
+// ─────────────────────────── Sales ───────────────────────────
+
+/** `partially_cancelled` = some items cancelled; `cancelled` = every item. */
+export type SaleStatus = "active" | "partially_cancelled" | "cancelled";
+
+/**
+ * Derived from the money allocated to the sale — never set directly.
+ * `untracked` = `expects_payment: false` and no money linked.
+ */
+export type SaleSettlementStatus =
+  | "untracked"
+  | "unpaid"
+  | "partially_paid"
+  | "paid"
+  | "partially_refunded"
+  | "refunded";
+
+export type SaleItemStatus = "active" | "cancelled";
+
+export type SaleCancelReason =
+  | "customer_request"
+  | "duplicate"
+  | "mistake"
+  | "not_delivered"
+  | "payment_failed"
+  | "fraud"
+  | "other";
+
+/** The refund reason printed on the credit document. */
+export type SaleRefundReason =
+  | "requested_by_customer"
+  | "duplicate"
+  | "fraudulent"
+  | "order_change"
+  | "product_unsatisfactory"
+  | "sale_cancelled"
+  | "refunded_outside"
+  | "chargeback"
+  | "other";
+
+/**
+ * How a refund ended: `gateway_refunded` (the provider returned the money),
+ * `voided` (the provider cancelled the charge before it settled),
+ * `credit_document_only` (a credit document was issued but the money must
+ * still be returned — follow up in the app), `recorded_outside`,
+ * `ledger_only` (the charge did not go through a provider), `duplicate` (an
+ * `idempotency_key` replay). Tolerate unknown values.
+ */
+export type SaleRefundOutcome =
+  | "gateway_refunded"
+  | "voided"
+  | "credit_document_only"
+  | "recorded_outside"
+  | "ledger_only"
+  | "duplicate";
+
+/**
+ * A sale header. Money fields are JSON numbers (2 decimals) in the sale's
+ * currency. `contact_id` is the BUYER — the contact who paid may differ.
+ */
+export interface Sale {
+  id: string;
+  workspace_id: string;
+  /** Per-workspace running sale number. */
+  number: number;
+  contact_id: string;
+  deal_id: string | null;
+  owner_user_id: string | null;
+  /** `null` for API- and automation-recorded sales. */
+  created_by: string | null;
+  currency: string;
+  vat_mode: PaymentVatMode | null;
+  vat_rate: number | null;
+  expects_payment: boolean;
+  sold_at: string;
+  note: string | null;
+  /**
+   * `api` | `manual` | `automation` | the record that created it (`quote`,
+   * `order`, `payment_request`, `recurring`, `booking`, `event`, `form`,
+   * `store`, …). Tolerate unknown values.
+   */
+  source: string;
+  external_reference: string | null;
+  status: SaleStatus;
+  /** Every item, cancelled ones included. */
+  line_count: number;
+  /** Sum of the active priced items; `null` while no active item has a price. */
+  total_amount: number | null;
+  has_unpriced_lines: boolean;
+  paid_total: number;
+  refunded_total: number;
+  pending_refund_total: number;
+  settlement_status: SaleSettlementStatus;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+
+/** One line of a sale. `title` is the product's name frozen at sale time. */
+export interface SaleItem {
+  id: string;
+  sale_id: string;
+  position: number;
+  /** The buyer. */
+  contact_id: string;
+  /** Who receives the product when it is not the buyer. */
+  recipient_contact_id: string | null;
+  product_id: string | null;
+  cycle_id: string | null;
+  title: string;
+  quantity: number;
+  unit_amount: number | null;
+  discount_percent: number | null;
+  /** `quantity × unit_amount × (1 − discount_percent / 100)`, to the cent. */
+  line_total: number | null;
+  currency: string;
+  purchased_at: string;
+  note: string | null;
+  source: string;
+  status: SaleItemStatus;
+  cancelled_at: string | null;
+  cancel_reason: SaleCancelReason | null;
+  cancel_note: string | null;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+
+/** Part of a payment entry funding a sale. Negative `amount` = a refund. */
+export interface SaleAllocation {
+  id: string;
+  sale_id: string;
+  payment_entry_id: string;
+  payment_id: string;
+  amount: number;
+  currency: string;
+  source: string;
+  created_by: string | null;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+/**
+ * GET /v1/sales/:id — the full sale view. `tier` is 2 for a key with the
+ * "Allow refunds" capability, which adds `money` and `incidents`. Sections
+ * that do not apply are omitted. Tolerate unknown keys, timeline kinds and
+ * actions.
+ */
+export interface SaleView {
+  tier: 1 | 2;
+  sale: Sale & {
+    buyer?: {
+      id: string;
+      name: string | null;
+      phone: string | null;
+      email: string | null;
+      owner_user_id: string | null;
+      anonymised_at: string | null;
+    } | null;
+    owner?: { id: string; full_name: string | null; email: string | null } | null;
+    created_by_user?: { id: string; full_name: string | null; email: string | null } | null;
+    /** `total_amount − paid_total + refunded_total`; null while the total is open. */
+    outstanding?: number | null;
+    /** How much more money the sale can take; null while the total is open. */
+    allocatable?: number | null;
+    possible_duplicates?: Array<{
+      id: string;
+      number: number;
+      source: string;
+      sold_at: string;
+      status: SaleStatus;
+      shared_product_ids: string[];
+    }>;
+    /** Only when the sale's currency differs from the workspace currency. */
+    fx?: {
+      workspace_currency: string;
+      rate: number | null;
+      converted_total: number | null;
+      warning: string | null;
+    };
+  };
+  items: Array<
+    SaleItem & {
+      product: { id: string; name: string; is_active: boolean } | null;
+      cycle: { id: string; name: string; starts_on: string | null; ends_on: string | null } | null;
+    }
+  >;
+  allocations: Array<{
+    allocation: SaleAllocation;
+    entry: Record<string, unknown>;
+    payment: Record<string, unknown>;
+    payer: { id: string; name: string | null } | null;
+    payer_is_other_contact: boolean;
+    remaining: number;
+    twins: Array<{ allocation: SaleAllocation; entry: Record<string, unknown> }>;
+    [key: string]: unknown;
+  }>;
+  pay_links?: Array<Record<string, unknown>>;
+  related?: {
+    deal: { id: string; title: string | null; status: string } | null;
+    quotes: Array<{ id: string; number: number | string | null; status: string }>;
+    orders: Array<{ id: string; number: number | string | null; status: string }>;
+  };
+  documents?: ContactDocument[];
+  timeline?: Array<{ kind: string; at: string; id: string; [key: string]: unknown }>;
+  actions?: Record<string, { allowed: boolean; blockers: string[]; [key: string]: unknown }>;
+  /** "Allow refunds" keys only. */
+  money?: {
+    charges: Array<{
+      paymentId: string;
+      /** Pass as `entry_id` to `sales.refund`. */
+      entryId: string;
+      net: number;
+      remaining: number;
+      amount: number;
+      /** `gateway` | `recorded_outside` | `ledger_only` | `blocked`. */
+      route: string;
+      blockers: string[];
+      [key: string]: unknown;
+    }>;
+  };
+  /** "Allow refunds" keys only. */
+  incidents?: Array<Record<string, unknown>>;
+  [key: string]: unknown;
+}
+
+/** GET /v1/sales — an unknown `status`/`settlement_status` 400s. */
+export interface SaleListParams {
+  contact_id?: string;
+  owner_user_id?: string;
+  status?: SaleStatus;
+  settlement_status?: SaleSettlementStatus;
+  /** Exact match. */
+  external_reference?: string;
+  /** Page size (max 100, default 25). */
+  limit?: number;
+  offset?: number;
+}
+
+export interface SaleItemCreateParams {
+  /** An active catalog product. */
+  product_id: string;
+  /** An open cycle of this product. */
+  cycle_id?: string | null;
+  /** 1–100000, default 1. */
+  quantity?: number;
+  /**
+   * Omitted → the catalog price (the cycle's, else the product's). A
+   * different price needs a product (or cycle) that allows price overrides
+   * (else 400 `SALE_PRICE_LOCKED`). `null` records the line unpriced.
+   */
+  unit_amount?: number | null;
+  /** 0–100. */
+  discount_percent?: number | null;
+  /** Who receives the product when it is not the buyer. */
+  recipient_contact_id?: string;
+}
+
+/**
+ * POST /v1/sales — records a sale; it never charges the buyer. Idempotent
+ * via `external_reference`: a replay writes nothing and returns the original
+ * sale with `duplicate: true`.
+ */
+export interface SaleCreateParams {
+  /** The buyer. */
+  contact_id: string;
+  /** 1–100 items. */
+  items: SaleItemCreateParams[];
+  /** 3-letter code; defaults to the workspace payment currency. */
+  currency?: string;
+  /** ISO 8601; defaults to now. */
+  sold_at?: string;
+  note?: string | null;
+  /** A deal of the same buyer. */
+  deal_id?: string | null;
+  /** Omitted → the buyer's owner (while a member); `null` → unowned. */
+  owner_user_id?: string | null;
+  /** ≤200 chars, unique per workspace. */
+  external_reference?: string | null;
+  /** Always together with `vat_rate`. */
+  vat_mode?: PaymentVatMode | null;
+  vat_rate?: number | null;
+  /** Default true; false records the sale for history only (`untracked`). */
+  expects_payment?: boolean;
+}
+
+export interface SaleCreateResult {
+  sale: Sale;
+  items: SaleItem[];
+  /** `true` = `external_reference` replayed an existing sale (nothing written). */
+  duplicate: boolean;
+}
+
+/** PATCH /v1/sales/:id — the note is the only editable field. */
+export interface SaleUpdateParams {
+  /** `null` clears it. */
+  note: string | null;
+}
+
+/**
+ * POST /v1/sales/:id/cancel. A `money.mode` other than `keep` needs the
+ * key's "Allow refunds" capability and a FULL cancel.
+ */
+export interface SaleCancelParams {
+  reason: SaleCancelReason;
+  /** Item ids of this sale (≤100). Omitted → every active item. */
+  items?: string[];
+  note?: string | null;
+  /** Omitted = `{ mode: "keep" }`. */
+  money?: {
+    mode: "keep" | "refund" | "recorded_outside";
+    /** Default `sale_cancelled`. */
+    reason?: SaleRefundReason;
+  };
+}
+
+export interface SaleCancelRefund {
+  paymentId: string;
+  entryId: string;
+  amount: number;
+  remaining: number;
+  mode: "auto" | "recorded_outside";
+  outcome?: SaleRefundOutcome;
+  refundEntryId?: string;
+  incidentId?: string;
+  /** A refused refund — e.g. `NOTHING_TO_REFUND`. The cancel still stands. */
+  errorCode?: string;
+  error?: string;
+}
+
+export interface SaleCancelResult {
+  sale: Sale;
+  cancelled: SaleItem[];
+  /** One outcome per funding charge (empty for `keep`). */
+  refunds: SaleCancelRefund[];
+  pay_links_cancelled: number;
+}
+
+export interface SaleReinstateParams {
+  /** Item ids of this sale (≤100). Omitted → every cancelled item. */
+  items?: string[];
+}
+
+export interface SaleReinstateResult {
+  sale: Sale;
+  reinstated: SaleItem[];
+}
+
+/**
+ * POST /v1/sales/:id/refund — needs the key's "Allow refunds" capability.
+ * `entry_id` may be omitted only when one charge funds the sale.
+ */
+export interface SaleRefundParams {
+  reason: SaleRefundReason;
+  /** `auto` = through the connected provider where possible; `recorded_outside` = record only. */
+  mode: "auto" | "recorded_outside";
+  entry_id?: string;
+  /** Omitted → the charge's whole remaining share of this sale. */
+  amount?: number;
+  /** ≤1000 chars. */
+  note?: string;
+  /** ≤200 chars, unique per workspace — a replay returns `duplicate: true`. */
+  idempotency_key?: string;
+}
+
+export interface SaleRefundResult {
+  /** The payment the charge belongs to, with its entries. */
+  payment: Payment;
+  /** The refund entry. */
+  entry: Record<string, unknown>;
+  outcome: SaleRefundOutcome;
+  /** Present when the outcome needs follow-up in the app. */
+  incidentId?: string;
+  duplicate: boolean;
+}
+
+/** POST /v1/sales/:id/allocations — links an existing charge; nothing is charged. */
+export interface SaleAllocateParams {
+  /** A charge entry (pending/completed) in the sale's currency. */
+  payment_entry_id: string;
+  /** Omitted → as much as both the charge and the sale allow. */
+  amount?: number;
+}
+
+export interface SaleUnallocateResult {
+  released: SaleAllocation;
+  /** The charge's refund allocations released with it. */
+  twins: SaleAllocation[];
+}
+
 // ─────────────────────────── Bookings ───────────────────────────
 
 export type BookingStatus = "confirmed" | "cancelled" | "completed" | "no_show";
@@ -3074,8 +3724,27 @@ export interface Booking {
   contact_id: string | null;
   status: BookingStatus;
   start_at: string;
+  /** `invitee`, `host` or `system` (`system` + reason `deposit_unpaid` = an unpaid deposit hold was released). */
+  cancelled_by?: "invitee" | "host" | "system" | null;
+  /** Always present on current responses. */
+  deposit?: BookingDeposit;
   created_at: string;
   [key: string]: unknown;
+}
+
+/**
+ * A booking's deposit. `state` only moves forward (`none` | `awaiting` →
+ * `paid` | `released`); a booking awaiting its deposit is still `confirmed`.
+ * Bookings created through the API never take a deposit (`none`).
+ */
+export interface BookingDeposit {
+  state: "none" | "awaiting" | "paid" | "released";
+  /** The amount that counts as paid, in the workspace currency. */
+  amount: number | null;
+  /** Payment deadline of a hold-until-paid meeting type; null = confirmed regardless. */
+  hold_until: string | null;
+  /** The sale recording the deposit. */
+  sale_id: string | null;
 }
 
 /**
@@ -3137,9 +3806,18 @@ export interface ProductCycleCreateParams {
   duration_unit?: DurationUnit;
   /** Dated cycles accept only cancelled or null (automatic). */
   manual_status?: CycleManualStatus | null;
+  /** On a product with `dynamic_pricing: false`, a different price → 400 `PRODUCT_PRICE_LOCKED`. */
   price?: number | null;
+  /** Default true; `false` stops sales in this cycle from overriding its price. */
+  dynamic_pricing?: boolean;
   capacity?: number | null;
   is_archived?: boolean;
+  /**
+   * When this call CHANGES `starts_on`/`ends_on` and date reminders already
+   * fired, `true` fires them again for the new date; the response then
+   * carries `rearmed_fires`. Default false.
+   */
+  rearm_date_triggers?: boolean;
 }
 export type ProductCycleUpdateParams = Partial<ProductCycleCreateParams>;
 export interface ProductCycleListParams {
@@ -3159,10 +3837,14 @@ export interface ProductCycle {
   manual_status: CycleManualStatus | null;
   /** Decimal amount; may be serialized as a string. */
   price: string | number | null;
+  dynamic_pricing?: boolean;
   capacity: number | null;
   is_archived: boolean;
   sales_count: number;
+  /** Seats currently occupied (units of every active place); compare with `capacity`. */
   units_taken: number;
+  /** Only on an update sent with `rearm_date_triggers: true`: date reminders reset. */
+  rearmed_fires?: number;
   created_at: string;
   updated_at: string;
   [key: string]: unknown;
@@ -3337,6 +4019,8 @@ export interface OtokEvent {
    */
   event_type: { id: string; name: string | null } | null;
   suppress_event_automations: boolean;
+  /** Priced-event opt-in: new registrations record a sale and send a payment link. */
+  collect_payment_on_registration?: boolean;
   archived_at: string | null;
   created_at: string;
   [key: string]: unknown;
@@ -3374,6 +4058,12 @@ export interface OtokEventUpsertParams {
    */
   event_type_name?: string;
   suppress_event_automations?: boolean;
+  /**
+   * Priced-event opt-in (default false): every new registration records a
+   * sale of the event's product and sends the contact a payment link. There
+   * is no per-call opt-out on registrations.
+   */
+  collect_payment_on_registration?: boolean;
 }
 
 export interface OtokEventUpsertResult extends OtokEvent {
@@ -3415,9 +4105,29 @@ export interface Attendance {
   unregistered_at: string | null;
   /** The attendee's personal join link, from Zoom or supplied by you. */
   join_url: string | null;
+  /** The sale this registration was charged through on a priced event. */
+  payment_sale_id?: string | null;
+  /** The registration's payment on a priced event; null when it carries no sale. */
+  payment?: AttendancePayment | null;
   created_at: string;
   updated_at: string | null;
   [key: string]: unknown;
+}
+
+/** A priced-event registration's payment block. */
+export interface AttendancePayment {
+  sale_id: string;
+  sale_status: "active" | "partially_cancelled" | "cancelled" | null;
+  settlement_status:
+    | "untracked"
+    | "unpaid"
+    | "partially_paid"
+    | "paid"
+    | "partially_refunded"
+    | "refunded"
+    | null;
+  /** The newest payment link that can still be paid; null when none is live. */
+  pay_url: string | null;
 }
 
 /** Identity to upsert when you have no `contact_id`. At least one identifier is required. */
@@ -3491,4 +4201,239 @@ export interface OffsetPage<T> {
   data: T[];
   limit: number;
   offset: number;
+}
+
+// ─────────────────────────── Customer tickets ───────────────────────────
+
+/**
+ * `open` = waiting on the team; `pending` = Answered (set by a team reply,
+ * never by `update`); `resolved` / `closed` = done (a customer reply reopens
+ * either); `spam` = filed silently (a blocked contact's ticket).
+ */
+export type TicketStatus = "open" | "pending" | "resolved" | "closed" | "spam";
+/** The statuses `tickets.update` can set. */
+export type TicketWritableStatus = "open" | "resolved" | "closed";
+export type TicketPriority = "low" | "normal" | "high" | "urgent";
+/** `portal` = the hosted help page, `widget` = the website widget, `agent` = logged in the app, `api` = this API. */
+export type TicketSource = "portal" | "widget" | "agent" | "api";
+
+export interface TicketContact {
+  id: string;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+}
+
+/** The running response target. */
+export interface TicketResponseTarget {
+  status: "ok" | "at_risk" | "breached";
+  /** `first_reply` = the first answer; `next_reply` = the answer to a customer follow-up. */
+  metric: "first_reply" | "next_reply";
+  due_at: string | null;
+}
+
+/** A customer ticket — the same object in every `ticket.*` webhook. */
+export interface Ticket {
+  id: string;
+  number: number;
+  /** The number as customers see it, with the workspace's prefix. */
+  number_label: string;
+  subject: string;
+  status: TicketStatus;
+  priority: TicketPriority;
+  category: string | null;
+  source: TicketSource;
+  /** The customer's language for emails and auto-replies (`en` | `he`). */
+  language: string;
+  widget_id: string | null;
+  /** Your own key, as sent to `tickets.create`. */
+  external_reference: string | null;
+  contact: TicketContact | null;
+  /** The assigned team member; `null` when unassigned. */
+  assignee: { id: string; name: string | null; email: string | null } | null;
+  first_response_at: string | null;
+  /** `null` while no response target is running. */
+  response_target: TicketResponseTarget | null;
+  last_message_at: string | null;
+  resolved_at: string | null;
+  closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+}
+
+export type TicketMessageSide = "customer" | "team";
+/**
+ * Who posted a message: the customer, a team member, an automation, or this
+ * API (whoever it was posted as) — drop your own `api` posts when they come
+ * back.
+ */
+export type TicketMessageOrigin = "customer" | "agent" | "automation" | "api";
+
+export interface TicketMessageAuthor {
+  id: string;
+  name: string | null;
+}
+
+/** A customer or team message — never an internal note or a system line. */
+export interface TicketMessage {
+  id: string;
+  side: TicketMessageSide;
+  origin: TicketMessageOrigin;
+  /** The team member behind a team message; `null` otherwise. */
+  author: TicketMessageAuthor | null;
+  body: string | null;
+  /** The attachment link, signed for 4 hours — fetch the ticket again for a fresh one. */
+  media_url: string | null;
+  media_filename: string | null;
+  media_mime_type: string | null;
+  media_size: number | null;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+/** Why a customer email will not go out (`customer_email_skipped`). */
+export type TicketEmailSkipReason = "no_verified_sender" | "over_quota" | "capped";
+
+/** The ticket's latest email to the customer — including one that did not go out. */
+export interface TicketCustomerEmail {
+  /** `reply` = the "team replied" email; `other` = the ticket link, creation or resolved email. */
+  kind: "reply" | "other";
+  status:
+    | "queued"
+    | "sent"
+    | "delivered"
+    | "bounced"
+    | "complained"
+    | "failed"
+    | "skipped_suppressed";
+  reason:
+    | TicketEmailSkipReason
+    | "suppressed"
+    | "send_failed"
+    | null;
+  created_at: string | null;
+  sent_at: string | null;
+  bounced_at: string | null;
+  complained_at: string | null;
+}
+
+/** One page of a ticket's conversation, oldest to newest. */
+export interface TicketThreadPage {
+  messages: TicketMessage[];
+  /** An older page exists. */
+  messages_has_more: boolean;
+  /** Pass as `messages_before` to get the older page. */
+  messages_next_before: string | null;
+}
+
+/** `tickets.get` — the ticket, its latest customer email, and a page of its conversation. */
+export interface TicketDetail extends Ticket, TicketThreadPage {
+  last_customer_email: TicketCustomerEmail | null;
+}
+
+export interface TicketListParams {
+  /** Default `all` = every status except `spam`. */
+  status?: TicketStatus | "all";
+  contact_id?: string;
+  /** A team member's user id, or `unassigned`. */
+  assignee?: string;
+  /** Exact category label, case-insensitive. */
+  category?: string;
+  priority?: TicketPriority;
+  source?: TicketSource;
+  external_reference?: string;
+  /** ISO 8601 — created at/after. */
+  created_from?: string;
+  /** ISO 8601 — created at/before. */
+  created_to?: string;
+  /** Default `-last_message_at`. */
+  sort?: "last_message_at" | "-last_message_at" | "created_at" | "-created_at";
+  /** Page size (default 50, max 200). */
+  limit?: number;
+  /** Rows to skip (default 0). */
+  offset?: number;
+}
+
+export interface TicketGetParams {
+  /** Messages per page (default 100, max 200); the newest page comes first. */
+  messages_limit?: number;
+  /** An older page: the previous answer's `messages_next_before`. */
+  messages_before?: string;
+}
+
+export interface TicketCreateParams {
+  /** An existing contact. Mutually exclusive with `contact`. */
+  contact_id?: string;
+  /** Resolved by phone, then email, then national ID — exactly like `contacts.upsert`. */
+  contact?: AttendeeContact;
+  /** ≤200 chars. */
+  subject: string;
+  /** ≤10,000 chars — the customer's request, the ticket's opening message. */
+  body: string;
+  /** One of the workspace's ticket categories. */
+  category?: string;
+  /** Default `normal`. */
+  priority?: TicketPriority;
+  /** Default: the contact's language, else the workspace's. */
+  language?: "en" | "he";
+  /**
+   * `customer` (default) behaves like a ticket opened on the help page —
+   * routing, the response target, the team alert, a blocked contact's ticket
+   * filed into spam. `team` behaves like a ticket a team member logged.
+   */
+  opened_by?: "customer" | "team";
+  /** Assign to this team member (who must be able to manage tickets). Skips routing. */
+  assigned_user_id?: string;
+  /** Assign by login email. Mutually exclusive with `assigned_user_id`. */
+  assignee_email?: string;
+  /** Default true. `false` sends no creation email. */
+  notify_customer?: boolean;
+  /** Your own key: sending it again answers the original ticket and changes nothing. */
+  external_reference?: string;
+}
+
+/** `tickets.create` — the ticket with its first page of messages (no `last_customer_email`). */
+export interface TicketCreateResult extends Ticket, TicketThreadPage {
+  /** True when `external_reference` matched an existing ticket and nothing changed. */
+  duplicate: boolean;
+  /** Present only when the creation email was due and will not go out. */
+  customer_email_skipped?: TicketEmailSkipReason;
+}
+
+export interface TicketReplyParams {
+  /** ≤10,000 chars. */
+  body: string;
+  /** Post as this team member (who must be able to manage tickets). Default: the team. */
+  author_user_id?: string;
+  /** Post as the member with this login email. Mutually exclusive with `author_user_id`. */
+  author_email?: string;
+  /** Makes retries safe: the same key answers the original reply. Scoped to your API key. */
+  idempotency_key?: string;
+}
+
+export interface TicketReplyResult {
+  message: TicketMessage;
+  ticket: Ticket;
+  /** True when `idempotency_key` replayed the original reply. */
+  duplicate: boolean;
+  /** Present only when the "team replied" email was due and will not go out. */
+  customer_email_skipped?: TicketEmailSkipReason;
+}
+
+export interface TicketUpdateParams {
+  /** `pending` comes only from a reply. */
+  status?: TicketWritableStatus;
+  priority?: TicketPriority;
+  /** `null` clears it. */
+  category?: string | null;
+  /** `null` unassigns. */
+  assigned_user_id?: string | null;
+  /** Assign by login email. Mutually exclusive with `assigned_user_id`. */
+  assignee_email?: string;
+}
+
+export interface TicketUpdateResult extends Ticket {
+  /** Present only when a resolve made by this call was due to email the customer and that email will not go out. */
+  customer_email_skipped?: TicketEmailSkipReason;
 }

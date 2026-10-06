@@ -421,6 +421,12 @@ class _ProductCreateRequired(TypedDict):
     name: str
 
 
+#: How a recurring payment plan for a product records sales: ``fill_one``
+#: keeps paying into one sale until it is fully paid; ``per_period`` opens a
+#: new sale for every billing period. A plan keeps the policy it started with.
+RecurringSalePolicy = Literal["fill_one", "per_period"]
+
+
 class ProductCreateParams(_ProductCreateRequired, total=False):
     """``POST /v1/products`` — create a product (idempotent upsert via
     ``external_id``: a repeat POST whose ``external_id`` matches an existing
@@ -434,9 +440,16 @@ class ProductCreateParams(_ProductCreateRequired, total=False):
     #: Per-workspace-unique idempotency key. Max 200 chars.
     external_id: Optional[str]
     description: Optional[str]
-    #: Default price in the workspace payment currency; ``None`` = dynamic
-    #: pricing (deals need an explicit amount).
+    #: Default price in the workspace payment currency; ``None`` = no default
+    #: price (deals need an explicit amount).
     price: Optional[float]
+    #: Default ``True``. ``False`` fixes the price: a different cycle price is
+    #: refused with 400 ``PRODUCT_PRICE_LOCKED``, a sale at a different unit
+    #: amount with 400 ``SALE_PRICE_LOCKED``.
+    dynamic_pricing: bool
+    #: How a recurring payment plan records sales (default ``fill_one``); a
+    #: change applies to new plans only.
+    recurring_sale_policy: RecurringSalePolicy
     #: Both-or-neither with ``vat_rate``; send both ``None`` to clear.
     vat_mode: Optional[PaymentVatMode]
     #: VAT percent (0–100, max 2 decimals); paired with ``vat_mode``.
@@ -461,6 +474,8 @@ class ProductUpdateParams(TypedDict, total=False):
     external_id: Optional[str]
     description: Optional[str]
     price: Optional[float]
+    dynamic_pricing: bool
+    recurring_sale_policy: RecurringSalePolicy
     vat_mode: Optional[PaymentVatMode]
     vat_rate: Optional[float]
     is_active: bool
@@ -486,6 +501,9 @@ class ProductListParams(TypedDict, total=False):
 
 
 #: Product record as returned by the API (open — servers may add fields).
+#: Carries ``dynamic_pricing``, ``recurring_sale_policy`` and the read-only
+#: ``attendance_on_sale`` (a sale registers the buyer for the product's
+#: matching upcoming events; set in the app).
 #: ``POST /v1/products`` responses additionally carry a top-level
 #: ``duplicate: bool`` — ``True`` when ``external_id`` matched an existing
 #: product that was updated instead (201 either way).
@@ -714,6 +732,24 @@ DEAL_WEBHOOK_EVENT_TYPES: tuple[DealWebhookEventType, ...] = (
     "deal.lost",
 )
 
+SaleWebhookEventType = Literal[
+    "sale.recorded",
+    "sale.cancelled",
+    "sale.paid",
+    "sale.refunded",
+]
+
+#: The four sale events. Opt-in by listing. They fire for EVERY sale write
+#: source — API, in-app, automations, and the sales the app records from
+#: other records. ``sale.cancelled`` fires once per cancelled item;
+#: reinstating fires nothing.
+SALE_WEBHOOK_EVENT_TYPES: tuple[SaleWebhookEventType, ...] = (
+    "sale.recorded",
+    "sale.cancelled",
+    "sale.paid",
+    "sale.refunded",
+)
+
 BookingWebhookEventType = Literal[
     "booking.created",
     "booking.rescheduled",
@@ -746,6 +782,27 @@ FormWebhookEventType = Literal["form.submitted"]
 #: by listing.
 FORM_WEBHOOK_EVENT_TYPES: tuple[FormWebhookEventType, ...] = ("form.submitted",)
 
+TicketWebhookEventType = Literal[
+    "ticket.created",
+    "ticket.message_created",
+    "ticket.status_changed",
+    "ticket.assigned",
+]
+
+#: The four customer-ticket events. Opt-in by listing, and sent only while the
+#: plan includes Customer tickets. ``ticket.created`` carries the opening
+#: message; ``ticket.message_created`` fires for every customer or team
+#: message (never an internal note); ``ticket.status_changed`` fires for every
+#: explicit status change (a move a reply causes rides ``message_created``'s
+#: ``ticket.status``); ``ticket.assigned`` fires when triage changes the
+#: assignee.
+TICKET_WEBHOOK_EVENT_TYPES: tuple[TicketWebhookEventType, ...] = (
+    "ticket.created",
+    "ticket.message_created",
+    "ticket.status_changed",
+    "ticket.assigned",
+)
+
 #: Any event type registrable on a webhook endpoint.
 WebhookEventType = Union[
     EmailWebhookEventType,
@@ -755,9 +812,11 @@ WebhookEventType = Union[
     ContactWebhookEventType,
     MessageWebhookEventType,
     DealWebhookEventType,
+    SaleWebhookEventType,
     BookingWebhookEventType,
     EventAttendanceWebhookEventType,
     FormWebhookEventType,
+    TicketWebhookEventType,
 ]
 
 
@@ -772,8 +831,9 @@ class WebhookEndpointCreateParams(_WebhookEndpointCreateRequired, total=False):
     ``email.bounced``, ``email.complained``); every other family is opt-in
     and must be listed explicitly — the engagement types (``email.opened``,
     ``email.clicked``) and the ``order.*``, ``payment_request.*``,
-    ``contact.*``, ``message.received``, ``deal.*``, ``booking.*``,
-    ``event.attendance.changed``, and ``form.submitted`` families. A
+    ``payment.refunded``, ``contact.*``, ``message.received``, ``deal.*``,
+    ``sale.*``, ``booking.*``, ``event.attendance.changed``,
+    ``form.submitted``, and ``ticket.*`` families. A
     pre-existing registration never starts receiving a new family unasked.
     An empty list is rejected. ``email.failed`` is deprecated — accepted at
     registration, but it never fires.
@@ -1266,6 +1326,156 @@ class DealLostEvent(TypedDict):
     data: DealWebhookEventData
 
 
+class SaleWebhookItem(TypedDict):
+    id: str
+    position: int
+    product_id: Optional[str]
+    cycle_id: Optional[str]
+    title: str
+    quantity: int
+    unit_amount: Optional[float]
+    discount_percent: Optional[float]
+    line_total: Optional[float]
+    status: SaleItemStatus
+
+
+class SaleWebhookSale(TypedDict):
+    """``data["sale"]`` of ``sale.recorded`` / ``sale.paid`` /
+    ``sale.refunded`` — the header with every item in line order (cancelled
+    ones included)."""
+
+    id: str
+    number: int
+    contact_id: str
+    deal_id: Optional[str]
+    owner_user_id: Optional[str]
+    status: SaleStatus
+    settlement_status: SaleSettlementStatus
+    currency: str
+    total_amount: Optional[float]
+    paid_total: float
+    refunded_total: float
+    pending_refund_total: float
+    sold_at: Optional[str]
+    #: Where the sale was recorded. Tolerate unknown values.
+    source: str
+    external_reference: Optional[str]
+    items: list[SaleWebhookItem]
+
+
+class SaleWebhookContact(TypedDict):
+    """The buyer's identifiers on every ``sale.*`` event."""
+
+    id: str
+    name: Optional[str]
+    phone: Optional[str]
+    email: Optional[str]
+
+
+class SaleRecordedEventData(TypedDict):
+    sale: SaleWebhookSale
+    contact: SaleWebhookContact
+
+
+class SaleRecordedEvent(TypedDict):
+    id: str
+    type: Literal["sale.recorded"]
+    created_at: str
+    data: SaleRecordedEventData
+
+
+class SaleCancelledItem(TypedDict):
+    """The cancelled ITEM — ``id`` is the item id, ``sale_id`` the sale's."""
+
+    id: str
+    sale_id: Optional[str]
+    position: int
+    contact_id: str
+    product_id: Optional[str]
+    cycle_id: Optional[str]
+    title: str
+    quantity: int
+    unit_amount: Optional[float]
+    discount_percent: Optional[float]
+    line_total: Optional[float]
+    currency: str
+    purchased_at: Optional[str]
+    status: SaleItemStatus
+    cancelled_at: Optional[str]
+    cancel_reason: Optional[SaleCancelReason]
+    cancel_note: Optional[str]
+
+
+class SaleCancelledEventData(TypedDict):
+    sale: SaleCancelledItem
+    contact: SaleWebhookContact
+
+
+class SaleCancelledEvent(TypedDict):
+    """``sale.cancelled`` fires ONCE PER CANCELLED ITEM."""
+
+    id: str
+    type: Literal["sale.cancelled"]
+    created_at: str
+    data: SaleCancelledEventData
+
+
+class SaleSettlementPayment(TypedDict):
+    payment_id: str
+    entry_id: str
+    amount: float
+
+
+class SaleSettlement(TypedDict):
+    transition_id: str
+    paid_total: float
+    total_amount: Optional[float]
+    #: The payment entry that completed the sale, or ``None``.
+    payment: Optional[SaleSettlementPayment]
+
+
+class SalePaidEventData(TypedDict):
+    sale: SaleWebhookSale
+    contact: SaleWebhookContact
+    settlement: SaleSettlement
+
+
+class SalePaidEvent(TypedDict):
+    """``sale.paid`` — the sale's settlement status became ``paid``."""
+
+    id: str
+    type: Literal["sale.paid"]
+    created_at: str
+    data: SalePaidEventData
+
+
+class SaleRefund(TypedDict):
+    payment_id: Optional[str]
+    #: The refund entry.
+    entry_id: Optional[str]
+    #: Refunded from this sale (positive).
+    amount: float
+    reason: Optional[SaleRefundReason]
+    recorded_outside: bool
+    #: The sale's refunded total after this refund.
+    refunded_total: float
+
+
+class SaleRefundedEventData(TypedDict):
+    sale: SaleWebhookSale
+    contact: SaleWebhookContact
+    refund: SaleRefund
+
+
+class SaleRefundedEvent(TypedDict):
+    """``sale.refunded`` — fires when a refund from the sale settles."""
+
+    id: str
+    type: Literal["sale.refunded"]
+    created_at: str
+    data: SaleRefundedEventData
+
+
 #: Known booking sources. Passed through verbatim from the booking row —
 #: **tolerate unknown values**: new sources may appear without an SDK bump.
 BookingWebhookSource = Literal["public_page", "manual", "api", "embed"]
@@ -1393,6 +1603,84 @@ class FormSubmittedEvent(TypedDict):
     data: FormSubmittedEventData
 
 
+TicketStatus = Literal["open", "pending", "resolved", "closed", "spam"]
+TicketMessageOrigin = Literal["customer", "agent", "automation", "api"]
+
+
+class TicketWebhookAttachment(TypedDict):
+    filename: Optional[str]
+    mime_type: Optional[str]
+    size: Optional[int]
+
+
+class TicketWebhookMessage(TypedDict):
+    """A message as a ``ticket.*`` webhook carries it — full text, never a
+    file link (fetch a fresh signed one with ``tickets.get``)."""
+
+    id: str
+    #: ``customer`` | ``team``.
+    side: str
+    #: ``customer`` | ``agent`` | ``automation`` | ``api``.
+    origin: str
+    #: ``{"id", "name"}`` of the team member behind a team message, else ``None``.
+    author: Optional[dict[str, Any]]
+    body: Optional[str]
+    attachment: Optional[TicketWebhookAttachment]
+    created_at: str
+
+
+class TicketWebhookChange(TypedDict, total=False):
+    """``status`` (``{"from", "to"}``) + ``origin`` on ``ticket.status_changed``;
+    ``assignee`` (``{"from_user_id", "to_user_id"}``) on ``ticket.assigned``."""
+
+    status: dict[str, str]
+    #: ``agent`` | ``customer`` | ``automation`` | ``api`` | ``system``.
+    origin: str
+    assignee: dict[str, Optional[str]]
+
+
+class _TicketWebhookEventDataRequired(TypedDict):
+    #: The ``/v1/tickets`` ticket object at the moment of the change.
+    ticket: dict[str, Any]
+    #: ``{"id", "name", "email", "phone"}`` — repeats ``ticket["contact"]``.
+    contact: Optional[dict[str, Any]]
+
+
+class TicketWebhookEventData(_TicketWebhookEventDataRequired, total=False):
+    #: ``ticket.created`` (the opening message) and ``ticket.message_created``.
+    message: TicketWebhookMessage
+    #: ``ticket.status_changed`` and ``ticket.assigned``.
+    change: TicketWebhookChange
+
+
+class TicketCreatedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.created"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
+class TicketMessageCreatedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.message_created"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
+class TicketStatusChangedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.status_changed"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
+class TicketAssignedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.assigned"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
 #: Any inbound webhook event. Discriminate on ``event["type"]``.
 OtokWebhookEvent = Union[
     EmailDeliveredEvent,
@@ -1420,12 +1708,20 @@ OtokWebhookEvent = Union[
     DealStageChangedEvent,
     DealWonEvent,
     DealLostEvent,
+    SaleRecordedEvent,
+    SaleCancelledEvent,
+    SalePaidEvent,
+    SaleRefundedEvent,
     BookingCreatedEvent,
     BookingRescheduledEvent,
     BookingCancelledEvent,
     BookingReassignedEvent,
     EventAttendanceChangedEvent,
     FormSubmittedEvent,
+    TicketCreatedEvent,
+    TicketMessageCreatedEvent,
+    TicketStatusChangedEvent,
+    TicketAssignedEvent,
 ]
 
 # ─────────────────────────── Campaigns ───────────────────────────
@@ -2531,6 +2827,227 @@ class OrderRefundResult(TypedDict):
     order: dict[str, Any]
 
 
+# ─────────────────────────── Sales ───────────────────────────
+
+#: ``partially_cancelled`` = some items cancelled; ``cancelled`` = every item.
+SaleStatus = Literal["active", "partially_cancelled", "cancelled"]
+
+#: Derived from the money allocated to the sale — never set directly.
+#: ``untracked`` = ``expects_payment: False`` and no money linked.
+SaleSettlementStatus = Literal[
+    "untracked",
+    "unpaid",
+    "partially_paid",
+    "paid",
+    "partially_refunded",
+    "refunded",
+]
+
+SaleItemStatus = Literal["active", "cancelled"]
+
+SaleCancelReason = Literal[
+    "customer_request",
+    "duplicate",
+    "mistake",
+    "not_delivered",
+    "payment_failed",
+    "fraud",
+    "other",
+]
+
+#: The refund reason printed on the credit document.
+SaleRefundReason = Literal[
+    "requested_by_customer",
+    "duplicate",
+    "fraudulent",
+    "order_change",
+    "product_unsatisfactory",
+    "sale_cancelled",
+    "refunded_outside",
+    "chargeback",
+    "other",
+]
+
+#: How a refund ended: ``gateway_refunded`` (the provider returned the
+#: money), ``voided`` (the provider cancelled the charge before it settled),
+#: ``credit_document_only`` (a credit document was issued but the money must
+#: still be returned — follow up in the app), ``recorded_outside``,
+#: ``ledger_only`` (the charge did not go through a provider), ``duplicate``
+#: (an ``idempotency_key`` replay). Tolerate unknown values.
+SaleRefundOutcome = Literal[
+    "gateway_refunded",
+    "voided",
+    "credit_document_only",
+    "recorded_outside",
+    "ledger_only",
+    "duplicate",
+]
+
+
+class SaleListParams(TypedDict, total=False):
+    """``GET /v1/sales`` — an unknown ``status``/``settlement_status`` 400s."""
+
+    #: The buyer.
+    contact_id: str
+    owner_user_id: str
+    status: SaleStatus
+    settlement_status: SaleSettlementStatus
+    #: Exact match.
+    external_reference: str
+    #: Page size (max 100, default 25).
+    limit: int
+    offset: int
+
+
+class _SaleItemCreateRequired(TypedDict):
+    #: An active catalog product.
+    product_id: str
+
+
+class SaleItemCreateParams(_SaleItemCreateRequired, total=False):
+    """One line of ``POST /v1/sales`` (1–100 per sale)."""
+
+    #: An open cycle of this product.
+    cycle_id: Optional[str]
+    #: 1–100000, default 1.
+    quantity: int
+    #: Omitted → the catalog price (the cycle's, else the product's). A
+    #: different price needs a product (or cycle) that allows price
+    #: overrides (else 400 ``SALE_PRICE_LOCKED``). ``None`` records the line
+    #: unpriced.
+    unit_amount: Optional[float]
+    #: 0–100.
+    discount_percent: Optional[float]
+    #: Who receives the product when it is not the buyer.
+    recipient_contact_id: str
+
+
+class _SaleCreateRequired(TypedDict):
+    #: The buyer.
+    contact_id: str
+    items: list[SaleItemCreateParams]
+
+
+class SaleCreateParams(_SaleCreateRequired, total=False):
+    """``POST /v1/sales`` — records a sale; it never charges the buyer.
+    Idempotent via ``external_reference``: a replay writes nothing and
+    returns the original sale with ``duplicate: True``.
+    """
+
+    #: 3-letter code; defaults to the workspace payment currency.
+    currency: str
+    #: ISO 8601; defaults to now.
+    sold_at: str
+    note: Optional[str]
+    #: A deal of the same buyer.
+    deal_id: Optional[str]
+    #: Omitted → the buyer's owner (while a member); ``None`` → unowned.
+    owner_user_id: Optional[str]
+    #: ≤200 chars, unique per workspace.
+    external_reference: Optional[str]
+    #: Always together with ``vat_rate``.
+    vat_mode: Optional[PaymentVatMode]
+    vat_rate: Optional[float]
+    #: Default True; False records the sale for history only (``untracked``).
+    expects_payment: bool
+
+
+class SaleUpdateParams(TypedDict):
+    """``PATCH /v1/sales/:id`` — the note is the only editable field
+    (``None`` clears it)."""
+
+    note: Optional[str]
+
+
+class SaleCancelMoney(TypedDict, total=False):
+    mode: Literal["keep", "refund", "recorded_outside"]
+    #: Default ``sale_cancelled``.
+    reason: SaleRefundReason
+
+
+class _SaleCancelRequired(TypedDict):
+    reason: SaleCancelReason
+
+
+class SaleCancelParams(_SaleCancelRequired, total=False):
+    """``POST /v1/sales/:id/cancel``. A ``money["mode"]`` other than
+    ``keep`` needs the key's "Allow refunds" capability and a FULL cancel.
+    """
+
+    #: Item ids of this sale (≤100). Omitted → every active item.
+    items: list[str]
+    note: Optional[str]
+    #: Omitted = ``{"mode": "keep"}``.
+    money: SaleCancelMoney
+
+
+class SaleReinstateParams(TypedDict, total=False):
+    #: Item ids of this sale (≤100). Omitted → every cancelled item.
+    items: list[str]
+
+
+class _SaleRefundRequired(TypedDict):
+    reason: SaleRefundReason
+    #: ``auto`` = through the connected provider where possible;
+    #: ``recorded_outside`` = record only.
+    mode: Literal["auto", "recorded_outside"]
+
+
+class SaleRefundParams(_SaleRefundRequired, total=False):
+    """``POST /v1/sales/:id/refund`` — needs the key's "Allow refunds"
+    capability. ``entry_id`` may be omitted only when one charge funds the
+    sale.
+    """
+
+    entry_id: str
+    #: Omitted → the charge's whole remaining share of this sale.
+    amount: float
+    #: ≤1000 chars.
+    note: str
+    #: ≤200 chars, unique per workspace — a replay returns ``duplicate: True``.
+    idempotency_key: str
+
+
+class _SaleAllocateRequired(TypedDict):
+    #: A charge entry (pending/completed) in the sale's currency.
+    payment_entry_id: str
+
+
+class SaleAllocateParams(_SaleAllocateRequired, total=False):
+    """``POST /v1/sales/:id/allocations`` — links an existing charge;
+    nothing is charged."""
+
+    #: Omitted → as much as both the charge and the sale allow.
+    amount: float
+
+
+#: A sale header as returned by the API (open — servers may add fields).
+#: Money fields are JSON numbers in the sale's currency; ``contact_id`` is
+#: the BUYER.
+Sale = dict[str, Any]
+#: A sale line item (open dict).
+SaleItem = dict[str, Any]
+#: A payment allocation on a sale (open dict); negative ``amount`` = refund.
+SaleAllocation = dict[str, Any]
+#: ``GET /v1/sales/:id`` — the full sale view (``tier``, ``sale``,
+#: ``items``, ``allocations``, ``pay_links``, ``related``, ``documents``,
+#: ``timeline``, ``actions``; ``money`` and ``incidents`` only for a key
+#: with the "Allow refunds" capability).
+SaleView = dict[str, Any]
+#: ``POST /v1/sales`` — ``{"sale", "items", "duplicate"}``.
+SaleCreateResult = dict[str, Any]
+#: ``POST /v1/sales/:id/cancel`` — ``{"sale", "cancelled", "refunds",
+#: "pay_links_cancelled"}``.
+SaleCancelResult = dict[str, Any]
+#: ``POST /v1/sales/:id/reinstate`` — ``{"sale", "reinstated"}``.
+SaleReinstateResult = dict[str, Any]
+#: ``POST /v1/sales/:id/refund`` — ``{"payment", "entry", "outcome",
+#: "incidentId"?, "duplicate"}``.
+SaleRefundResult = dict[str, Any]
+#: ``DELETE /v1/sales/:id/allocations/:allocationId`` — ``{"released",
+#: "twins"}``.
+SaleUnallocateResult = dict[str, Any]
+
 # ─────────────────────────── Bookings ───────────────────────────
 
 BookingStatus = Literal["confirmed", "cancelled", "completed", "no_show"]
@@ -2604,8 +3121,28 @@ class BookingReassignParams(TypedDict, total=False):
 #: Booking record as returned by the API (open — servers may add fields).
 #: ``POST /v1/bookings`` responses additionally carry a top-level
 #: ``duplicate: bool`` — ``True`` when a double-submit of the same
-#: slot/invitee returned the original booking (201 either way).
+#: slot/invitee returned the original booking (201 either way). Every booking
+#: carries a ``deposit`` block — see :class:`BookingDeposit`.
 Booking = dict[str, Any]
+
+
+class BookingDeposit(TypedDict):
+    """A booking's ``deposit`` block. ``state`` only moves forward
+    (``none`` | ``awaiting`` → ``paid`` | ``released``); a booking awaiting
+    its deposit is still ``confirmed``. An unpaid hold that expires cancels
+    the booking with ``cancelled_by="system"`` and
+    ``cancellation_reason="deposit_unpaid"``. Bookings created through the
+    API never take a deposit (``none``).
+    """
+
+    state: Literal["none", "awaiting", "paid", "released"]
+    #: The amount that counts as paid, in the workspace currency.
+    amount: Optional[float]
+    #: Payment deadline of a hold-until-paid meeting type; None = confirmed
+    #: regardless.
+    hold_until: Optional[str]
+    #: The sale recording the deposit.
+    sale_id: Optional[str]
 MeetingType = dict[str, Any]
 
 SlotsParams = TypedDict(
@@ -2652,9 +3189,18 @@ class ProductCycleUpdateParams(TypedDict, total=False):
     ends_on: Optional[str]
     duration_unit: DurationUnit
     manual_status: Optional[CycleManualStatus]
+    #: On a product with ``dynamic_pricing=False``, a different price → 400
+    #: ``PRODUCT_PRICE_LOCKED``.
     price: Optional[float]
+    #: Default ``True``; ``False`` stops sales in this cycle from overriding
+    #: its price.
+    dynamic_pricing: bool
     capacity: Optional[int]
     is_archived: bool
+    #: When this call CHANGES ``starts_on``/``ends_on`` and date reminders
+    #: already fired, ``True`` fires them again for the new date; the response
+    #: then carries ``rearmed_fires``. Default ``False``.
+    rearm_date_triggers: bool
 
 
 class ProductCycleCreateParams(_ProductCycleCreateRequired, total=False):
@@ -2664,9 +3210,18 @@ class ProductCycleCreateParams(_ProductCycleCreateRequired, total=False):
     ends_on: Optional[str]
     duration_unit: DurationUnit
     manual_status: Optional[CycleManualStatus]
+    #: On a product with ``dynamic_pricing=False``, a different price → 400
+    #: ``PRODUCT_PRICE_LOCKED``.
     price: Optional[float]
+    #: Default ``True``; ``False`` stops sales in this cycle from overriding
+    #: its price.
+    dynamic_pricing: bool
     capacity: Optional[int]
     is_archived: bool
+    #: When this call CHANGES ``starts_on``/``ends_on`` and date reminders
+    #: already fired, ``True`` fires them again for the new date; the response
+    #: then carries ``rearmed_fires``. Default ``False``.
+    rearm_date_triggers: bool
 
 
 class ProductCycleListParams(TypedDict, total=False):
@@ -2676,6 +3231,9 @@ class ProductCycleListParams(TypedDict, total=False):
 
 
 #: Open response record; price may be a decimal string, number or None.
+#: ``units_taken`` counts the seats currently occupied (compare with
+#: ``capacity``); ``rearmed_fires`` appears only on an update sent with
+#: ``rearm_date_triggers=True``.
 ProductCycle = dict[str, Any]
 SavedReport = dict[str, Any]
 ReportRunResult = dict[str, Any]
@@ -2785,6 +3343,10 @@ class EventUpsertParams(_EventUpsertRequired, total=False):
     #: name the same saved event (400 ``event_type_mismatch``).
     event_type_name: str
     suppress_event_automations: bool
+    #: Priced-event opt-in (default False): every new registration records a
+    #: sale of the event's product and sends the contact a payment link. There
+    #: is no per-call opt-out on registrations.
+    collect_payment_on_registration: bool
 
 
 class EventListParams(TypedDict, total=False):
@@ -2812,7 +3374,28 @@ AttendanceStatusInput = Literal[
 ]
 
 #: Registration record as returned by the API. Open — servers may add fields.
+#: On a priced event it carries ``payment_sale_id`` and a ``payment`` block
+#: (see :class:`AttendancePayment`), ``None`` when it carries no sale.
 Attendance = dict[str, Any]
+
+
+class AttendancePayment(TypedDict):
+    """A priced-event registration's ``payment`` block."""
+
+    sale_id: str
+    sale_status: Optional[Literal["active", "partially_cancelled", "cancelled"]]
+    settlement_status: Optional[
+        Literal[
+            "untracked",
+            "unpaid",
+            "partially_paid",
+            "paid",
+            "partially_refunded",
+            "refunded",
+        ]
+    ]
+    #: The newest payment link that can still be paid; None when none is live.
+    pay_url: Optional[str]
 
 
 class AttendeeContact(TypedDict, total=False):
@@ -2870,3 +3453,115 @@ class OffsetPage(TypedDict):
     data: list[dict[str, Any]]
     limit: int
     offset: int
+
+
+# ─────────────────────────── Customer tickets ───────────────────────────
+
+TicketPriority = Literal["low", "normal", "high", "urgent"]
+#: ``portal`` = the hosted help page, ``widget`` = the website widget,
+#: ``agent`` = logged in the app, ``api`` = this API.
+TicketSource = Literal["portal", "widget", "agent", "api"]
+#: Why a customer email will not go out (``customer_email_skipped``).
+TicketEmailSkipReason = Literal["no_verified_sender", "over_quota", "capped"]
+
+#: A customer ticket (the same object in every ``ticket.*`` webhook). Open —
+#: servers may add fields. ``tickets.get`` adds ``last_customer_email`` and a
+#: page of the conversation (``messages``, ``messages_has_more``,
+#: ``messages_next_before``).
+Ticket = dict[str, Any]
+
+
+class TicketListParams(TypedDict, total=False):
+    """Query for ``tickets.list``."""
+
+    #: Default ``all`` = every status except ``spam``.
+    status: Literal["open", "pending", "resolved", "closed", "spam", "all"]
+    contact_id: str
+    #: A team member's user id, or ``unassigned``.
+    assignee: str
+    #: Exact category label, case-insensitive.
+    category: str
+    priority: TicketPriority
+    source: TicketSource
+    external_reference: str
+    #: ISO 8601 — created at/after.
+    created_from: str
+    #: ISO 8601 — created at/before.
+    created_to: str
+    #: Default ``-last_message_at``.
+    sort: Literal["last_message_at", "-last_message_at", "created_at", "-created_at"]
+    #: Page size (default 50, max 200).
+    limit: int
+    offset: int
+
+
+class TicketGetParams(TypedDict, total=False):
+    """Query for ``tickets.get`` — the conversation is paged, newest page first."""
+
+    #: Messages per page (default 100, max 200).
+    messages_limit: int
+    #: An older page: the previous answer's ``messages_next_before``.
+    messages_before: str
+
+
+class _TicketCreateRequired(TypedDict):
+    #: ≤200 chars.
+    subject: str
+    #: ≤10,000 chars — the customer's request, the ticket's opening message.
+    body: str
+
+
+class TicketCreateParams(_TicketCreateRequired, total=False):
+    """Body for ``tickets.create``. Exactly one of ``contact_id`` / ``contact``.
+
+    Sending an ``external_reference`` that already exists changes nothing and
+    answers the original ticket with ``duplicate: True``.
+    """
+
+    contact_id: str
+    #: Resolved by phone, then email, then national ID — like ``contacts.upsert``.
+    contact: AttendeeContact
+    category: str
+    priority: TicketPriority
+    language: Literal["en", "he"]
+    #: ``customer`` (default) behaves like a ticket opened on the help page;
+    #: ``team`` like a ticket a team member logged.
+    opened_by: Literal["customer", "team"]
+    assigned_user_id: str
+    assignee_email: str
+    #: Default True. ``False`` sends no creation email.
+    notify_customer: bool
+    external_reference: str
+
+
+class _TicketReplyRequired(TypedDict):
+    #: ≤10,000 chars.
+    body: str
+
+
+class TicketReplyParams(_TicketReplyRequired, total=False):
+    """Body for ``tickets.reply``."""
+
+    #: Post as this team member. Default: the team.
+    author_user_id: str
+    #: Post as the member with this login email.
+    author_email: str
+    #: Makes retries safe — the same key answers the original reply.
+    idempotency_key: str
+
+
+class TicketUpdateParams(TypedDict, total=False):
+    """Body for ``tickets.update``. ``pending`` comes only from a reply."""
+
+    status: Literal["open", "resolved", "closed"]
+    priority: TicketPriority
+    #: ``None`` clears it.
+    category: Optional[str]
+    #: ``None`` unassigns.
+    assigned_user_id: Optional[str]
+    assignee_email: str
+
+
+#: ``tickets.reply`` result: ``{"message", "ticket", "duplicate"}`` plus
+#: ``customer_email_skipped`` when the "team replied" email will not go out.
+TicketReplyResult = dict[str, Any]

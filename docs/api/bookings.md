@@ -156,12 +156,29 @@ Booking object (all read and write routes):
   "rescheduled_at": null,
   "previous_start_at": null,
   "reschedule_count": 0,
+  "deposit": { "state": "none", "amount": null, "hold_until": null, "sale_id": null },
   "created_at": "2026-07-14T10:00:00.000Z",
   "updated_at": "2026-07-14T10:00:00.000Z"
 }
 ```
 
-`hosts` lists the assigned host first, then any co-hosts. `status` is one of `confirmed`, `cancelled`, `completed`, `no_show`. Internal fields (calendar ids, invitee management tokens, booking-page answers) are never exposed.
+`hosts` lists the assigned host first, then any co-hosts. `status` is one of `confirmed`, `cancelled`, `completed`, `no_show`. `cancelled_by` is `invitee`, `host` or `system` (see [deposits](#deposits)). Internal fields (calendar ids, invitee management tokens, booking-page answers) are never exposed.
+
+### Deposits
+
+A meeting type can ask invitees who book on the public booking page or the website embed for a deposit (or the full price), configured in the app. Every booking object carries a `deposit` block — always present, so you read one shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `state` | string | `none` (no deposit was asked), `awaiting` (asked, not yet paid), `paid` or `released`. It only ever moves forward: a refund never re-opens a `paid` deposit |
+| `amount` | number or `null` | The amount that counts as paid, fixed when the booking was made, in the workspace currency |
+| `hold_until` | ISO 8601 or `null` | The payment deadline of a meeting type that holds the slot until paid; `null` when the booking stays confirmed whether or not it is paid |
+| `sale_id` | UUID or `null` | The [sale](sales.md) recording the deposit |
+
+- A booking awaiting its deposit is still `status: "confirmed"` — it holds its slot like any other booking.
+- When a hold's deadline passes unpaid, oToK cancels the booking within a few minutes: `status: "cancelled"`, `cancelled_by: "system"`, `cancellation_reason: "deposit_unpaid"` — and the [`booking.cancelled`](webhooks.md#booking-event-data) webhook fires with those values.
+- Cancelling a booking that is still `awaiting` releases its deposit (`state: "released"`); an unpaid deposit sale is cancelled with it.
+- **Bookings created through this API never take a deposit** — they read `state: "none"`.
 
 ### GET /api/v1/bookings
 
@@ -175,7 +192,7 @@ Booking object (all read and write routes):
 | `limit` | integer ≥ 0 | Default 50, cap 500 |
 | `offset` | integer ≥ 0 | Default 0 |
 
-All filters are optional and combined with AND. Malformed values → 400.
+All filters are optional and combined with AND. Malformed values → 400. A blank `limit` or `offset` (`?limit=`) means the default, not `0`.
 
 Response `200` — `{ data, total, limit, offset }`.
 
@@ -221,6 +238,7 @@ Response `201` — the booking object with its `hosts` roster, plus a top-level 
 | 404 | `"No availability schedule configured for this meeting type"` | Meeting type misconfigured |
 | 409 | `error_code: "SLOT_TAKEN"` — `"The selected time is no longer available"` | Slot no longer open (taken concurrently, host pool exhausted, pinned host busy). **Never forceable** — re-fetch slots and pick another time |
 | 409 | `error_code: "CONTACT_MERGE_REQUIRED"` | The invitee's phone and email resolve to two different existing contacts (see [contacts](contacts.md#identity-conflict--409-contact_merge_required)) |
+| 409 | `error_code: "CONTACT_ANONYMISED"` | `contact_id` names a contact that was anonymised — no new booking can be made for them |
 
 ### POST /api/v1/bookings/:id/cancel
 

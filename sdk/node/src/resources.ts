@@ -107,6 +107,21 @@ import type {
   SavedCardChargeParams,
   SavedCardChargeResult,
   SavedCardList,
+  Sale,
+  SaleAllocateParams,
+  SaleAllocation,
+  SaleCancelParams,
+  SaleCancelResult,
+  SaleCreateParams,
+  SaleCreateResult,
+  SaleListParams,
+  SaleRefundParams,
+  SaleRefundResult,
+  SaleReinstateParams,
+  SaleReinstateResult,
+  SaleUnallocateResult,
+  SaleUpdateParams,
+  SaleView,
   SavedReport,
   SenderProfile,
   SenderProfileListParams,
@@ -120,6 +135,16 @@ import type {
   TagCreateParams,
   TagUpdateParams,
   TemplateSendParams,
+  Ticket,
+  TicketCreateParams,
+  TicketCreateResult,
+  TicketDetail,
+  TicketGetParams,
+  TicketListParams,
+  TicketReplyParams,
+  TicketReplyResult,
+  TicketUpdateParams,
+  TicketUpdateResult,
   WebhookEndpoint,
   WebhookEndpointCreated,
   WebhookEndpointCreateParams,
@@ -1497,6 +1522,120 @@ export class OrdersApi {
   }
 }
 
+// ─────────────────────────── Sales ───────────────────────────
+
+/**
+ * The sales ledger — what each contact bought. Recording a sale never
+ * charges anyone; money is linked by allocating payment entries to it.
+ *
+ * Requires the Sales feature (`sales`) on the workspace's plan. Refunds (and
+ * cancelling with a money mode) need a key with the "Allow refunds"
+ * capability (`allow_money_out`, 403 `API_KEY_MONEY_OUT_DISABLED`); the two
+ * DELETE routes need "Allow permanent deletion through the API"
+ * (`allow_hard_delete`, 403 `HARD_DELETE_OWNER_ONLY`). Both are granted per
+ * key by the workspace owner.
+ */
+export class SalesApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /**
+   * List sale headers, newest `sold_at` first. Pages like deals/payments
+   * (default 25, cap 100); an unknown `status`/`settlement_status` 400s.
+   */
+  list(params: SaleListParams = {}): Promise<Paginated<Sale>> {
+    return this.http.request("GET", "/v1/sales", { query: { ...params } });
+  }
+
+  /** Iterate every matching sale, auto-paginating GET /v1/sales. */
+  iter(params: SaleListParams = {}): AsyncGenerator<Sale, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      DEALS_PAYMENTS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /** The full sale view — items, allocations, pay-links, documents, timeline. */
+  get(id: string): Promise<SaleView> {
+    return this.http.request("GET", `/v1/sales/${id}`);
+  }
+
+  /**
+   * Record a sale (never charges the buyer). Idempotent via
+   * `external_reference`: a replay writes nothing and returns the original
+   * sale with `duplicate: true`.
+   */
+  create(params: SaleCreateParams): Promise<SaleCreateResult> {
+    return this.http.request("POST", "/v1/sales", { body: params });
+  }
+
+  /** Edit the sale's note — the only editable header field. */
+  update(id: string, params: SaleUpdateParams): Promise<Sale> {
+    return this.http.request("PATCH", `/v1/sales/${id}`, { body: params });
+  }
+
+  /**
+   * Permanently delete an unfunded, unlinked sale (409
+   * `SALE_HAS_ALLOCATIONS` otherwise). Needs the key's "Allow permanent
+   * deletion through the API" capability.
+   */
+  delete(id: string): Promise<{ success: true }> {
+    return this.http.request("DELETE", `/v1/sales/${id}`);
+  }
+
+  /**
+   * Cancel every active item, or the listed ones. Money stays on the sale
+   * unless `money.mode` says otherwise (needs "Allow refunds" and a full
+   * cancel). A refused refund does not undo the cancel — see `refunds[]`.
+   */
+  cancel(id: string, params: SaleCancelParams): Promise<SaleCancelResult> {
+    return this.http.request("POST", `/v1/sales/${id}/cancel`, { body: params });
+  }
+
+  /** Reinstate every cancelled item, or the listed ones. Money is untouched. */
+  reinstate(id: string, params: SaleReinstateParams = {}): Promise<SaleReinstateResult> {
+    return this.http.request("POST", `/v1/sales/${id}/reinstate`, { body: params });
+  }
+
+  /**
+   * Refund one charge that funds this sale (the items stay active). Needs
+   * the key's "Allow refunds" capability. Pass an `idempotency_key` to make
+   * retries safe.
+   */
+  refund(id: string, params: SaleRefundParams): Promise<SaleRefundResult> {
+    return this.http.request("POST", `/v1/sales/${id}/refund`, { body: params });
+  }
+
+  /** Assign the sale to an active team member, or `null` for unowned. */
+  setOwner(id: string, ownerUserId: string | null): Promise<Sale> {
+    return this.http.request("PUT", `/v1/sales/${id}/owner`, {
+      body: { owner_user_id: ownerUserId },
+    });
+  }
+
+  /** Link one of the buyer's deals, or `null` to unlink. */
+  linkDeal(id: string, dealId: string | null): Promise<Sale> {
+    return this.http.request("PUT", `/v1/sales/${id}/deal`, {
+      body: { deal_id: dealId },
+    });
+  }
+
+  /** Allocate an existing charge (a payment entry) to the sale. Nothing is charged. */
+  allocate(id: string, params: SaleAllocateParams): Promise<SaleAllocation> {
+    return this.http.request("POST", `/v1/sales/${id}/allocations`, { body: params });
+  }
+
+  /**
+   * Release a charge allocation (and its refunds on this sale). No money
+   * moves. Needs the key's "Allow permanent deletion through the API"
+   * capability.
+   */
+  unallocate(id: string, allocationId: string): Promise<SaleUnallocateResult> {
+    return this.http.request("DELETE", `/v1/sales/${id}/allocations/${allocationId}`);
+  }
+}
+
 // ─────────────────────────── Bookings ───────────────────────────
 
 /**
@@ -1637,5 +1776,72 @@ export class ReportsApi {
   }
   run(id: string, params: ReportRunParams = {}): Promise<ReportRunResult> {
     return this.http.request("POST", `/v1/reports/${id}/run`, { body: params });
+  }
+}
+
+// ─────────────────────────── Customer tickets ───────────────────────────
+
+/** Documented `limit` cap for GET /v1/tickets (default 50). */
+const TICKETS_PAGE_CAP = 200;
+
+/**
+ * Customer tickets — open, read, answer and triage. Every write does what the
+ * same action does in the app: a ticket opened here is routed, starts its
+ * response target and emails the customer their link; a reply is a real team
+ * reply (the ticket moves to Answered and the customer is emailed). Internal
+ * notes never leave through the API.
+ *
+ * Requires the `customer_tickets` plan feature.
+ */
+export class TicketsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /** List tickets — newest activity first; `status: "all"` (the default) leaves spam out. */
+  list(params: TicketListParams = {}): Promise<Paginated<Ticket>> {
+    return this.http.request("GET", "/v1/tickets", { query: { ...params } });
+  }
+
+  /** Iterate every matching ticket, auto-paginating GET /v1/tickets (pages of 200). */
+  iter(params: TicketListParams = {}): AsyncGenerator<Ticket, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      TICKETS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /**
+   * Get a ticket with its latest customer email and one page of its
+   * conversation — the newest messages first page, each page oldest to
+   * newest. While `messages_has_more`, pass `messages_next_before` as
+   * `messages_before` for the page before it.
+   */
+  get(id: string, params: TicketGetParams = {}): Promise<TicketDetail> {
+    return this.http.request("GET", `/v1/tickets/${id}`, { query: { ...params } });
+  }
+
+  /**
+   * Open a ticket. Idempotent when `external_reference` is set: a repeat
+   * call changes nothing and answers the original ticket with
+   * `duplicate: true`. `customer_email_skipped` says when the creation email
+   * will not go out.
+   */
+  create(params: TicketCreateParams): Promise<TicketCreateResult> {
+    return this.http.request("POST", "/v1/tickets", { body: params });
+  }
+
+  /**
+   * Reply to the customer as the team (or a named member). Moves the ticket
+   * to Answered and emails the customer once per stretch of unread replies.
+   * Pass `idempotency_key` to make retries safe.
+   */
+  reply(id: string, params: TicketReplyParams): Promise<TicketReplyResult> {
+    return this.http.request("POST", `/v1/tickets/${id}/replies`, { body: params });
+  }
+
+  /** Triage: status (`open` | `resolved` | `closed`), priority, category, assignee. */
+  update(id: string, params: TicketUpdateParams): Promise<TicketUpdateResult> {
+    return this.http.request("PATCH", `/v1/tickets/${id}`, { body: params });
   }
 }
