@@ -35,7 +35,7 @@ All endpoints require [authentication](getting-started.md#authentication); there
 
 ## GET /api/v1/products
 
-Standard [list envelope](getting-started.md#pagination) (`data`/`total`/`limit`/`offset`; `limit` default 50, cap 500), newest first. Filters combine (AND):
+Standard [list envelope](getting-started.md#list-conventions) (`data`/`total`/`limit`/`offset`; `limit` default 50, cap 500), newest first. Filters combine (AND):
 
 | Param | Type | Notes |
 |---|---|---|

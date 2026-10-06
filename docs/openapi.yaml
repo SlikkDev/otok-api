@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: oToK REST API
-  version: "1.9.0"
+  version: "1.10.0"
   summary: Public REST API for the oToK multichannel marketing communication platform.
   description: |
     The oToK REST API (`/v1`) gives programmatic access to your workspace: contacts (including
@@ -129,6 +129,28 @@ info:
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
     `POST /v1/emails`, `POST /v1/tickets`, and `POST /v1/tickets/{id}/replies`, which
     answer 201 fresh / 200 replay.
+
+    ## Changes in 1.10.0
+
+    - New **Sales** resource group (`/v1/sales*`): record sales with line items, link
+      payments to them, cancel, reinstate, refund, reassign the owner and link a deal. Gated
+      by the `sales` plan feature; refunds need an API key with refund access.
+    - New **Tickets** resource group (`/v1/tickets*`): open, read, answer and triage customer
+      tickets. Gated by the `customer_tickets` plan feature.
+    - Saved cards: `GET /v1/contacts/{id}/payment-methods` and `POST /v1/contacts/{id}/charges`
+      (requires an API key with the charges capability; `idempotency_key` required).
+    - Payment requests: `POST /v1/payment-requests/{id}/send-link`, `/document` and `/refund`;
+      `product_id`, `sale_id` and an optional `idempotency_key` on create.
+    - `POST /v1/payments/{id}/refund` now takes a required `reason` and `mode` and returns the
+      refund result (`payment`, `entry`, `outcome`, `duplicate`).
+    - Orders and payments take an optional `sale_id`.
+    - Events: `collect_payment_on_registration`, and registrations carry a `payment` block.
+      Bookings carry a `deposit` block.
+    - Products and product cycles: `dynamic_pricing`, `recurring_sale_policy` and
+      `rearm_date_triggers`.
+    - New opt-in webhook events: `payment.refunded`, `sale.recorded`, `sale.paid`,
+      `sale.refunded` and `ticket.*`.
+    - `GET /v1/sender-profiles` no longer needs a plan feature.
 
     ## Changes in 1.9.0
 
