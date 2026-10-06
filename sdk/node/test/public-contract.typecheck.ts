@@ -57,3 +57,31 @@ export const stampedLink: AttendanceCreateParams = {
     attendance_id: "att-1",
   },
 };
+
+// ── Customer tickets ──
+import type {
+  OtokWebhookEvent,
+  TicketCreateParams,
+  TicketReplyParams,
+  TicketUpdateParams,
+} from "../src";
+
+export const ticketOpen: TicketCreateParams = {
+  contact: { email: "jane@example.com" },
+  subject: "Can't log in",
+  body: "Access denied.",
+  external_reference: "helpdesk-88213",
+};
+export const ticketReply: TicketReplyParams = { body: "Fixed.", idempotency_key: "reply-1" };
+export const ticketUnassign: TicketUpdateParams = { assigned_user_id: null, category: null };
+
+// @ts-expect-error A ticket needs its opening message.
+export const bodilessTicket: TicketCreateParams = { contact_id: "c-1", subject: "Hi" };
+// @ts-expect-error `pending` comes only from a reply.
+export const pendingByPatch: TicketUpdateParams = { status: "pending" };
+
+export function ticketChange(event: OtokWebhookEvent): string | null {
+  if (event.type === "ticket.status_changed") return event.data.change.status.to;
+  if (event.type === "ticket.message_created") return event.data.message.origin;
+  return null;
+}

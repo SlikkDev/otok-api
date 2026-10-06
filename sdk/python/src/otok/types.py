@@ -737,6 +737,27 @@ FormWebhookEventType = Literal["form.submitted"]
 #: by listing.
 FORM_WEBHOOK_EVENT_TYPES: tuple[FormWebhookEventType, ...] = ("form.submitted",)
 
+TicketWebhookEventType = Literal[
+    "ticket.created",
+    "ticket.message_created",
+    "ticket.status_changed",
+    "ticket.assigned",
+]
+
+#: The four customer-ticket events. Opt-in by listing, and sent only while the
+#: plan includes Customer tickets. ``ticket.created`` carries the opening
+#: message; ``ticket.message_created`` fires for every customer or team
+#: message (never an internal note); ``ticket.status_changed`` fires for every
+#: explicit status change (a move a reply causes rides ``message_created``'s
+#: ``ticket.status``); ``ticket.assigned`` fires when triage changes the
+#: assignee.
+TICKET_WEBHOOK_EVENT_TYPES: tuple[TicketWebhookEventType, ...] = (
+    "ticket.created",
+    "ticket.message_created",
+    "ticket.status_changed",
+    "ticket.assigned",
+)
+
 #: Any event type registrable on a webhook endpoint.
 WebhookEventType = Union[
     EmailWebhookEventType,
@@ -748,6 +769,7 @@ WebhookEventType = Union[
     BookingWebhookEventType,
     EventAttendanceWebhookEventType,
     FormWebhookEventType,
+    TicketWebhookEventType,
 ]
 
 
@@ -763,7 +785,7 @@ class WebhookEndpointCreateParams(_WebhookEndpointCreateRequired, total=False):
     and must be listed explicitly — the engagement types (``email.opened``,
     ``email.clicked``) and the ``order.*``, ``payment_request.*``,
     ``contact.*``, ``message.received``, ``deal.*``, ``booking.*``,
-    ``event.attendance.changed``, and ``form.submitted`` families. A
+    ``event.attendance.changed``, ``form.submitted``, and ``ticket.*`` families. A
     pre-existing registration never starts receiving a new family unasked.
     An empty list is rejected. ``email.failed`` is deprecated — accepted at
     registration, but it never fires.
@@ -1323,6 +1345,84 @@ class FormSubmittedEvent(TypedDict):
     data: FormSubmittedEventData
 
 
+TicketStatus = Literal["open", "pending", "resolved", "closed", "spam"]
+TicketMessageOrigin = Literal["customer", "agent", "automation", "api"]
+
+
+class TicketWebhookAttachment(TypedDict):
+    filename: Optional[str]
+    mime_type: Optional[str]
+    size: Optional[int]
+
+
+class TicketWebhookMessage(TypedDict):
+    """A message as a ``ticket.*`` webhook carries it — full text, never a
+    file link (fetch a fresh signed one with ``tickets.get``)."""
+
+    id: str
+    #: ``customer`` | ``team``.
+    side: str
+    #: ``customer`` | ``agent`` | ``automation`` | ``api``.
+    origin: str
+    #: ``{"id", "name"}`` of the team member behind a team message, else ``None``.
+    author: Optional[dict[str, Any]]
+    body: Optional[str]
+    attachment: Optional[TicketWebhookAttachment]
+    created_at: str
+
+
+class TicketWebhookChange(TypedDict, total=False):
+    """``status`` (``{"from", "to"}``) + ``origin`` on ``ticket.status_changed``;
+    ``assignee`` (``{"from_user_id", "to_user_id"}``) on ``ticket.assigned``."""
+
+    status: dict[str, str]
+    #: ``agent`` | ``customer`` | ``automation`` | ``api`` | ``system``.
+    origin: str
+    assignee: dict[str, Optional[str]]
+
+
+class _TicketWebhookEventDataRequired(TypedDict):
+    #: The ``/v1/tickets`` ticket object at the moment of the change.
+    ticket: dict[str, Any]
+    #: ``{"id", "name", "email", "phone"}`` — repeats ``ticket["contact"]``.
+    contact: Optional[dict[str, Any]]
+
+
+class TicketWebhookEventData(_TicketWebhookEventDataRequired, total=False):
+    #: ``ticket.created`` (the opening message) and ``ticket.message_created``.
+    message: TicketWebhookMessage
+    #: ``ticket.status_changed`` and ``ticket.assigned``.
+    change: TicketWebhookChange
+
+
+class TicketCreatedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.created"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
+class TicketMessageCreatedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.message_created"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
+class TicketStatusChangedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.status_changed"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
+class TicketAssignedEvent(TypedDict):
+    id: str
+    type: Literal["ticket.assigned"]
+    created_at: str
+    data: TicketWebhookEventData
+
+
 #: Any inbound webhook event. Discriminate on ``event["type"]``.
 OtokWebhookEvent = Union[
     EmailDeliveredEvent,
@@ -1355,6 +1455,10 @@ OtokWebhookEvent = Union[
     BookingReassignedEvent,
     EventAttendanceChangedEvent,
     FormSubmittedEvent,
+    TicketCreatedEvent,
+    TicketMessageCreatedEvent,
+    TicketStatusChangedEvent,
+    TicketAssignedEvent,
 ]
 
 # ─────────────────────────── Campaigns ───────────────────────────
@@ -2570,3 +2674,115 @@ class OffsetPage(TypedDict):
     data: list[dict[str, Any]]
     limit: int
     offset: int
+
+
+# ─────────────────────────── Customer tickets ───────────────────────────
+
+TicketPriority = Literal["low", "normal", "high", "urgent"]
+#: ``portal`` = the hosted help page, ``widget`` = the website widget,
+#: ``agent`` = logged in the app, ``api`` = this API.
+TicketSource = Literal["portal", "widget", "agent", "api"]
+#: Why a customer email will not go out (``customer_email_skipped``).
+TicketEmailSkipReason = Literal["no_verified_sender", "over_quota", "capped"]
+
+#: A customer ticket (the same object in every ``ticket.*`` webhook). Open —
+#: servers may add fields. ``tickets.get`` adds ``last_customer_email`` and a
+#: page of the conversation (``messages``, ``messages_has_more``,
+#: ``messages_next_before``).
+Ticket = dict[str, Any]
+
+
+class TicketListParams(TypedDict, total=False):
+    """Query for ``tickets.list``."""
+
+    #: Default ``all`` = every status except ``spam``.
+    status: Literal["open", "pending", "resolved", "closed", "spam", "all"]
+    contact_id: str
+    #: A team member's user id, or ``unassigned``.
+    assignee: str
+    #: Exact category label, case-insensitive.
+    category: str
+    priority: TicketPriority
+    source: TicketSource
+    external_reference: str
+    #: ISO 8601 — created at/after.
+    created_from: str
+    #: ISO 8601 — created at/before.
+    created_to: str
+    #: Default ``-last_message_at``.
+    sort: Literal["last_message_at", "-last_message_at", "created_at", "-created_at"]
+    #: Page size (default 50, max 200).
+    limit: int
+    offset: int
+
+
+class TicketGetParams(TypedDict, total=False):
+    """Query for ``tickets.get`` — the conversation is paged, newest page first."""
+
+    #: Messages per page (default 100, max 200).
+    messages_limit: int
+    #: An older page: the previous answer's ``messages_next_before``.
+    messages_before: str
+
+
+class _TicketCreateRequired(TypedDict):
+    #: ≤200 chars.
+    subject: str
+    #: ≤10,000 chars — the customer's request, the ticket's opening message.
+    body: str
+
+
+class TicketCreateParams(_TicketCreateRequired, total=False):
+    """Body for ``tickets.create``. Exactly one of ``contact_id`` / ``contact``.
+
+    Sending an ``external_reference`` that already exists changes nothing and
+    answers the original ticket with ``duplicate: True``.
+    """
+
+    contact_id: str
+    #: Resolved by phone, then email, then national ID — like ``contacts.upsert``.
+    contact: AttendeeContact
+    category: str
+    priority: TicketPriority
+    language: Literal["en", "he"]
+    #: ``customer`` (default) behaves like a ticket opened on the help page;
+    #: ``team`` like a ticket a team member logged.
+    opened_by: Literal["customer", "team"]
+    assigned_user_id: str
+    assignee_email: str
+    #: Default True. ``False`` sends no creation email.
+    notify_customer: bool
+    external_reference: str
+
+
+class _TicketReplyRequired(TypedDict):
+    #: ≤10,000 chars.
+    body: str
+
+
+class TicketReplyParams(_TicketReplyRequired, total=False):
+    """Body for ``tickets.reply``."""
+
+    #: Post as this team member. Default: the team.
+    author_user_id: str
+    #: Post as the member with this login email.
+    author_email: str
+    #: Makes retries safe — the same key answers the original reply.
+    idempotency_key: str
+
+
+class TicketUpdateParams(TypedDict, total=False):
+    """Body for ``tickets.update``. ``pending`` comes only from a reply."""
+
+    status: Literal["open", "resolved", "closed"]
+    priority: TicketPriority
+    #: ``None`` clears it.
+    category: Optional[str]
+    #: ``None`` unassigns.
+    assigned_user_id: Optional[str]
+    assignee_email: str
+
+
+#: ``tickets.reply`` result: ``{"message", "ticket", "duplicate"}`` plus
+#: ``customer_email_skipped`` when the "team replied" email will not go out.
+TicketReplyResult = dict[str, Any]

@@ -9,7 +9,7 @@ info:
     and pipelines, the product catalog, payments, payment requests (pay-links), orders,
     transactional email, broadcast email campaigns, newsletters, email suppressions,
     read-only audience and sender-profile discovery, product cycles, shared saved reports,
-    outbound webhooks, and bookings.
+    outbound webhooks, bookings, and customer tickets.
 
     ## Authentication
 
@@ -27,7 +27,7 @@ info:
     the workspace's plan — deals/pipelines (`deals`), payments and contact documents
     (`payments`), payment requests (`workspace_payments`), orders (`orders`), campaigns
     (`campaigns`), email campaigns (`email_marketing`), newsletters (`newsletters`),
-    bookings/meeting-types (`booking`). Every route in a gated group answers
+    bookings/meeting-types (`booking`), customer tickets (`customer_tickets`). Every route in a gated group answers
     `403` with `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"` (a body **without** a `statusCode`
     field) when the plan lacks the feature. Note the two distinct payment gates:
     `/v1/payments*` and `GET /v1/contacts/{id}/documents` require the **`payments`** feature
@@ -45,7 +45,7 @@ info:
     The API uses **two error body shapes**:
 
     1. **Domain errors** (email, email-campaign, newsletter, webhook-endpoint, consent,
-       suppression, and product APIs, and `POST /v1/campaigns/{id}/execute` failures) use a
+       suppression, product, and ticket APIs, and `POST /v1/campaigns/{id}/execute` failures) use a
        structured envelope: `{"error": {"code", "message"}}` — key on `error.code`.
     2. **Framework errors** (validation, auth, rate limiting, most resource errors) use
        `{"statusCode", "message", "error"}`, where `message` is a string or an array of
@@ -106,6 +106,9 @@ info:
     - Order refunds are idempotent per `external_refund_id` — only when you supply one.
     - Emails require an explicit `idempotency_key`.
     - Booking creation is idempotent per slot + meeting type + contact (server-derived, no key).
+    - Tickets open idempotently by `external_reference` (a replay changes nothing and
+      answers the original ticket); ticket replies are idempotent per `idempotency_key`.
+      Both answer 201 fresh / 200 replay.
     - **Payment requests have NO idempotency key** — `POST /v1/payment-requests` is **not**
       idempotent: a repeat POST mints a second, independently payable link. Cancel extras
       with `POST /v1/payment-requests/{id}/cancel`.
@@ -116,7 +119,8 @@ info:
     `duplicate` marker** (compare `created_at`, or pre-check with
     `GET /v1/orders?external_reference=...`); the order **refund** endpoint does return
     `{ "duplicate", "order" }`. Status codes are 201 for both outcomes everywhere except
-    `POST /v1/emails`, which answers 201 fresh / 200 replay.
+    `POST /v1/emails`, `POST /v1/tickets`, and `POST /v1/tickets/{id}/replies`, which
+    answer 201 fresh / 200 replay.
 
     ## Changes in 1.9.0
 
@@ -297,11 +301,13 @@ tags:
   - name: Newsletters
     description: Smart newsletters and their sequenced issues — create, author, publish, schedule. Idempotent issue create via `external_reference`; issue numbers are assigned at publish. Requires the `newsletters` feature.
   - name: Webhook endpoints
-    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, plus the opt-in `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` families.
+    description: Register receivers for outbound events — email delivery/engagement events on API-originated sends, plus the opt-in `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, `form.submitted`, and `ticket.*` families.
   - name: Meeting types
     description: Read meeting types and query open slots.
   - name: Bookings
     description: Booking lifecycle — create, cancel, reschedule, reassign host.
+  - name: Tickets
+    description: Customer tickets — open (idempotent via `external_reference`), read with a paged conversation, reply to the customer (idempotent via `idempotency_key`), and triage. No DELETE. Requires the `customer_tickets` feature.
 
 paths:
   /v1/reports/{id}/run:
@@ -835,6 +841,357 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/FrameworkError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/tickets:
+    get:
+      operationId: listTickets
+      tags: [Tickets]
+      summary: List tickets
+      description: |
+        Filters are ANDed. Newest activity first by default. `status=all` (the default) is
+        every status except `spam` — ask for `status=spam` explicitly. List rows carry no
+        messages. **Requires the `customer_tickets` plan feature.**
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [open, pending, resolved, closed, spam, all]
+            default: all
+        - name: contact_id
+          in: query
+          description: Only this contact's tickets.
+          schema:
+            type: string
+            format: uuid
+        - name: assignee
+          in: query
+          description: A team member's user id, or `unassigned`. Anything else → 400 `invalid_assignee`.
+          schema:
+            type: string
+        - name: category
+          in: query
+          description: Exact category label, case-insensitive.
+          schema:
+            type: string
+            maxLength: 80
+        - name: priority
+          in: query
+          schema:
+            $ref: "#/components/schemas/TicketPriority"
+        - name: source
+          in: query
+          schema:
+            $ref: "#/components/schemas/TicketSource"
+        - name: external_reference
+          in: query
+          description: Your own key, exact match (whitespace trimmed). A blank value is a 400, never "no filter".
+          schema:
+            type: string
+            maxLength: 200
+        - name: created_from
+          in: query
+          description: Created at/after this instant. A date that does not exist → 400 `invalid_date`.
+          schema:
+            type: string
+            format: date-time
+        - name: created_to
+          in: query
+          description: Created at/before this instant. A date that does not exist → 400 `invalid_date`.
+          schema:
+            type: string
+            format: date-time
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [last_message_at, -last_message_at, created_at, -created_at]
+            default: -last_message_at
+        - name: limit
+          in: query
+          description: Page size, default 50, max 200 (larger values are clamped).
+          schema:
+            type: integer
+            minimum: 0
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Paginated ticket list.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/ListEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Ticket"
+        "400":
+          description: Validation, `invalid_assignee` or `invalid_date`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    post:
+      operationId: createTicket
+      tags: [Tickets]
+      summary: Open a ticket (idempotent via external_reference)
+      description: |
+        Takes `contact_id` or an inline `contact`, upserted through the same identity
+        resolution `POST /v1/contacts` uses. `opened_by: customer` (the default) behaves like
+        a ticket opened on the help page — routing, the first-response target, the team's
+        new-ticket alert, and a blocked contact's ticket filed silently into `spam`;
+        `opened_by: team` behaves like a ticket a team member logged on the customer's
+        behalf.
+
+        **Idempotency:** a call carrying an `external_reference` that already exists changes
+        nothing and answers the original ticket with `duplicate: true` and status `200`. The
+        same reference on a different contact answers 409 `external_reference_conflict`.
+
+        The customer is emailed their ticket link (unless `notify_customer: false`) from the
+        workspace's own verified sender only — `customer_email_skipped` says when that email
+        will not go out. The answer leaves `last_customer_email` out: the email is sent just
+        after it. **Requires the `customer_tickets` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketCreate"
+      responses:
+        "200":
+          description: "Replay — the original ticket, `duplicate: true`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketCreateResult"
+        "201":
+          description: "The opened ticket, `duplicate: false`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketCreateResult"
+        "400":
+          description: >-
+            Validation, `contact_ambiguous`, `contact_required`, `subject_required`,
+            `body_required`, `assignee_ambiguous`, `invalid_assignee` or `invalid_category`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`contact_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: >-
+            `open_ticket_limit` (the workspace's limit on open tickets is reached),
+            `external_reference_conflict` (the reference names a ticket of another contact),
+            `CONTACT_MERGE_REQUIRED` (the inline contact's phone and email resolve to two
+            different contacts) or `CONTACT_ANONYMISED`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/CodedError"
+                  - $ref: "#/components/schemas/ContactAnonymisedError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/tickets/{id}:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    get:
+      operationId: getTicket
+      tags: [Tickets]
+      summary: Get a ticket with a page of its conversation
+      description: |
+        The ticket, its `last_customer_email`, and one page of its conversation — the
+        customer's and the team's messages, never internal notes or system lines. The first
+        page holds the newest messages; each page is ordered oldest to newest. While
+        `messages_has_more` is true, pass `messages_next_before` as `messages_before` to get
+        the page before it. Attachment links (`media_url`) are signed for 4 hours.
+        **Requires the `customer_tickets` plan feature.**
+      parameters:
+        - name: messages_limit
+          in: query
+          description: Messages per page, default 100, max 200 (larger values are clamped).
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+        - name: messages_before
+          in: query
+          description: >-
+            An older page — the previous answer's `messages_next_before`. A message id outside
+            this ticket's conversation → 400 `invalid_cursor`.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The ticket with a page of its conversation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketDetail"
+        "400":
+          description: Non-UUID id, validation, or `invalid_cursor`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`ticket_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+    patch:
+      operationId: updateTicket
+      tags: [Tickets]
+      summary: Triage a ticket
+      description: |
+        Status (`open` | `resolved` | `closed` — `pending` comes only from a reply), priority,
+        category (`null` clears) and assignee (`assigned_user_id`, `null` unassigns, or
+        `assignee_email`). Resolving emails the customer when the workspace sends resolved
+        emails, from its own verified sender only — `customer_email_skipped` says when that
+        email will not go out. **Requires the `customer_tickets` plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketUpdate"
+      responses:
+        "200":
+          description: The ticket after the change.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketUpdateResult"
+        "400":
+          description: Validation, `assignee_ambiguous`, `invalid_assignee` or `invalid_category`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`ticket_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          $ref: "#/components/responses/ContactAnonymised"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/tickets/{id}/replies:
+    parameters:
+      - $ref: "#/components/parameters/UuidPathId"
+    post:
+      operationId: replyToTicket
+      tags: [Tickets]
+      summary: Reply to the customer
+      description: |
+        A real team reply: the ticket moves to Answered (`pending`), its response target is
+        met, `first_response_at` is stamped on the first answer, and the customer is emailed
+        once per stretch of unread replies — from the workspace's own verified sender only
+        (`customer_email_skipped` says when that email was due and will not go out). Posted
+        as the team, or as a team member named by `author_user_id` / `author_email`. The
+        message's `origin` is `api`. Text only.
+
+        **Idempotency:** the same `idempotency_key` (scoped to your API key) with the same
+        body on the same ticket posts nothing and answers the original reply with
+        `duplicate: true` and status `200`; the same key with a different body or on another
+        ticket answers 409 `idempotency_key_mismatch`. **Requires the `customer_tickets`
+        plan feature.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketReply"
+      responses:
+        "200":
+          description: "Replay — the original reply, `duplicate: true`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketReplyResult"
+        "201":
+          description: "The posted reply, `duplicate: false`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TicketReplyResult"
+        "400":
+          description: Non-UUID id, validation, `author_ambiguous` or `invalid_author`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/FrameworkError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/FeatureNotIncluded"
+        "404":
+          description: "`ticket_not_found`."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainError"
+        "409":
+          description: >-
+            `ticket_is_spam` (a ticket in spam takes no replies), `idempotency_key_mismatch`,
+            or `CONTACT_ANONYMISED`.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                  - $ref: "#/components/schemas/DomainError"
+                  - $ref: "#/components/schemas/ContactAnonymisedError"
         "429":
           $ref: "#/components/responses/TooManyRequests"
   /v1/contacts:
@@ -5105,8 +5462,9 @@ paths:
                     `contact.updated`, `contact.deleted`, `contact.consent_changed`),
                     the inbound message event (`message.received`), the four `deal.*`
                     lifecycle events, the four `booking.*` lifecycle events, the
-                    event-attendance event (`event.attendance.changed`), and the form
-                    submission event (`form.submitted`). A pre-existing registration
+                    event-attendance event (`event.attendance.changed`), the form
+                    submission event (`form.submitted`), and the four `ticket.*`
+                    customer-ticket events. A pre-existing registration
                     never starts receiving a new family unasked. `email.failed` is
                     **deprecated**: still accepted when listed explicitly (the
                     registration succeeds and echoes it in `events`), but it is never
@@ -6427,6 +6785,95 @@ webhooks:
       responses:
         "200":
           description: Return any 2xx within 10 seconds to settle the delivery.
+  ticket.created:
+    post:
+      operationId: ticketCreatedEvent
+      tags: [Webhook endpoints]
+      summary: ticket.created — a ticket was opened
+      description: |
+        Opt-in ticket event — delivered only to endpoints that list it explicitly in `events`,
+        and only while the plan includes Customer tickets. Fires for a ticket opened by the
+        customer (help page, website widget), by a team member on their behalf, or through the
+        API. Carries the opening message (`data.message`) and the assignee the ticket landed
+        on — there is no separate `ticket.message_created` or `ticket.assigned` for the
+        opening. A ticket filed into `spam` emits nothing.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketCreatedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  ticket.message_created:
+    post:
+      operationId: ticketMessageCreatedEvent
+      tags: [Webhook endpoints]
+      summary: ticket.message_created — a customer or team message was added
+      description: |
+        Opt-in ticket event. Fires for every customer or team message — never an internal
+        note, and not while the ticket is in spam. `data.message.origin` (`customer`, `agent`,
+        `automation`, `api`) lets a bridge drop its own API posts. A status move the message
+        caused (a customer reply reopening the ticket, a team reply moving it to Answered)
+        rides `data.ticket.status` — no `ticket.status_changed` is sent for it.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketMessageCreatedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  ticket.status_changed:
+    post:
+      operationId: ticketStatusChangedEvent
+      tags: [Webhook endpoints]
+      summary: ticket.status_changed — the status was changed explicitly
+      description: |
+        Opt-in ticket event. Fires for every explicit status change — by a team member, the
+        customer, an automation, the API, or the system closing a quietly resolved ticket
+        (`data.change.origin`), moves into and out of `spam` included. `data.change.status`
+        carries `from` → `to`.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketStatusChangedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
+  ticket.assigned:
+    post:
+      operationId: ticketAssignedEvent
+      tags: [Webhook endpoints]
+      summary: ticket.assigned — triage changed the assignee
+      description: |
+        Opt-in ticket event. Fires when triage changes a ticket's assignee, unassigning
+        included. `data.change.assignee` carries `from_user_id` → `to_user_id`.
+      parameters:
+        - $ref: "#/components/parameters/WebhookEventHeader"
+        - $ref: "#/components/parameters/WebhookEventIdHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TicketAssignedEvent"
+      responses:
+        "200":
+          description: Return any 2xx within 10 seconds to settle the delivery.
 
 components:
   securitySchemes:
@@ -6619,7 +7066,7 @@ components:
         The workspace's plan lacks the feature this resource group requires — deals,
         payments (payments + contact documents), workspace_payments (payment requests),
         orders, campaigns, email_marketing (email campaigns + suppressions + sender
-        profiles), newsletters, or booking — and answers with the
+        profiles), newsletters, booking, or customer_tickets — and answers with the
         `FEATURE_NOT_INCLUDED_IN_PLAN` body (note: no `statusCode` field; the message
         embeds the lowercase feature id, so key on `error_code`). A plan without API
         access at all (Growth or higher required) answers with the standard shape instead.
@@ -6676,6 +7123,14 @@ components:
             error_code: CONTACT_MERGE_REQUIRED
             merge_request_id: 3a2b1c0d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
             message: "The provided phone and email belong to two different existing contacts. A merge request has been opened — resolve it in the app, then retry."
+    ContactAnonymised:
+      description: |
+        `error_code: "CONTACT_ANONYMISED"` — the ticket's contact was anonymised, so the
+        ticket takes no more writes.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ContactAnonymisedError"
 
   schemas:
     ReportRunResult:
@@ -7404,7 +7859,8 @@ components:
         group requires (deals/pipelines → `deals`, payments and contact documents →
         `payments`, payment requests → `workspace_payments`, orders →
         `orders`, campaigns → `campaigns`, email campaigns → `email_marketing`,
-        newsletters → `newsletters`, bookings/meeting-types → `booking`). Unlike
+        newsletters → `newsletters`, bookings/meeting-types → `booking`, tickets →
+        `customer_tickets`). Unlike
         the standard framework
         shape there is **no `statusCode` field**. The message embeds the lowercase
         plan-feature id, not the product display name — key on `error_code`, not on the
@@ -11824,6 +12280,10 @@ components:
         - booking.reassigned
         - event.attendance.changed
         - form.submitted
+        - ticket.created
+        - ticket.message_created
+        - ticket.status_changed
+        - ticket.assigned
       description: |
         The full registration vocabulary for webhook endpoints — the six email events
         (see `EmailEventType` for their semantics), the five `order.*` lifecycle
@@ -11832,8 +12292,9 @@ components:
         consent events (`contact.*`), the inbound message event (`message.received`),
         the four `deal.*` lifecycle events (see `DealEventType`), the four `booking.*`
         lifecycle events (see `BookingEventType`), the event-attendance event
-        (`event.attendance.changed`), and the form submission event
-        (`form.submitted`) — payloads under this spec's webhooks section.
+        (`event.attendance.changed`), the form submission event
+        (`form.submitted`), and the four `ticket.*` customer-ticket events (see
+        `TicketEventType`) — payloads under this spec's webhooks section.
         Every non-email family rides the same signing, retry schedule, and delivery
         behavior as the email events, and is received only when explicitly listed at
         registration — a pre-existing endpoint never starts receiving a new family
@@ -13107,6 +13568,569 @@ components:
               type: object
               additionalProperties: true
               description: The submitted answers, keyed by form field ids.
+
+    # ── Customer tickets ──
+    TicketStatus:
+      type: string
+      enum: [open, pending, resolved, closed, spam]
+      description: |
+        `open` = waiting on the team; `pending` = Answered (set by a team reply, never by
+        PATCH); `resolved` / `closed` = done (a customer reply reopens either); `spam` = filed
+        silently (a blocked contact's ticket — never routed, mailed or announced).
+    TicketPriority:
+      type: string
+      enum: [low, normal, high, urgent]
+    TicketSource:
+      type: string
+      enum: [portal, widget, agent, api]
+      description: "`portal` = the hosted help page, `widget` = the website widget, `agent` = logged by a team member in the app, `api` = this API."
+    TicketContact:
+      type: object
+      title: Ticket contact
+      required: [id, name, email, phone]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: [string, "null"]
+        email:
+          type: [string, "null"]
+        phone:
+          type: [string, "null"]
+    Ticket:
+      type: object
+      title: Ticket
+      description: |
+        The same object on every `/v1/tickets` route and in every `ticket.*` webhook
+        (`data.ticket`).
+      properties:
+        id:
+          type: string
+          format: uuid
+        number:
+          type: integer
+          description: The workspace's running ticket number.
+        number_label:
+          type: string
+          description: The number as customers see it, with the workspace's prefix (e.g. `T-1042`).
+        subject:
+          type: string
+        status:
+          $ref: "#/components/schemas/TicketStatus"
+        priority:
+          $ref: "#/components/schemas/TicketPriority"
+        category:
+          type: [string, "null"]
+        source:
+          $ref: "#/components/schemas/TicketSource"
+        language:
+          type: string
+          description: The customer's language for emails and auto-replies (`en` or `he`).
+        widget_id:
+          type: [string, "null"]
+          format: uuid
+          description: The website widget the ticket came through, when `source` is `widget`.
+        external_reference:
+          type: [string, "null"]
+          description: Your own key, as sent to `POST /v1/tickets`.
+        contact:
+          oneOf:
+            - $ref: "#/components/schemas/TicketContact"
+            - type: "null"
+        assignee:
+          type: [object, "null"]
+          description: The assigned team member; `null` when unassigned.
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: [string, "null"]
+            email:
+              type: [string, "null"]
+        first_response_at:
+          type: [string, "null"]
+          format: date-time
+        response_target:
+          type: [object, "null"]
+          description: |
+            The running response target, when the workspace has targets on; `null` while no
+            target is running (for example, once the team has answered).
+          properties:
+            status:
+              type: string
+              enum: [ok, at_risk, breached]
+            metric:
+              type: string
+              enum: [first_reply, next_reply]
+              description: "`first_reply` = the first answer; `next_reply` = the answer to a customer follow-up."
+            due_at:
+              type: [string, "null"]
+              format: date-time
+        last_message_at:
+          type: [string, "null"]
+          format: date-time
+        resolved_at:
+          type: [string, "null"]
+          format: date-time
+        closed_at:
+          type: [string, "null"]
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      additionalProperties: true
+    TicketMessageOrigin:
+      type: string
+      enum: [customer, agent, automation, api]
+      description: |
+        Who posted the message: the customer themself, a team member (including the opening
+        message of a ticket a team member logged on the customer's behalf), an automation,
+        or this API (whoever it was posted as).
+    TicketMessageAuthor:
+      type: [object, "null"]
+      description: The team member behind a team message; `null` on customer messages and on team messages with no person behind them.
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: [string, "null"]
+    TicketMessage:
+      type: object
+      title: Ticket message
+      description: A customer or team message — never an internal note or a system line.
+      properties:
+        id:
+          type: string
+          format: uuid
+        side:
+          type: string
+          enum: [customer, team]
+        origin:
+          $ref: "#/components/schemas/TicketMessageOrigin"
+        author:
+          $ref: "#/components/schemas/TicketMessageAuthor"
+        body:
+          type: [string, "null"]
+        media_url:
+          type: [string, "null"]
+          description: The attachment link, signed for 4 hours — fetch the ticket again for a fresh one.
+        media_filename:
+          type: [string, "null"]
+        media_mime_type:
+          type: [string, "null"]
+        media_size:
+          type: [integer, "null"]
+          description: Bytes.
+        created_at:
+          type: string
+          format: date-time
+    TicketCustomerEmail:
+      type: object
+      title: Ticket customer email
+      description: The ticket's latest email to the customer and its state — including one that did not go out.
+      properties:
+        kind:
+          type: string
+          enum: [reply, other]
+          description: "`reply` = the email telling the customer the team answered; `other` = the ticket link, creation or resolved email."
+        status:
+          type: string
+          enum: [queued, sent, delivered, bounced, complained, failed, skipped_suppressed]
+        reason:
+          type: [string, "null"]
+          enum: [no_verified_sender, over_quota, capped, suppressed, send_failed, null]
+          description: Why it did not go out; `null` otherwise.
+        created_at:
+          type: [string, "null"]
+          format: date-time
+        sent_at:
+          type: [string, "null"]
+          format: date-time
+        bounced_at:
+          type: [string, "null"]
+          format: date-time
+        complained_at:
+          type: [string, "null"]
+          format: date-time
+    TicketEmailSkipReason:
+      type: string
+      enum: [no_verified_sender, over_quota, capped]
+      description: |
+        Present only when an email this call made due will not go out:
+        `no_verified_sender` (the workspace has no verified sender), `over_quota` (the
+        monthly email allowance is used up), `capped` (a daily limit on ticket emails drops
+        it).
+    TicketThreadPage:
+      type: object
+      properties:
+        messages:
+          type: array
+          description: One page of the conversation, oldest to newest.
+          items:
+            $ref: "#/components/schemas/TicketMessage"
+        messages_has_more:
+          type: boolean
+          description: An older page exists.
+        messages_next_before:
+          type: [string, "null"]
+          format: uuid
+          description: Pass as `messages_before` to get the older page; `null` when there is none.
+    TicketDetail:
+      title: Ticket with its conversation
+      allOf:
+        - $ref: "#/components/schemas/Ticket"
+        - $ref: "#/components/schemas/TicketThreadPage"
+        - type: object
+          properties:
+            last_customer_email:
+              oneOf:
+                - $ref: "#/components/schemas/TicketCustomerEmail"
+                - type: "null"
+    TicketCreate:
+      type: object
+      title: Ticket create payload
+      description: Exactly one of `contact_id` or `contact`.
+      additionalProperties: false
+      required: [subject, body]
+      properties:
+        contact_id:
+          type: string
+          format: uuid
+          description: An existing contact. Mutually exclusive with `contact`.
+        contact:
+          type: object
+          additionalProperties: false
+          description: |
+            Identity to upsert — resolved by phone, then email, then national ID, exactly like
+            `POST /v1/contacts`. At least one valid identifier is required.
+          properties:
+            name:
+              type: string
+              maxLength: 200
+            email:
+              type: string
+              format: email
+              maxLength: 320
+            phone:
+              type: string
+              maxLength: 40
+            national_id:
+              type: string
+              maxLength: 20
+        subject:
+          type: string
+          maxLength: 200
+        body:
+          type: string
+          maxLength: 10000
+          description: The customer's request — the ticket's opening message.
+        category:
+          type: string
+          maxLength: 80
+          description: One of the workspace's ticket categories (case-insensitive).
+        priority:
+          allOf:
+            - $ref: "#/components/schemas/TicketPriority"
+          default: normal
+        language:
+          type: string
+          enum: [en, he]
+          description: Default — the contact's language, else the workspace's.
+        opened_by:
+          type: string
+          enum: [customer, team]
+          default: customer
+          description: |
+            `customer` behaves like a ticket opened on the help page: routing, the
+            first-response target, the team's new-ticket alert, the inquiry queue (under an
+            intake procedure that enables tickets), and a blocked contact's ticket filed into
+            spam. `team` behaves like a ticket a team member logged: none of those.
+        assigned_user_id:
+          type: string
+          format: uuid
+          description: Assign to this team member (who must be able to manage tickets). Skips routing.
+        assignee_email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Assign by login email. Mutually exclusive with `assigned_user_id`.
+        notify_customer:
+          type: boolean
+          default: true
+          description: "`false` sends no creation email (for example when importing)."
+        external_reference:
+          type: string
+          maxLength: 200
+          description: |
+            Your own key, unique per workspace. Sending it again answers the original ticket
+            with `duplicate: true` and changes nothing.
+    TicketCreateResult:
+      title: Ticket create result
+      description: The ticket with its first page of messages — without `last_customer_email`.
+      allOf:
+        - $ref: "#/components/schemas/Ticket"
+        - $ref: "#/components/schemas/TicketThreadPage"
+        - type: object
+          required: [duplicate]
+          properties:
+            duplicate:
+              type: boolean
+              description: "`true` when `external_reference` matched an existing ticket and nothing changed."
+            customer_email_skipped:
+              $ref: "#/components/schemas/TicketEmailSkipReason"
+    TicketReply:
+      type: object
+      title: Ticket reply payload
+      additionalProperties: false
+      required: [body]
+      properties:
+        body:
+          type: string
+          maxLength: 10000
+        author_user_id:
+          type: string
+          format: uuid
+          description: Post as this team member (who must be able to manage tickets). Default — the team.
+        author_email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Post as the member with this login email. Mutually exclusive with `author_user_id`.
+        idempotency_key:
+          type: string
+          maxLength: 200
+          description: Makes retries safe — the same key answers the original reply. Scoped to your API key.
+    TicketReplyResult:
+      type: object
+      title: Ticket reply result
+      required: [message, ticket, duplicate]
+      properties:
+        message:
+          $ref: "#/components/schemas/TicketMessage"
+        ticket:
+          $ref: "#/components/schemas/Ticket"
+        duplicate:
+          type: boolean
+        customer_email_skipped:
+          $ref: "#/components/schemas/TicketEmailSkipReason"
+    TicketUpdate:
+      type: object
+      title: Ticket update payload
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [open, resolved, closed]
+        priority:
+          $ref: "#/components/schemas/TicketPriority"
+        category:
+          type: [string, "null"]
+          maxLength: 80
+          description: A ticket category, or `null` to clear it.
+        assigned_user_id:
+          type: [string, "null"]
+          format: uuid
+          description: Assign to this team member, or `null` to unassign.
+        assignee_email:
+          type: string
+          format: email
+          maxLength: 320
+          description: Assign by login email. Mutually exclusive with `assigned_user_id`.
+    TicketUpdateResult:
+      title: Ticket update result
+      allOf:
+        - $ref: "#/components/schemas/Ticket"
+        - type: object
+          properties:
+            customer_email_skipped:
+              $ref: "#/components/schemas/TicketEmailSkipReason"
+    ContactAnonymisedError:
+      type: object
+      title: Contact anonymised
+      description: |
+        Returned with `409` when the contact was anonymised — it takes no more ticket writes.
+        Like the feature-gate error, there is no `statusCode` field.
+      required: [message, error_code]
+      properties:
+        message:
+          type: string
+        error_code:
+          type: string
+          const: CONTACT_ANONYMISED
+        contact_id:
+          type: string
+          format: uuid
+
+    # ── Ticket webhook events ──
+    TicketEventType:
+      type: string
+      title: Ticket event type
+      enum:
+        - ticket.created
+        - ticket.message_created
+        - ticket.status_changed
+        - ticket.assigned
+      description: |
+        The four customer-ticket events. All are **opt-in**: delivered only to endpoints that
+        list them explicitly in `events`, and only while the plan includes Customer tickets.
+        They fire for every write source (help page, widget, the app, automations, the API).
+        Quiet: a ticket in spam emits no `created` / `message_created`; internal notes never
+        emit; reassignments that follow a contact's owner hand-over or a team member's
+        offboarding are quiet; nothing is sent about an anonymised contact. Payload shape:
+        `TicketEventData`.
+    TicketWebhookMessage:
+      type: object
+      title: Ticket webhook message
+      description: The message — full text, and attachment metadata but never a link.
+      required: [id, side, origin, author, body, attachment, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        side:
+          type: string
+          enum: [customer, team]
+        origin:
+          $ref: "#/components/schemas/TicketMessageOrigin"
+        author:
+          $ref: "#/components/schemas/TicketMessageAuthor"
+        body:
+          type: [string, "null"]
+        attachment:
+          type: [object, "null"]
+          description: Fetch a fresh signed link from `GET /v1/tickets/{id}`.
+          properties:
+            filename:
+              type: [string, "null"]
+            mime_type:
+              type: [string, "null"]
+            size:
+              type: [integer, "null"]
+        created_at:
+          type: string
+          format: date-time
+    TicketEventData:
+      type: object
+      title: Ticket event data
+      description: |
+        `ticket` is exactly the `/v1/tickets` ticket object at the moment of the change;
+        `contact` repeats its `contact` block.
+      required: [ticket, contact]
+      additionalProperties: true
+      properties:
+        ticket:
+          $ref: "#/components/schemas/Ticket"
+        contact:
+          oneOf:
+            - $ref: "#/components/schemas/TicketContact"
+            - type: "null"
+        message:
+          $ref: "#/components/schemas/TicketWebhookMessage"
+        change:
+          type: object
+          description: "`ticket.status_changed` and `ticket.assigned` only."
+          properties:
+            status:
+              type: object
+              description: "`ticket.status_changed` only."
+              required: [from, to]
+              properties:
+                from:
+                  $ref: "#/components/schemas/TicketStatus"
+                to:
+                  $ref: "#/components/schemas/TicketStatus"
+            origin:
+              type: string
+              description: "`ticket.status_changed` only — `agent`, `customer`, `automation`, `api` or `system`. Tolerate unknown values."
+              examples: [agent, customer, automation, api, system]
+            assignee:
+              type: object
+              description: "`ticket.assigned` only — either side may be `null` (unassigned)."
+              required: [from_user_id, to_user_id]
+              properties:
+                from_user_id:
+                  type: [string, "null"]
+                  format: uuid
+                to_user_id:
+                  type: [string, "null"]
+                  format: uuid
+    TicketEventBase:
+      type: object
+      title: Ticket event (base)
+      description: |
+        Same envelope, headers, signing, and retry policy as every other event (see
+        `EmailEventBase`). Every ticket event carries `TicketEventData`.
+      required: [id, type, created_at, data]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: |
+            Event id — stable across retries and shared across your endpoints. Use it
+            as your dedup key.
+        type:
+          $ref: "#/components/schemas/TicketEventType"
+        created_at:
+          type: string
+          format: date-time
+          description: When the event occurred.
+        data:
+          $ref: "#/components/schemas/TicketEventData"
+    TicketCreatedEvent:
+      title: ticket.created event
+      description: Carries the opening message.
+      allOf:
+        - $ref: "#/components/schemas/TicketEventBase"
+        - type: object
+          properties:
+            type:
+              const: ticket.created
+            data:
+              allOf:
+                - $ref: "#/components/schemas/TicketEventData"
+                - required: [message]
+    TicketMessageCreatedEvent:
+      title: ticket.message_created event
+      allOf:
+        - $ref: "#/components/schemas/TicketEventBase"
+        - type: object
+          properties:
+            type:
+              const: ticket.message_created
+            data:
+              allOf:
+                - $ref: "#/components/schemas/TicketEventData"
+                - required: [message]
+    TicketStatusChangedEvent:
+      title: ticket.status_changed event
+      allOf:
+        - $ref: "#/components/schemas/TicketEventBase"
+        - type: object
+          properties:
+            type:
+              const: ticket.status_changed
+            data:
+              allOf:
+                - $ref: "#/components/schemas/TicketEventData"
+                - required: [change]
+    TicketAssignedEvent:
+      title: ticket.assigned event
+      allOf:
+        - $ref: "#/components/schemas/TicketEventBase"
+        - type: object
+          properties:
+            type:
+              const: ticket.assigned
+            data:
+              allOf:
+                - $ref: "#/components/schemas/TicketEventData"
+                - required: [change]
 
     # ── Meeting types & bookings ──
     MeetingType:
