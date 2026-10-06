@@ -4573,7 +4573,7 @@ paths:
         Records a sale — a header over 1–100 line items, each an active catalog product.
         **Recording a sale does not charge the buyer.** A repeated `external_reference`
         writes nothing and returns the original sale with `duplicate: true` (201 either
-        way). References starting with `order:`, `quote:`, `pr:`, `cycle:`, `store:`,
+        way). References starting with `order:`, `quote:`, `pr:`, `cycle:`, `mayab:`, `store:`,
         `cardcom:`, `form:`, `booking:` or `event:` are reserved for sales the app records
         itself (400 `RESERVED_EXTERNAL_REFERENCE`).
 
@@ -4928,8 +4928,11 @@ paths:
             `error_code` `IDEMPOTENCY_KEY_MISMATCH` (the key was used for a different
             sale, charge or amount), `PLAN_FEATURE_REQUIRED` (`mode: "auto"` on a provider
             charge without the `workspace_payments` feature — retry with
-            `recorded_outside`), `PROVIDER_NOT_CONNECTED`, `REFUND_IN_STORE` (refund it in
-            the online store), or `REQUEST_NOT_REFUNDABLE` (a test-mode charge).
+            `recorded_outside`), `PROVIDER_NOT_CONNECTED`, `PROVIDER_REF_MISSING` (no provider
+            reference for the charge — refund it in the provider dashboard, then retry with
+            `recorded_outside`), `REFUND_IN_STORE` (refund it in the online store),
+            `REQUEST_NOT_REFUNDABLE` (a test-mode charge), or `TERMINAL_NOT_CHARGEABLE` (the
+            Cardcom terminal the charge was made on can no longer move money).
           content:
             application/json:
               schema:
@@ -12484,6 +12487,10 @@ components:
           type: [string, "null"]
           format: date-time
           description: When the link was first sent by SMS.
+        receipt_email_sent_at:
+          type: [string, "null"]
+          format: date-time
+          description: When the payment receipt was emailed to the payer.
         payment_method_id:
           type: [string, "null"]
           format: uuid

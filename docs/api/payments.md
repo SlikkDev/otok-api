@@ -16,7 +16,7 @@ All endpoints require [authentication](getting-started.md#authentication). Payme
 | POST | `/api/v1/payments/:id/entries/:entryId/mark` | Set one entry's status |
 | POST | `/api/v1/payments/:id/refund` | Refund a charge — through the payment gateway, or recorded as returned outside oToK |
 
-> **Refund access (API key capability).** Every route that gives money back — `POST /:id/refund`, and setting a status of `refunded` through `POST /v1/payments`, `PATCH /:id` or `POST /:id/entries/:entryId/mark` — also requires the calling API key to carry **refund access** (`allow_money_out`). Only the workspace owner can grant it, in **Settings → Developers → API keys**; it is never a request field. A key without it gets `403` with `error_code: "API_KEY_MONEY_OUT_DISABLED"`. Keys that existed before this capability was introduced kept refund access; keys created since start without it. The same capability gates [order refunds](orders.md#post-apiv1ordersidrefunds), [payment-request refunds](payment-requests.md#post-apiv1payment-requestsidrefund) and credit tax documents.
+> **Refund access (API key capability).** Every route that gives money back — `POST /:id/refund`, and setting a status of `refunded` through `POST /v1/payments`, `PATCH /:id` or `POST /:id/entries/:entryId/mark` — also requires the calling API key to carry **refund access** (`allow_money_out`). Only the workspace owner can grant it, in **Settings → Developers → API keys**; it is never a request field. A key without it gets `403` with `error_code: "API_KEY_MONEY_OUT_DISABLED"`. The same capability gates [order refunds](orders.md#post-apiv1ordersidrefunds), [payment-request refunds](payment-requests.md#post-apiv1payment-requestsidrefund) and credit tax documents.
 
 ## The payment model
 
