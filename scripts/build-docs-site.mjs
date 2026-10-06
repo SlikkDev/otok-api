@@ -40,6 +40,7 @@ const GUIDES = [
   ["consent-and-suppressions", "Consent & Suppressions"],
   ["webhooks", "Webhooks"],
   ["bookings", "Bookings & Meeting Types"],
+  ["tickets", "Customer Tickets"],
 ];
 
 const CSS = `

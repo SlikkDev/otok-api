@@ -112,6 +112,16 @@ import type {
   TagCreateParams,
   TagUpdateParams,
   TemplateSendParams,
+  Ticket,
+  TicketCreateParams,
+  TicketCreateResult,
+  TicketDetail,
+  TicketGetParams,
+  TicketListParams,
+  TicketReplyParams,
+  TicketReplyResult,
+  TicketUpdateParams,
+  TicketUpdateResult,
   WebhookEndpoint,
   WebhookEndpointCreated,
   WebhookEndpointCreateParams,
@@ -1555,5 +1565,72 @@ export class ReportsApi {
   }
   run(id: string, params: ReportRunParams = {}): Promise<ReportRunResult> {
     return this.http.request("POST", `/v1/reports/${id}/run`, { body: params });
+  }
+}
+
+// ─────────────────────────── Customer tickets ───────────────────────────
+
+/** Documented `limit` cap for GET /v1/tickets (default 50). */
+const TICKETS_PAGE_CAP = 200;
+
+/**
+ * Customer tickets — open, read, answer and triage. Every write does what the
+ * same action does in the app: a ticket opened here is routed, starts its
+ * response target and emails the customer their link; a reply is a real team
+ * reply (the ticket moves to Answered and the customer is emailed). Internal
+ * notes never leave through the API.
+ *
+ * Requires the `customer_tickets` plan feature.
+ */
+export class TicketsApi {
+  constructor(private readonly http: HttpClient) {}
+
+  /** List tickets — newest activity first; `status: "all"` (the default) leaves spam out. */
+  list(params: TicketListParams = {}): Promise<Paginated<Ticket>> {
+    return this.http.request("GET", "/v1/tickets", { query: { ...params } });
+  }
+
+  /** Iterate every matching ticket, auto-paginating GET /v1/tickets (pages of 200). */
+  iter(params: TicketListParams = {}): AsyncGenerator<Ticket, void, undefined> {
+    return paginate(
+      (limit, offset) => this.list({ ...params, limit, offset }),
+      TICKETS_PAGE_CAP,
+      params.limit,
+      params.offset,
+    );
+  }
+
+  /**
+   * Get a ticket with its latest customer email and one page of its
+   * conversation — the newest messages first page, each page oldest to
+   * newest. While `messages_has_more`, pass `messages_next_before` as
+   * `messages_before` for the page before it.
+   */
+  get(id: string, params: TicketGetParams = {}): Promise<TicketDetail> {
+    return this.http.request("GET", `/v1/tickets/${id}`, { query: { ...params } });
+  }
+
+  /**
+   * Open a ticket. Idempotent when `external_reference` is set: a repeat
+   * call changes nothing and answers the original ticket with
+   * `duplicate: true`. `customer_email_skipped` says when the creation email
+   * will not go out.
+   */
+  create(params: TicketCreateParams): Promise<TicketCreateResult> {
+    return this.http.request("POST", "/v1/tickets", { body: params });
+  }
+
+  /**
+   * Reply to the customer as the team (or a named member). Moves the ticket
+   * to Answered and emails the customer once per stretch of unread replies.
+   * Pass `idempotency_key` to make retries safe.
+   */
+  reply(id: string, params: TicketReplyParams): Promise<TicketReplyResult> {
+    return this.http.request("POST", `/v1/tickets/${id}/replies`, { body: params });
+  }
+
+  /** Triage: status (`open` | `resolved` | `closed`), priority, category, assignee. */
+  update(id: string, params: TicketUpdateParams): Promise<TicketUpdateResult> {
+    return this.http.request("PATCH", `/v1/tickets/${id}`, { body: params });
   }
 }

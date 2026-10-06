@@ -12,6 +12,7 @@ import {
   MESSAGE_WEBHOOK_EVENT_TYPES,
   ORDER_WEBHOOK_EVENT_TYPES,
   PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+  TICKET_WEBHOOK_EVENT_TYPES,
   type WebhookEventType,
 } from "../src/types";
 
@@ -111,6 +112,20 @@ describe("webhook event type constants", () => {
     ]) {
       expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
     }
+  });
+
+  it("ticket event types are registrable but never defaulted", () => {
+    expect(TICKET_WEBHOOK_EVENT_TYPES).toEqual([
+      "ticket.created",
+      "ticket.message_created",
+      "ticket.status_changed",
+      "ticket.assigned",
+    ]);
+    for (const eventType of TICKET_WEBHOOK_EVENT_TYPES) {
+      expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
+    }
+    const listed: WebhookEventType[] = [...TICKET_WEBHOOK_EVENT_TYPES];
+    expect(listed).toHaveLength(4);
   });
 
   it("new-family events are listed verbatim at registration", async () => {
@@ -1187,5 +1202,169 @@ describe("contact acquisitions", () => {
       kind: "api",
       limit: "20",
     });
+  });
+});
+
+describe("tickets", () => {
+  it("list serializes every documented filter", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { data: [], total: 0, limit: 50, offset: 0 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    await otok.tickets.list({
+      status: "open",
+      assignee: "unassigned",
+      category: "Access",
+      priority: "high",
+      source: "api",
+      external_reference: "helpdesk-88213",
+      created_from: "2026-09-01T00:00:00Z",
+      sort: "-created_at",
+      limit: 20,
+      offset: 40,
+    });
+    const [url] = fetchMock.mock.calls[0] as [any];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/api/v1/tickets");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      status: "open",
+      assignee: "unassigned",
+      category: "Access",
+      priority: "high",
+      source: "api",
+      external_reference: "helpdesk-88213",
+      created_from: "2026-09-01T00:00:00Z",
+      sort: "-created_at",
+      limit: "20",
+      offset: "40",
+    });
+  });
+
+  it("iter pages at the ticket list cap of 200", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { data: [{ id: "t-1" }], total: 1, limit: 200, offset: 0 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const ids: string[] = [];
+    for await (const ticket of otok.tickets.iter({ status: "all", limit: 1000 })) {
+      ids.push(ticket.id);
+    }
+    expect(ids).toEqual(["t-1"]);
+    const parsed = new URL(String((fetchMock.mock.calls[0] as [any])[0]));
+    expect(parsed.searchParams.get("limit")).toBe("200");
+    expect(parsed.searchParams.get("status")).toBe("all");
+  });
+
+  it("get pages the conversation with messages_limit / messages_before", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, {
+        id: "t-1",
+        messages: [{ id: "m-2", side: "team", origin: "api" }],
+        messages_has_more: true,
+        messages_next_before: "m-2",
+        last_customer_email: null,
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const ticket = await otok.tickets.get("t-1", { messages_limit: 1, messages_before: "m-3" });
+    expect(ticket.messages_has_more).toBe(true);
+    expect(ticket.messages_next_before).toBe("m-2");
+    const parsed = new URL(String((fetchMock.mock.calls[0] as [any])[0]));
+    expect(parsed.pathname).toBe("/api/v1/tickets/t-1");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      messages_limit: "1",
+      messages_before: "m-3",
+    });
+  });
+
+  it("create posts the inline contact and passes duplicate + the email outcome through", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        contact: { email: "jane@example.com", name: "Jane" },
+        subject: "Can't log in",
+        body: "Access denied after a reset.",
+        opened_by: "customer",
+        external_reference: "helpdesk-88213",
+      });
+      return json(201, {
+        id: "t-1",
+        status: "open",
+        duplicate: false,
+        customer_email_skipped: "no_verified_sender",
+        messages: [],
+        messages_has_more: false,
+        messages_next_before: null,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.tickets.create({
+      contact: { email: "jane@example.com", name: "Jane" },
+      subject: "Can't log in",
+      body: "Access denied after a reset.",
+      opened_by: "customer",
+      external_reference: "helpdesk-88213",
+    });
+    expect(result.duplicate).toBe(false);
+    expect(result.customer_email_skipped).toBe("no_verified_sender");
+    expect(String(fetchMock.mock.calls[0]![0])).toContain("/api/v1/tickets");
+  });
+
+  it("reply posts to the replies route with its idempotency key", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toContain("/api/v1/tickets/t-1/replies");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        body: "Your access is back.",
+        author_email: "dana@example.com",
+        idempotency_key: "reply-1",
+      });
+      return json(200, {
+        message: { id: "m-9", side: "team", origin: "api" },
+        ticket: { id: "t-1", status: "pending" },
+        duplicate: true,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.tickets.reply("t-1", {
+      body: "Your access is back.",
+      author_email: "dana@example.com",
+      idempotency_key: "reply-1",
+    });
+    expect(result.duplicate).toBe(true);
+    expect(result.message.origin).toBe("api");
+    expect(result.ticket.status).toBe("pending");
+  });
+
+  it("update patches triage fields, null unassigning", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toContain("/api/v1/tickets/t-1");
+      expect(init.method).toBe("PATCH");
+      expect(JSON.parse(init.body)).toEqual({
+        status: "resolved",
+        category: null,
+        assigned_user_id: null,
+      });
+      return json(200, { id: "t-1", status: "resolved", customer_email_skipped: "capped" });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.tickets.update("t-1", {
+      status: "resolved",
+      category: null,
+      assigned_user_id: null,
+    });
+    expect(result.status).toBe("resolved");
+    expect(result.customer_email_skipped).toBe("capped");
+  });
+
+  it("surfaces the envelope code on a refusal", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(409, { error: { code: "ticket_is_spam", message: "A ticket in spam takes no replies" } }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.tickets.reply("t-1", { body: "Hi" }).catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("ticket_is_spam");
   });
 });

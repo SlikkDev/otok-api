@@ -28,6 +28,7 @@ Quick links:
 - [Product cycles](docs/api/product-cycles.md) — cohorts, scheduling and capacity
 - [Shared reports](docs/api/reports.md) — discover and run workspace reports
 - [Events](docs/api/events.md) — events and registrations, with the Zoom join-link push
+- [Customer Tickets](docs/api/tickets.md) — open, read, answer and triage customer tickets
 
 ## At a glance
 

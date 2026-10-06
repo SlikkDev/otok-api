@@ -20,6 +20,7 @@ from otok import (
     MESSAGE_WEBHOOK_EVENT_TYPES,
     ORDER_WEBHOOK_EVENT_TYPES,
     PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+    TICKET_WEBHOOK_EVENT_TYPES,
     AudienceListParams,
     OtokAPIError,
     OtokClient,
@@ -433,6 +434,17 @@ class TestEmailsAndWebhookEndpoints:
         )
         assert len(new_family_types) == 15
         for event_type in new_family_types:
+            assert event_type not in defaults
+
+    def test_ticket_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert TICKET_WEBHOOK_EVENT_TYPES == (
+            "ticket.created",
+            "ticket.message_created",
+            "ticket.status_changed",
+            "ticket.assigned",
+        )
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        for event_type in TICKET_WEBHOOK_EVENT_TYPES:
             assert event_type not in defaults
 
     def test_new_family_events_are_listed_verbatim_at_registration(self) -> None:
@@ -2349,3 +2361,160 @@ class TestContactAcquisitions:
         assert request.method == "GET"
         assert urlsplit(request.url).path == "/api/v1/contacts/c-1/acquisitions"
         assert query_of(request) == {"kind": ["api"], "limit": ["20"]}
+
+
+class TestTickets:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 50, "offset": 0})
+        )
+        client.tickets.list(
+            {
+                "status": "open",
+                "assignee": "unassigned",
+                "category": "Access",
+                "priority": "high",
+                "source": "api",
+                "external_reference": "helpdesk-88213",
+                "created_from": "2026-09-01T00:00:00Z",
+                "sort": "-created_at",
+                "limit": 20,
+                "offset": 40,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/tickets"
+        assert query_of(request) == {
+            "status": ["open"],
+            "assignee": ["unassigned"],
+            "category": ["Access"],
+            "priority": ["high"],
+            "source": ["api"],
+            "external_reference": ["helpdesk-88213"],
+            "created_from": ["2026-09-01T00:00:00Z"],
+            "sort": ["-created_at"],
+            "limit": ["20"],
+            "offset": ["40"],
+        }
+
+    def test_iter_pages_at_the_ticket_list_cap(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [{"id": "t-1"}], "total": 1, "limit": 200, "offset": 0})
+        )
+        ids = [ticket["id"] for ticket in client.tickets.iter({"limit": 1000})]
+        assert ids == ["t-1"]
+        assert query_of(last_request(transport))["limit"] == ["200"]
+
+    def test_get_pages_the_conversation(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "id": "t-1",
+                    "messages": [{"id": "m-2", "side": "team", "origin": "api"}],
+                    "messages_has_more": True,
+                    "messages_next_before": "m-2",
+                    "last_customer_email": None,
+                },
+            )
+        )
+        ticket = client.tickets.get("t-1", {"messages_limit": 1, "messages_before": "m-3"})
+        request = last_request(transport)
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1"
+        assert query_of(request) == {"messages_limit": ["1"], "messages_before": ["m-3"]}
+        assert ticket["messages_next_before"] == "m-2"
+
+    def test_create_posts_the_inline_contact_and_reports_the_outcome(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "t-1",
+                    "duplicate": False,
+                    "customer_email_skipped": "no_verified_sender",
+                },
+            )
+        )
+        result = client.tickets.create(
+            {
+                "contact": {"email": "jane@example.com", "name": "Jane"},
+                "subject": "Can't log in",
+                "body": "Access denied after a reset.",
+                "opened_by": "customer",
+                "external_reference": "helpdesk-88213",
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "POST"
+        assert urlsplit(request.url).path == "/api/v1/tickets"
+        assert transport.request_body() == {
+            "contact": {"email": "jane@example.com", "name": "Jane"},
+            "subject": "Can't log in",
+            "body": "Access denied after a reset.",
+            "opened_by": "customer",
+            "external_reference": "helpdesk-88213",
+        }
+        assert result["duplicate"] is False
+        assert result["customer_email_skipped"] == "no_verified_sender"
+
+    def test_reply_posts_to_the_replies_route(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "message": {"id": "m-9", "origin": "api"},
+                    "ticket": {"id": "t-1", "status": "pending"},
+                    "duplicate": True,
+                },
+            )
+        )
+        result = client.tickets.reply(
+            "t-1",
+            {
+                "body": "Your access is back.",
+                "author_email": "dana@example.com",
+                "idempotency_key": "reply-1",
+            },
+        )
+        request = last_request(transport)
+        assert request.method == "POST"
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1/replies"
+        assert transport.request_body() == {
+            "body": "Your access is back.",
+            "author_email": "dana@example.com",
+            "idempotency_key": "reply-1",
+        }
+        assert result["duplicate"] is True
+        assert result["ticket"]["status"] == "pending"
+
+    def test_update_patches_triage_fields_with_null_unassign(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200, {"id": "t-1", "status": "resolved", "customer_email_skipped": "capped"}
+            )
+        )
+        result = client.tickets.update(
+            "t-1", {"status": "resolved", "category": None, "assigned_user_id": None}
+        )
+        request = last_request(transport)
+        assert request.method == "PATCH"
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1"
+        assert transport.request_body() == {
+            "status": "resolved",
+            "category": None,
+            "assigned_user_id": None,
+        }
+        assert result["customer_email_skipped"] == "capped"
+
+    def test_refusal_surfaces_the_envelope_code(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {"error": {"code": "ticket_is_spam", "message": "No replies in spam"}},
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.tickets.reply("t-1", {"body": "Hi"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "ticket_is_spam"
