@@ -94,6 +94,45 @@ describe("public contract additions", () => {
     ]);
   });
 
+  it("opts an event into collecting payment and reads the registration's payment block", async () => {
+    const payment = { sale_id: "sale-1", sale_status: "active", settlement_status: "unpaid", pay_url: "https://pay.test/p/1" };
+    const { client, fetch } = clientWith(
+      { id: "event-3", collect_payment_on_registration: true, duplicate: false },
+      { id: "att-2", payment_sale_id: "sale-1", payment, created: true, previous_status: null },
+    );
+    const event = await client.events.upsert({ name: "Paid workshop", collect_payment_on_registration: true });
+    expect(event.collect_payment_on_registration).toBe(true);
+    const result = await client.events.register(event.id, { contact_id: "c-1" });
+    expect([result.payment_sale_id, result.payment?.settlement_status, result.payment?.pay_url]).toEqual([
+      "sale-1", "unpaid", "https://pay.test/p/1",
+    ]);
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string)).toEqual({
+      name: "Paid workshop", collect_payment_on_registration: true,
+    });
+  });
+
+  it("sends the cycle pricing and date re-arm flags and reads rearmed_fires", async () => {
+    const { client, fetch } = clientWith({ id: "cycle-1", rearmed_fires: 3, dynamic_pricing: false });
+    const body = { starts_on: "2026-11-01", rearm_date_triggers: true, dynamic_pricing: false };
+    const cycle = await client.productCycles.update("cycle-1", body);
+    expect([cycle.rearmed_fires, cycle.dynamic_pricing]).toEqual([3, false]);
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string)).toEqual(body);
+  });
+
+  it("sends product pricing and recurring sale policy and reads a booking deposit", async () => {
+    const deposit = { state: "awaiting", amount: 100, hold_until: "2026-10-07T10:00:00.000Z", sale_id: "sale-9" };
+    const { client, fetch } = clientWith(
+      { id: "product-1", dynamic_pricing: false, recurring_sale_policy: "per_period", duplicate: false },
+      { id: "booking-1", status: "confirmed", deposit },
+    );
+    const body = { name: "Course", price: 300, dynamic_pricing: false, recurring_sale_policy: "per_period" as const };
+    const product = await client.products.create(body);
+    expect(product.recurring_sale_policy).toBe("per_period");
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string)).toEqual(body);
+    const booking = await client.bookings.get("booking-1");
+    expect(booking.deposit).toEqual(deposit);
+  });
+
   it("moves an attendance by its own id and lists acquisitions under the contact", async () => {
     const { client, fetch } = clientWith({ id: "att-1", previous_status: "registered" }, { data: [], total: 0, limit: 50, offset: 0 });
     expect((await client.events.updateAttendance("att-1", "attended")).previous_status).toBe("registered");

@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from urllib.parse import parse_qs, urlsplit
 
-from otok import ContactUpsertParams, OtokClient, ReportRunParams
+from otok import (
+    AttendancePayment,
+    BookingDeposit,
+    ContactUpsertParams,
+    OtokClient,
+    ProductCreateParams,
+    ProductCycleUpdateParams,
+    ReportRunParams,
+)
 from tests.helpers import MockTransport, json_response
 
 
@@ -83,3 +91,59 @@ def test_report_iteration_clamps_page_size() -> None:
         "limit": ["100"],
         "offset": ["3"],
     }
+
+
+def test_priced_event_opt_in_and_registration_payment_block() -> None:
+    payment = {
+        "sale_id": "sale-1",
+        "sale_status": "active",
+        "settlement_status": "unpaid",
+        "pay_url": "https://pay.test/p/1",
+    }
+    client, transport = make_client(
+        {"id": "event-3", "collect_payment_on_registration": True, "duplicate": False},
+        {"id": "att-2", "payment_sale_id": "sale-1", "payment": payment, "created": True},
+    )
+    event = client.events.upsert(
+        {"name": "Paid workshop", "collect_payment_on_registration": True}
+    )
+    assert transport.request_body() == {
+        "name": "Paid workshop",
+        "collect_payment_on_registration": True,
+    }
+    result = client.events.register(event["id"], {"contact_id": "c-1"})
+    typed: AttendancePayment = result["payment"]
+    assert typed["settlement_status"] == "unpaid"
+    assert result["payment_sale_id"] == "sale-1"
+
+
+def test_cycle_rearm_and_product_pricing_fields_survive_serialization() -> None:
+    client, transport = make_client(
+        {"id": "cycle-1", "rearmed_fires": 3},
+        {"id": "product-1", "duplicate": False},
+    )
+    cycle_body: ProductCycleUpdateParams = {
+        "starts_on": "2026-11-01",
+        "rearm_date_triggers": True,
+        "dynamic_pricing": False,
+    }
+    assert client.product_cycles.update("cycle-1", cycle_body)["rearmed_fires"] == 3
+    assert transport.request_body() == cycle_body
+    product_body: ProductCreateParams = {
+        "name": "Course",
+        "dynamic_pricing": False,
+        "recurring_sale_policy": "per_period",
+    }
+    client.products.create(product_body)
+    assert transport.request_body() == product_body
+
+
+def test_booking_deposit_block_is_read_verbatim() -> None:
+    deposit: BookingDeposit = {
+        "state": "awaiting",
+        "amount": 100.0,
+        "hold_until": "2026-10-07T10:00:00.000Z",
+        "sale_id": "sale-9",
+    }
+    client, _ = make_client({"id": "booking-1", "status": "confirmed", "deposit": deposit})
+    assert client.bookings.get("booking-1")["deposit"] == deposit

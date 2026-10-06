@@ -1,8 +1,8 @@
 # Webhooks
 
-Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), **payment-request events** (lifecycle events for [pay-links](payment-requests.md)), **contact events** (lifecycle + [consent](consent-and-suppressions.md) changes), **message events** (inbound WhatsApp messages), **deal events** (lifecycle events for [deals](deals.md)), **sale events** (recorded / cancelled / paid / refunded [sales](sales.md)), **booking events** (lifecycle events for [bookings](bookings.md)), **event-attendance events**, and **form-submission events**. Events are signed, retried, and deduplicable by event id.
+Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), **payment-request events** (lifecycle events for [pay-links](payment-requests.md)), **contact events** (lifecycle + [consent](consent-and-suppressions.md) changes), **message events** (inbound WhatsApp messages), **deal events** (lifecycle events for [deals](deals.md)), **sale events** (recorded / cancelled / paid / refunded [sales](sales.md)), **booking events** (lifecycle events for [bookings](bookings.md)), **event-attendance events**, **form-submission events**, and **ticket events** (lifecycle events for [customer tickets](tickets.md)). Events are signed, retried, and deduplicable by event id.
 
-**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links. **Contact, message, deal, sale, booking, attendance, and form events** fire for every intentional write source too — their quiet paths are documented per family below.
+**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links. **Contact, message, deal, sale, booking, attendance, form, and ticket events** fire for every intentional write source too — their quiet paths are documented per family below.
 
 All management endpoints require [authentication](getting-started.md#authentication). Errors use the structured envelope `{"error": {"code", "message"}}`.
 
@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `sale.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
+| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `sale.*`, `booking.*`, `event.attendance.changed`, `form.submitted`, and `ticket.*` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -192,6 +192,19 @@ Four [booking](bookings.md) lifecycle events. All are **opt-in** (delivered only
 | Type | Subscription | Fires when |
 |---|---|---|
 | `form.submitted` | opt-in | A form was submitted — a standalone embed (`origin: "form"`), a published landing page's form block (`"landing_page"`), or an on-site popup (`"popup"`). Fires post-persist even when no contact was resolved (`data.contact_id` is then `null`) |
+
+### Ticket events
+
+Four [customer-ticket](tickets.md) events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`), and they are sent only while the workspace's plan includes **Customer tickets**. They fire for every write source — the hosted help page and website widget, the team in the app, automations, and the API — and `data.message.origin` / `data.change.origin` say which.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `ticket.created` | opt-in | A ticket was opened — by the customer, by a team member on their behalf, or through the API. It carries the opening message (`data.message`) and the assignee the ticket landed on, so there is no separate `ticket.message_created` or `ticket.assigned` for the opening |
+| `ticket.message_created` | opt-in | A customer or team message was added — never an internal note. `data.message.origin` (`customer`, `agent`, `automation`, `api`) lets you drop your own API posts when they come back. A status move the message caused (a customer reply reopening the ticket, a team reply moving it to Answered) rides this event's `data.ticket.status` — there is no `ticket.status_changed` for it |
+| `ticket.status_changed` | opt-in | The status was changed explicitly — by a team member, the customer (on the help page), an automation, the API, or the system closing a quietly resolved ticket. `data.change.status` carries `from` → `to`; `data.change.origin` is `agent`, `customer`, `automation`, `api` or `system`. Moves into and out of `spam` are included |
+| `ticket.assigned` | opt-in | Triage changed the assignee — unassigning included. `data.change.assignee` carries `from_user_id` → `to_user_id` |
+
+**Quiet by design:** a ticket filed into `spam` emits no `ticket.created` and no `ticket.message_created` while it is spam (status moves into and out of spam, and assignee changes, still emit); internal notes never emit; reassignments that follow a contact's owner hand-over or a team member's offboarding are quiet; and nothing is sent about a contact once it has been anonymised. Attachments ride as **metadata only** (`filename`, `mime_type`, `size`) — never a link; fetch a fresh signed `media_url` from [`GET /v1/tickets/:id`](tickets.md#get-apiv1ticketsid).
 
 Registering an endpoint for a mix of the new families:
 
@@ -579,7 +592,7 @@ All four booking events carry the same `data` fields (full field set, explicit `
 | `data.host_timezone` / `data.invitee_timezone` | IANA timezones — the host's schedule tz and the tz the invitee booked in |
 | `data.status` | Booking status at event time (e.g. `confirmed`, `cancelled`). Tolerate unknown values |
 | `data.location_type` | The meeting type's location kind. Tolerate unknown values |
-| `data.cancelled_by` / `data.cancel_reason` | `booking.cancelled` — who cancelled (e.g. `host`, `invitee`) and why; `null` elsewhere |
+| `data.cancelled_by` / `data.cancel_reason` | `booking.cancelled` — who cancelled (`host`, `invitee` or `system`) and why; `null` elsewhere. A booking released because its [deposit](bookings.md#deposits) went unpaid arrives with `cancelled_by: "system"` and `cancel_reason: "deposit_unpaid"` |
 | `data.source` | How the booking was created — `public_page`, `manual`, `api`, or `embed`. Passed through verbatim: **tolerate unknown values**, new sources may appear without notice |
 
 ### Event-attendance event `data`
@@ -602,6 +615,61 @@ All four booking events carry the same `data` fields (full field set, explicit `
 | `data.origin` | `form` (standalone embed) \| `landing_page` \| `popup` |
 | `data.landing_page_id` / `data.popup_id` | Set when `origin` is `landing_page` / `popup` respectively, else `null` |
 | `data.fields` | The submitted answers, keyed by form field ids |
+
+### Ticket event `data`
+
+All four ticket events share one shape. `data.ticket` is exactly the [ticket object](tickets.md#the-ticket-object) `GET /v1/tickets` returns — a snapshot at the moment of the change — and `data.contact` repeats its `contact` block.
+
+```json
+{
+  "id": "f6071829-3a4b-4c5d-8e7f-901234567890",
+  "type": "ticket.message_created",
+  "created_at": "2026-10-05T09:12:40.000Z",
+  "data": {
+    "ticket": {
+      "id": "5b1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5",
+      "number": 1042,
+      "number_label": "T-1042",
+      "subject": "Can't log in to the course",
+      "status": "pending",
+      "priority": "normal",
+      "category": "Access",
+      "source": "portal",
+      "language": "en",
+      "widget_id": null,
+      "external_reference": null,
+      "contact": { "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c", "name": "Jane Cohen", "email": "jane@example.com", "phone": "+972501234567" },
+      "assignee": { "id": "708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f", "name": "Dana Levi", "email": "dana@example.com" },
+      "first_response_at": "2026-10-05T09:12:40.000Z",
+      "response_target": null,
+      "last_message_at": "2026-10-05T09:12:40.000Z",
+      "resolved_at": null,
+      "closed_at": null,
+      "created_at": "2026-10-05T08:57:02.000Z",
+      "updated_at": "2026-10-05T09:12:40.000Z"
+    },
+    "contact": { "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c", "name": "Jane Cohen", "email": "jane@example.com", "phone": "+972501234567" },
+    "message": {
+      "id": "2a3b4c5d-6e7f-4809-9a1b-2c3d4e5f6a7b",
+      "side": "team",
+      "origin": "agent",
+      "author": { "id": "708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f", "name": "Dana Levi" },
+      "body": "Thanks Jane — I've re-enabled your access. Please try again.",
+      "attachment": null,
+      "created_at": "2026-10-05T09:12:40.000Z"
+    }
+  }
+}
+```
+
+| Field | Presence | Meaning |
+|---|---|---|
+| `data.ticket` | always | The [ticket object](tickets.md#the-ticket-object) |
+| `data.contact` | always | `{ id, name, email, phone }` — the same as `data.ticket.contact` (`null` if unavailable) |
+| `data.message` | `ticket.created`, `ticket.message_created` | The message: `id`, `side` (`customer` \| `team`), `origin` (`customer` \| `agent` \| `automation` \| `api`), `author` (`{ id, name }` of the team member, or `null`), `body` (full text), `attachment` (`{ filename, mime_type, size }` or `null` — never a link), `created_at`. On `ticket.created` it is the opening message |
+| `data.change.status` | `ticket.status_changed` | `{ from, to }` — the statuses before and after |
+| `data.change.origin` | `ticket.status_changed` | Who changed it: `agent`, `customer`, `automation`, `api` or `system`. Tolerate unknown values |
+| `data.change.assignee` | `ticket.assigned` | `{ from_user_id, to_user_id }` — either may be `null` (unassigned) |
 
 ## Request headers
 

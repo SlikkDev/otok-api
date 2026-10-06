@@ -57,7 +57,7 @@ This is the only idempotent create route whose **status code** also distinguishe
 
 ### Suppressed recipients are a 2xx, not an error
 
-If the recipient is on the workspace's suppression list (prior hard bounce, complaint, or unsubscribe), the API responds **2xx** (201 first time, 200 on replay) with `status: "suppressed"` and `reason: "suppressed"`. The reason is deliberately coarse — the API does not disclose *why* an address is suppressed. **Check `status` in the body; do not treat 2xx alone as "delivered to the provider".**
+If the recipient is on the workspace's suppression list (prior hard bounce, complaint, or unsubscribe — including a marketing unsubscribe: your caller-supplied body carries no opt-out of ours, so the workspace's opt-out list is honoured here too), the API responds **2xx** (201 first time, 200 on replay) with `status: "suppressed"` and `reason: "suppressed"`. The reason is deliberately coarse — the API does not disclose *why* an address is suppressed. **Check `status` in the body; do not treat 2xx alone as "delivered to the provider".**
 
 The suppression list itself is manageable over the API — list, idempotently add, and remove rows via [`/v1/suppressions`](consent-and-suppressions.md#suppressions) (requires the `email_marketing` plan feature). Note that removing a suppression only lifts the send-time block; it never resubscribes anyone.
 
@@ -113,6 +113,7 @@ curl -X POST "https://app.otok.io/api/v1/emails" \
 | 429 | `warming_cap_exceeded` | Domain-warming daily cap reached — transient, retry after the daily reset |
 | 429 | — (standard body) | Rate limit (300/min per key) — honor `Retry-After` |
 | 503 | `workspace_paused` | Workspace email sending is paused by deliverability protection — resolve in the app |
+| 503 | `sending_paused` | Sending for the workspace was paused by the email provider for reputation reasons — resolve in the app; later calls answer `workspace_paused` until it is lifted |
 | 502 | `provider_error` | The email provider rejected the send. The message includes only a coarse signal (e.g. an SMTP code or `timed out`). The idempotency key is released — safe to retry with the same key |
 
 ## Notes

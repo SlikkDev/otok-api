@@ -24,6 +24,7 @@ import {
   SuppressionsApi,
   TagsApi,
   TemplatesApi,
+  TicketsApi,
   WebhookEndpointsApi,
 } from "./resources";
 
@@ -72,6 +73,7 @@ export class OtokClient {
   readonly sales: SalesApi;
   readonly meetingTypes: MeetingTypesApi;
   readonly bookings: BookingsApi;
+  readonly tickets: TicketsApi;
   readonly webhookEndpoints: WebhookEndpointsApi;
   /** High-level e-commerce helpers (identifyCustomer, trackOrder). */
   readonly commerce: CommerceApi;
@@ -103,6 +105,7 @@ export class OtokClient {
     this.sales = new SalesApi(this.http);
     this.meetingTypes = new MeetingTypesApi(this.http);
     this.bookings = new BookingsApi(this.http);
+    this.tickets = new TicketsApi(this.http);
     this.webhookEndpoints = new WebhookEndpointsApi(this.http);
     this.commerce = new CommerceApi(this.contacts, this.deals, this.emails);
   }

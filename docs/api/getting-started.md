@@ -51,6 +51,7 @@ Endpoint groups that mirror a plan-gated product area additionally require that 
 | `/v1/bookings*` and `/v1/meeting-types*` (all routes) | Booking |
 | `/v1/email-campaigns*` and `/v1/suppressions*` (all routes) | Email marketing (`email_marketing`) |
 | `/v1/newsletters*` and `/v1/newsletter-issues*` (all routes) | Newsletters (`newsletters`) |
+| `/v1/tickets*` (all routes) | Customer tickets (`customer_tickets`) |
 
 Note the **two distinct payment gates**: `payments` covers the payments ledger (`/v1/payments*`) and the contact documents read, while `workspace_payments` covers pay-links collected through the workspace's own connected payment provider (`/v1/payment-requests*`). A workspace can hold either feature without the other — the 403 message embeds whichever feature id is missing.
 
@@ -63,9 +64,9 @@ A workspace whose plan lacks the feature receives `403 Forbidden` on every call 
 }
 ```
 
-The identifier after `feature:` is the lowercase plan-feature id — `deals`, `payments`, `workspace_payments`, `orders`, `campaigns`, `booking`, `email_marketing`, or `newsletters` — not the product display name. Key on `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"`, not on the message text.
+The identifier after `feature:` is the lowercase plan-feature id — `deals`, `payments`, `workspace_payments`, `orders`, `campaigns`, `booking`, `email_marketing`, `newsletters`, or `customer_tickets` — not the product display name. Key on `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"`, not on the message text.
 
-All other resources — contacts (except the documents sub-route above), notes, tags, contact groups, products, templates, transactional emails, and webhook endpoints — require only plan-wide API access.
+All other resources — contacts (except the documents sub-route above), notes, tags, contact groups, products, templates, transactional emails, sender profiles, and webhook endpoints — require only plan-wide API access.
 
 ## Authentication
 
