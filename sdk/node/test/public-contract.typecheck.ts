@@ -57,3 +57,18 @@ export const stampedLink: AttendanceCreateParams = {
     attendance_id: "att-1",
   },
 };
+
+// ── Priced events, booking deposits, catalog pricing ──
+import type { AttendancePayment, BookingDeposit, ProductCreateParams, ProductCycleUpdateParams } from "../src";
+
+export const pricedEvent: OtokEventUpsertParams = { name: "Paid workshop", collect_payment_on_registration: true };
+export const unpaidRegistration: AttendancePayment = {
+  sale_id: "sale-1", sale_status: "active", settlement_status: "unpaid", pay_url: null,
+};
+export const releasedDeposit: BookingDeposit = { state: "released", amount: 50, hold_until: null, sale_id: "sale-2" };
+export const fixedProduct: ProductCreateParams = { name: "Course", dynamic_pricing: false, recurring_sale_policy: "fill_one" };
+export const rearm: ProductCycleUpdateParams = { ends_on: "2026-12-01", rearm_date_triggers: true };
+// @ts-expect-error Only fill_one and per_period exist.
+export const badPolicy: ProductCreateParams = { name: "X", recurring_sale_policy: "monthly" };
+// @ts-expect-error A deposit state never goes back to "refunded".
+export const badDeposit: BookingDeposit = { state: "refunded", amount: null, hold_until: null, sale_id: null };

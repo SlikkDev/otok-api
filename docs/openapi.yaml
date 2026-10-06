@@ -34,10 +34,10 @@ info:
     (the payments ledger), while `/v1/payment-requests*` requires **`workspace_payments`**
     (collecting money through the workspace's own connected payment provider) — a workspace
     can hold either feature without the other, and the 403 message embeds whichever feature
-    id is missing. The suppression list (`/v1/suppressions*`) and the sender-profile
-    listing (`GET /v1/sender-profiles`) require the **`email_marketing`** feature.
+    id is missing. The suppression list (`/v1/suppressions*`) requires the
+    **`email_marketing`** feature.
     Contacts (including consent), notes, tags, contact groups, templates, products,
-    audiences, product cycles, shared report listing, emails, and webhook endpoints require only plan-wide API access.
+    audiences, product cycles, shared report listing, emails, sender profiles, and webhook endpoints require only plan-wide API access.
     Report runs additionally check the dataset feature.
 
     ## Error shapes
@@ -291,7 +291,7 @@ tags:
   - name: Audiences
     description: Read-only discovery of the workspace's saved audiences — the reusable targeting selectors campaigns and email campaigns accept as `audience_id`. Rows never include the stored definition; audiences are managed in-app and are not writable through the API.
   - name: Sender profiles
-    description: Read-only discovery of the workspace's email from-identities — the selectors email campaigns accept as `sender_profile_id`, each with its sending domain's verification status. Managed in-app; requires the `email_marketing` feature.
+    description: Read-only discovery of the workspace's email from-identities — the selectors email campaigns accept as `sender_profile_id`, each with its sending domain's verification status. Managed in-app; available on every plan with API access.
   - name: Email campaigns
     description: Broadcast email campaigns — author (`markdown` / `blocks` / `design_json`), estimate, launch, schedule. Idempotent create via `external_reference`. Requires the `email_marketing` feature.
   - name: Newsletters
@@ -680,7 +680,10 @@ paths:
       operationId: listEventAttendances
       tags: [Events]
       summary: List an event's registrations
-      description: Newest first. **Requires the `events` plan feature.**
+      description: |
+        Newest first. Each registration carries a `payment` block on a priced event
+        (`sale_id`, `sale_status`, `settlement_status`, `pay_url` — the newest live payment
+        link), or `null`. **Requires the `events` plan feature.**
       parameters:
         - name: status
           in: query
@@ -748,6 +751,11 @@ paths:
         supplying `acquisition.attendance_id` yourself is a 400, because this call is the
         link.
 
+        On an event with `collect_payment_on_registration`, a NEW registration records a
+        sale of the event's product and sends the contact a payment link — there is no
+        per-call opt-out. The `payment` block (`sale_id`, `sale_status`,
+        `settlement_status`, `pay_url`) is `null` for a registration that carries no sale.
+
         **Requires the `events` plan feature.**
       requestBody:
         required: true
@@ -803,7 +811,8 @@ paths:
       description: |
         The same chokepoint as the POST — marking someone `attended` or `no_show` here
         fires exactly what marking them in the app fires, and the same event-state
-        refusals apply. **Requires the `events` plan feature.**
+        refusals apply. Moving someone back to `registered` on a priced event charges like
+        a new registration. **Requires the `events` plan feature.**
       requestBody:
         required: true
         content:
@@ -896,7 +905,10 @@ paths:
         When identifiers resolve to different current contacts whose identifiers are compatible, POST
         can merge them automatically and update the surviving contact. Conflicting or historical split
         matches require in-app review and return 409 CONTACT_MERGE_REQUIRED. Non-identity fields are
-        held for resolution. Use the id returned by the API.
+        held for resolution. Use the id returned by the API. Once a person resolves the conflict
+        in the app with "Keep separate" and picks the contact the submission belongs to, a retry
+        of the same submission is applied to that contact (201, duplicate true) without moving
+        any submitted identifier onto it.
 
 
         Use acquisition for a genuine submission, including for a returning contact. Reuse
@@ -1031,6 +1043,9 @@ paths:
             the history-aware check, previously belonged) to another contact. The write is
             not applied; a merge request is opened and the held fields apply when it is
             resolved (merge or dismiss). The response includes `merge_request_id`.
+            Or `error_code: "CONTACT_ANONYMISED"` — the contact was anonymised; its profile
+            can no longer be changed (only `owner_user_id`, `tags` and `groups` are still
+            accepted).
           content:
             application/json:
               schema:
@@ -3827,7 +3842,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/DomainError"
         "503":
-          description: "`workspace_paused` — workspace email sending is paused by deliverability protection; resolve in the app."
+          description: |
+            `workspace_paused` — workspace email sending is paused by deliverability
+            protection; resolve in the app. `sending_paused` — the email provider paused
+            sending for the workspace for reputation reasons; later calls answer
+            `workspace_paused` until it is lifted.
           content:
             application/json:
               schema:
@@ -4009,6 +4028,8 @@ paths:
         linkage with its verification status — prefer profiles with `verified: true`
         when creating campaigns (see the schema). DKIM/DNS material is never returned.
         Profiles are managed in-app and are not writable through the public API.
+        Not plan-gated: every workspace can list its sender profiles (they are also
+        what `POST /v1/emails` sends from), so only plan-wide API access is needed.
       parameters:
         - $ref: "#/components/parameters/ClampedLimitParam"
         - $ref: "#/components/parameters/ClampedOffsetParam"
@@ -4036,8 +4057,6 @@ paths:
                 $ref: "#/components/schemas/FrameworkError"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/FeatureNotIncluded"
         "429":
           $ref: "#/components/responses/TooManyRequests"
 
@@ -5316,7 +5335,9 @@ paths:
       operationId: listBookings
       tags: [Bookings]
       summary: List bookings
-      description: All filters optional and combined with AND. Malformed values → 400.
+      description: |
+        All filters optional and combined with AND. Malformed values → 400. A blank
+        `limit` or `offset` (`?limit=`) means the default, not `0`.
       parameters:
         - name: status
           in: query
@@ -5426,7 +5447,9 @@ paths:
             `error_code: "SLOT_TAKEN"` — the selected time is no longer available (taken
             concurrently, host pool exhausted, pinned host busy); **never forceable** —
             re-fetch slots and pick another time. Or `error_code: "CONTACT_MERGE_REQUIRED"`
-            — the invitee's phone and email resolve to two different existing contacts.
+            — the invitee's phone and email resolve to two different existing contacts. Or
+            `error_code: "CONTACT_ANONYMISED"` — `contact_id` names a contact that was
+            anonymised; no new booking can be made for them.
           content:
             application/json:
               schema:
@@ -6886,10 +6909,19 @@ components:
             - "null"
           minimum: 1
           maximum: 1000000
-          description: Seat cap in units sold; null means uncapped.
+          description: Seat cap in occupied seats (`units_taken`); null means uncapped.
         is_archived:
           type: boolean
           default: false
+        dynamic_pricing:
+          type: boolean
+          default: true
+          description: Allow sales in this cycle to override the cycle's price. `false` fixes the price.
+        rearmed_fires:
+          type: integer
+          description: >-
+            Only on an update sent with `rearm_date_triggers: true` — how many already-fired
+            date reminders were reset (`0` = nothing to fire again).
         id:
           type: string
           format: uuid
@@ -6909,6 +6941,9 @@ components:
           type: integer
         units_taken:
           type: number
+          description: >-
+            Seats currently occupied — the units of every active place in the cycle (a
+            cancelled sale or ended access frees its seats). Compare with `capacity`.
       additionalProperties: true
     ProductCycleCreate:
       type: object
@@ -6957,17 +6992,31 @@ components:
           minimum: 0
           maximum: 1000000000
           multipleOf: 0.01
-          description: Workspace-currency cycle price override; null uses product price.
+          description: >-
+            Workspace-currency cycle price override; null uses product price. On a product
+            with `dynamic_pricing: false`, a price different from the product's is refused
+            with 400 `PRODUCT_PRICE_LOCKED`.
         capacity:
           type:
             - integer
             - "null"
           minimum: 1
           maximum: 1000000
-          description: Seat cap in units sold; null means uncapped.
+          description: Seat cap in occupied seats (`units_taken`); null means uncapped.
         is_archived:
           type: boolean
           default: false
+        dynamic_pricing:
+          type: boolean
+          default: true
+          description: Allow sales in this cycle to override the cycle's price. `false` fixes the price.
+        rearm_date_triggers:
+          type: boolean
+          default: false
+          description: >-
+            When this call CHANGES `starts_on` or `ends_on` and date reminders already fired
+            for the cycle, `true` fires them again for the new date (only the reminders
+            anchored on the changed date). The response then carries `rearmed_fires`.
       required:
         - name
       additionalProperties: false
@@ -7018,17 +7067,31 @@ components:
           minimum: 0
           maximum: 1000000000
           multipleOf: 0.01
-          description: Workspace-currency cycle price override; null uses product price.
+          description: >-
+            Workspace-currency cycle price override; null uses product price. On a product
+            with `dynamic_pricing: false`, a price different from the product's is refused
+            with 400 `PRODUCT_PRICE_LOCKED`.
         capacity:
           type:
             - integer
             - "null"
           minimum: 1
           maximum: 1000000
-          description: Seat cap in units sold; null means uncapped.
+          description: Seat cap in occupied seats (`units_taken`); null means uncapped.
         is_archived:
           type: boolean
           default: false
+        dynamic_pricing:
+          type: boolean
+          default: true
+          description: Allow sales in this cycle to override the cycle's price. `false` fixes the price.
+        rearm_date_triggers:
+          type: boolean
+          default: false
+          description: >-
+            When this call CHANGES `starts_on` or `ends_on` and date reminders already fired
+            for the cycle, `true` fires them again for the new date (only the reminders
+            anchored on the changed date). The response then carries `rearmed_fires`.
       additionalProperties: false
     ContactCreate:
       type: object
@@ -8051,6 +8114,11 @@ components:
               type: string
         suppress_event_automations:
           type: boolean
+        collect_payment_on_registration:
+          type: boolean
+          description: >-
+            Priced-event opt-in: a new registration records a sale of the event's product
+            and sends the contact a payment link. See `AttendanceWrite`.
         archived_at:
           type: [string, "null"]
           format: date-time
@@ -8127,6 +8195,17 @@ components:
             (400 `event_type_mismatch`).
         suppress_event_automations:
           type: boolean
+        collect_payment_on_registration:
+          type: boolean
+          default: false
+          description: >-
+            Priced-event opt-in: every NEW registration — in the app's registration
+            dialogs, by an automation, or through `POST /v1/events/{id}/attendances` —
+            records a sale of the event's product (at the cycle's price when the cycle has
+            one) and sends the contact a payment link. Applies only to a priced product
+            that does not already grant attendance on sale, on a workspace with Sales and a
+            connected payment provider; otherwise registrations carry no sale. Zoom-synced
+            and imported registrations never charge.
     EventUpsertResult:
       allOf:
         - $ref: "#/components/schemas/Event"
@@ -8177,6 +8256,12 @@ components:
         join_url:
           type: [string, "null"]
           description: The attendee's personal join link, from Zoom or supplied by the caller.
+        payment_sale_id:
+          type: [string, "null"]
+          format: uuid
+          description: The sale this registration was charged through on a priced event, or `null`.
+        payment:
+          $ref: "#/components/schemas/AttendancePayment"
         created_at:
           type: string
           format: date-time
@@ -8184,6 +8269,28 @@ components:
           type: string
           format: date-time
       additionalProperties: true
+    AttendancePayment:
+      type: [object, "null"]
+      title: Registration payment
+      description: >-
+        The registration's payment on a priced event (`collect_payment_on_registration`),
+        or `null` when the registration carries no sale.
+      required: [sale_id, sale_status, settlement_status, pay_url]
+      properties:
+        sale_id:
+          type: string
+          format: uuid
+        sale_status:
+          type: [string, "null"]
+          enum: [active, partially_cancelled, cancelled, null]
+        settlement_status:
+          type: [string, "null"]
+          enum: [untracked, unpaid, partially_paid, paid, partially_refunded, refunded, null]
+        pay_url:
+          type: [string, "null"]
+          description: >-
+            The newest payment link that can still be paid; `null` when none is live
+            (nothing left to collect, or the link expired).
     AttendanceWrite:
       type: object
       title: Registration payload
@@ -8198,7 +8305,7 @@ components:
           description: >-
             Identity to upsert when you have no `contact_id` — resolved by phone, then
             email, then national ID, exactly like `POST /v1/contacts`. At least one
-            identifier is required.
+            identifier is required. Values must not contain NUL characters (400).
           additionalProperties: false
           properties:
             name:
@@ -9443,8 +9550,8 @@ components:
       title: Product
       description: |
         A row of the workspace product catalog, shared by deals and customer payments.
-        `price` `null` = dynamic pricing (a deal referencing the product needs an
-        explicit amount). `vat_mode`/`vat_rate` are one both-or-neither pair — `null`s
+        `price` `null` = no default price (a deal referencing the product needs an
+        explicit amount); `dynamic_pricing` says whether cycles and sales may override it. `vat_mode`/`vat_rate` are one both-or-neither pair — `null`s
         mean the workspace payments default applies at resolution time. Inactive
         products stay attached to existing deals/payments but cannot be attached to new
         ones.
@@ -9479,7 +9586,12 @@ components:
             - "null"
           description: |
             Default price in the workspace payment currency, as a JSON number. `null` =
-            dynamic pricing.
+            no default price.
+        dynamic_pricing:
+          type: boolean
+          description: |
+            `true` (default): cycle prices — and sales without a cycle — may override
+            `price`. `false` fixes the price.
         vat_mode:
           type:
             - string
@@ -9549,6 +9661,19 @@ components:
           type: boolean
           default: false
           description: Require a cycle on sales (400 CYCLE_REQUIRED). Deal cycles remain optional.
+        attendance_on_sale:
+          type: boolean
+          description: |
+            Read-only here (set in the app): a sale of this product registers the buyer
+            for the product's matching upcoming events.
+        recurring_sale_policy:
+          type: string
+          enum: [fill_one, per_period]
+          description: |
+            How a recurring payment plan for this product records sales: `fill_one`
+            (default) keeps paying into one sale until it is fully paid; `per_period`
+            opens a new sale for every billing period. A plan keeps the policy it started
+            with — a change applies to new plans only.
       additionalProperties: true
     ProductUpsertResult:
       title: Product upsert result
@@ -9607,8 +9732,16 @@ components:
             - "null"
           minimum: 0
           description: |
-            Default price in the workspace payment currency. `null` = dynamic pricing
+            Default price in the workspace payment currency. `null` = no default price
             (deals fall back to an explicit amount).
+        dynamic_pricing:
+          type: boolean
+          default: true
+          description: |
+            `false` fixes the price: a deal without an amount defaults to `price` even
+            when its cycle has its own price, a different cycle price is refused with 400
+            `PRODUCT_PRICE_LOCKED`, and a sale at a different unit amount with 400
+            `SALE_PRICE_LOCKED`.
         vat_mode:
           type:
             - string
@@ -9671,6 +9804,14 @@ components:
           type: boolean
           default: false
           description: Require a cycle on sales (400 CYCLE_REQUIRED). Deal cycles remain optional.
+        recurring_sale_policy:
+          type: string
+          enum: [fill_one, per_period]
+          description: |
+            How a recurring payment plan for this product records sales: `fill_one`
+            (default) keeps paying into one sale until it is fully paid; `per_period`
+            opens a new sale for every billing period. A plan keeps the policy it started
+            with — a change applies to new plans only.
     Payment:
       type: object
       title: Payment (header)
@@ -13271,7 +13412,10 @@ components:
           format: date-time
         cancelled_by:
           type: [string, "null"]
-          description: The docs do not document the value type (user id vs role label).
+          enum: [invitee, host, system, null]
+          description: >-
+            Who cancelled. `system` with `cancellation_reason: "deposit_unpaid"` is a
+            booking released because its deposit hold expired unpaid.
         cancellation_reason:
           type: [string, "null"]
         rescheduled_at:
@@ -13282,6 +13426,8 @@ components:
           format: date-time
         reschedule_count:
           type: integer
+        deposit:
+          $ref: "#/components/schemas/BookingDeposit"
         created_at:
           type: string
           format: date-time
@@ -13289,6 +13435,37 @@ components:
           type: string
           format: date-time
       additionalProperties: true
+    BookingDeposit:
+      type: object
+      title: Booking deposit
+      description: |
+        Always present. A meeting type can ask public-page and website-embed invitees for a
+        deposit (or the full price). A booking awaiting its deposit is still `confirmed`.
+        When a hold's deadline passes unpaid, the booking is cancelled with
+        `cancelled_by: "system"` and `cancellation_reason: "deposit_unpaid"`. Bookings
+        created through the API never take a deposit (`state: "none"`).
+      required: [state, amount, hold_until, sale_id]
+      properties:
+        state:
+          type: string
+          enum: [none, awaiting, paid, released]
+          description: >-
+            `none` — no deposit was asked; `awaiting` — asked, not yet paid; `paid`;
+            `released` — the booking was cancelled before it was paid. Only moves forward:
+            a refund never re-opens a paid deposit.
+        amount:
+          type: [number, "null"]
+          description: The amount that counts as paid, fixed at booking, in the workspace currency.
+        hold_until:
+          type: [string, "null"]
+          format: date-time
+          description: >-
+            The payment deadline of a meeting type that holds the slot until paid; `null`
+            when the booking stays confirmed whether or not it is paid.
+        sale_id:
+          type: [string, "null"]
+          format: uuid
+          description: The sale recording the deposit.
     BookingCreateResult:
       title: Booking create result
       description: |

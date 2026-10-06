@@ -64,7 +64,7 @@ A workspace whose plan lacks the feature receives `403 Forbidden` on every call 
 
 The identifier after `feature:` is the lowercase plan-feature id — `deals`, `payments`, `workspace_payments`, `orders`, `campaigns`, `booking`, `email_marketing`, or `newsletters` — not the product display name. Key on `error_code: "FEATURE_NOT_INCLUDED_IN_PLAN"`, not on the message text.
 
-All other resources — contacts (except the documents sub-route above), notes, tags, contact groups, products, templates, transactional emails, and webhook endpoints — require only plan-wide API access.
+All other resources — contacts (except the documents sub-route above), notes, tags, contact groups, products, templates, transactional emails, sender profiles, and webhook endpoints — require only plan-wide API access.
 
 ## Authentication
 

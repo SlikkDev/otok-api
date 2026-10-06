@@ -421,6 +421,12 @@ class _ProductCreateRequired(TypedDict):
     name: str
 
 
+#: How a recurring payment plan for a product records sales: ``fill_one``
+#: keeps paying into one sale until it is fully paid; ``per_period`` opens a
+#: new sale for every billing period. A plan keeps the policy it started with.
+RecurringSalePolicy = Literal["fill_one", "per_period"]
+
+
 class ProductCreateParams(_ProductCreateRequired, total=False):
     """``POST /v1/products`` — create a product (idempotent upsert via
     ``external_id``: a repeat POST whose ``external_id`` matches an existing
@@ -434,9 +440,16 @@ class ProductCreateParams(_ProductCreateRequired, total=False):
     #: Per-workspace-unique idempotency key. Max 200 chars.
     external_id: Optional[str]
     description: Optional[str]
-    #: Default price in the workspace payment currency; ``None`` = dynamic
-    #: pricing (deals need an explicit amount).
+    #: Default price in the workspace payment currency; ``None`` = no default
+    #: price (deals need an explicit amount).
     price: Optional[float]
+    #: Default ``True``. ``False`` fixes the price: a different cycle price is
+    #: refused with 400 ``PRODUCT_PRICE_LOCKED``, a sale at a different unit
+    #: amount with 400 ``SALE_PRICE_LOCKED``.
+    dynamic_pricing: bool
+    #: How a recurring payment plan records sales (default ``fill_one``); a
+    #: change applies to new plans only.
+    recurring_sale_policy: RecurringSalePolicy
     #: Both-or-neither with ``vat_rate``; send both ``None`` to clear.
     vat_mode: Optional[PaymentVatMode]
     #: VAT percent (0–100, max 2 decimals); paired with ``vat_mode``.
@@ -461,6 +474,8 @@ class ProductUpdateParams(TypedDict, total=False):
     external_id: Optional[str]
     description: Optional[str]
     price: Optional[float]
+    dynamic_pricing: bool
+    recurring_sale_policy: RecurringSalePolicy
     vat_mode: Optional[PaymentVatMode]
     vat_rate: Optional[float]
     is_active: bool
@@ -486,6 +501,9 @@ class ProductListParams(TypedDict, total=False):
 
 
 #: Product record as returned by the API (open — servers may add fields).
+#: Carries ``dynamic_pricing``, ``recurring_sale_policy`` and the read-only
+#: ``attendance_on_sale`` (a sale registers the buyer for the product's
+#: matching upcoming events; set in the app).
 #: ``POST /v1/products`` responses additionally carry a top-level
 #: ``duplicate: bool`` — ``True`` when ``external_id`` matched an existing
 #: product that was updated instead (201 either way).
@@ -2304,8 +2322,28 @@ class BookingReassignParams(TypedDict, total=False):
 #: Booking record as returned by the API (open — servers may add fields).
 #: ``POST /v1/bookings`` responses additionally carry a top-level
 #: ``duplicate: bool`` — ``True`` when a double-submit of the same
-#: slot/invitee returned the original booking (201 either way).
+#: slot/invitee returned the original booking (201 either way). Every booking
+#: carries a ``deposit`` block — see :class:`BookingDeposit`.
 Booking = dict[str, Any]
+
+
+class BookingDeposit(TypedDict):
+    """A booking's ``deposit`` block. ``state`` only moves forward
+    (``none`` | ``awaiting`` → ``paid`` | ``released``); a booking awaiting
+    its deposit is still ``confirmed``. An unpaid hold that expires cancels
+    the booking with ``cancelled_by="system"`` and
+    ``cancellation_reason="deposit_unpaid"``. Bookings created through the
+    API never take a deposit (``none``).
+    """
+
+    state: Literal["none", "awaiting", "paid", "released"]
+    #: The amount that counts as paid, in the workspace currency.
+    amount: Optional[float]
+    #: Payment deadline of a hold-until-paid meeting type; None = confirmed
+    #: regardless.
+    hold_until: Optional[str]
+    #: The sale recording the deposit.
+    sale_id: Optional[str]
 MeetingType = dict[str, Any]
 
 SlotsParams = TypedDict(
@@ -2352,9 +2390,18 @@ class ProductCycleUpdateParams(TypedDict, total=False):
     ends_on: Optional[str]
     duration_unit: DurationUnit
     manual_status: Optional[CycleManualStatus]
+    #: On a product with ``dynamic_pricing=False``, a different price → 400
+    #: ``PRODUCT_PRICE_LOCKED``.
     price: Optional[float]
+    #: Default ``True``; ``False`` stops sales in this cycle from overriding
+    #: its price.
+    dynamic_pricing: bool
     capacity: Optional[int]
     is_archived: bool
+    #: When this call CHANGES ``starts_on``/``ends_on`` and date reminders
+    #: already fired, ``True`` fires them again for the new date; the response
+    #: then carries ``rearmed_fires``. Default ``False``.
+    rearm_date_triggers: bool
 
 
 class ProductCycleCreateParams(_ProductCycleCreateRequired, total=False):
@@ -2364,9 +2411,18 @@ class ProductCycleCreateParams(_ProductCycleCreateRequired, total=False):
     ends_on: Optional[str]
     duration_unit: DurationUnit
     manual_status: Optional[CycleManualStatus]
+    #: On a product with ``dynamic_pricing=False``, a different price → 400
+    #: ``PRODUCT_PRICE_LOCKED``.
     price: Optional[float]
+    #: Default ``True``; ``False`` stops sales in this cycle from overriding
+    #: its price.
+    dynamic_pricing: bool
     capacity: Optional[int]
     is_archived: bool
+    #: When this call CHANGES ``starts_on``/``ends_on`` and date reminders
+    #: already fired, ``True`` fires them again for the new date; the response
+    #: then carries ``rearmed_fires``. Default ``False``.
+    rearm_date_triggers: bool
 
 
 class ProductCycleListParams(TypedDict, total=False):
@@ -2376,6 +2432,9 @@ class ProductCycleListParams(TypedDict, total=False):
 
 
 #: Open response record; price may be a decimal string, number or None.
+#: ``units_taken`` counts the seats currently occupied (compare with
+#: ``capacity``); ``rearmed_fires`` appears only on an update sent with
+#: ``rearm_date_triggers=True``.
 ProductCycle = dict[str, Any]
 SavedReport = dict[str, Any]
 ReportRunResult = dict[str, Any]
@@ -2485,6 +2544,10 @@ class EventUpsertParams(_EventUpsertRequired, total=False):
     #: name the same saved event (400 ``event_type_mismatch``).
     event_type_name: str
     suppress_event_automations: bool
+    #: Priced-event opt-in (default False): every new registration records a
+    #: sale of the event's product and sends the contact a payment link. There
+    #: is no per-call opt-out on registrations.
+    collect_payment_on_registration: bool
 
 
 class EventListParams(TypedDict, total=False):
@@ -2512,7 +2575,28 @@ AttendanceStatusInput = Literal[
 ]
 
 #: Registration record as returned by the API. Open — servers may add fields.
+#: On a priced event it carries ``payment_sale_id`` and a ``payment`` block
+#: (see :class:`AttendancePayment`), ``None`` when it carries no sale.
 Attendance = dict[str, Any]
+
+
+class AttendancePayment(TypedDict):
+    """A priced-event registration's ``payment`` block."""
+
+    sale_id: str
+    sale_status: Optional[Literal["active", "partially_cancelled", "cancelled"]]
+    settlement_status: Optional[
+        Literal[
+            "untracked",
+            "unpaid",
+            "partially_paid",
+            "paid",
+            "partially_refunded",
+            "refunded",
+        ]
+    ]
+    #: The newest payment link that can still be paid; None when none is live.
+    pay_url: Optional[str]
 
 
 class AttendeeContact(TypedDict, total=False):

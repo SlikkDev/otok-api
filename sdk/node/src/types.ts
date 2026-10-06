@@ -538,7 +538,7 @@ export interface DealCreateResult extends Deal {
 
 /**
  * A row of the workspace product catalog, shared by deals and customer
- * payments. `price` null = dynamic pricing. `vat_mode`/`vat_rate` are one
+ * payments. `price` null = no default price. `vat_mode`/`vat_rate` are one
  * both-or-neither pair (`null`s = the workspace payments default applies).
  */
 export interface Product {
@@ -550,8 +550,13 @@ export interface Product {
   /** Per-workspace-unique id in your system — the POST idempotency key. */
   external_id: string | null;
   description: string | null;
-  /** JSON number in the workspace payment currency; null = dynamic pricing. */
+  /** JSON number in the workspace payment currency; null = no default price. */
   price: number | null;
+  /**
+   * `true` (default): cycle prices — and sales without a cycle — may override
+   * `price`. `false` fixes the price.
+   */
+  dynamic_pricing?: boolean;
   vat_mode: PaymentVatMode | null;
   vat_rate: number | null;
   is_active: boolean;
@@ -564,8 +569,18 @@ export interface Product {
   manual_status?: "archived" | "cancelled" | null;
   enforce_cycle_capacity?: boolean;
   require_cycle?: boolean;
+  /** Read-only here (set in the app): a sale registers the buyer for the product's matching upcoming events. */
+  attendance_on_sale?: boolean;
+  recurring_sale_policy?: RecurringSalePolicy;
   [key: string]: unknown;
 }
+
+/**
+ * How a recurring payment plan for a product records sales: `fill_one` keeps
+ * paying into one sale until it is fully paid; `per_period` opens a new sale
+ * for every billing period. A plan keeps the policy it started with.
+ */
+export type RecurringSalePolicy = "fill_one" | "per_period";
 
 /**
  * POST /v1/products — create a product (idempotent upsert via `external_id`).
@@ -585,8 +600,16 @@ export interface ProductCreateParams {
   /** Per-workspace-unique idempotency key. Max 200 chars. */
   external_id?: string | null;
   description?: string | null;
-  /** Default price; null = dynamic pricing (deals need an explicit amount). */
+  /** Default price; null = no default price (deals need an explicit amount). */
   price?: number | null;
+  /**
+   * Default true. `false` fixes the price: a different cycle price is refused
+   * with 400 `PRODUCT_PRICE_LOCKED`, a sale at a different unit amount with
+   * 400 `SALE_PRICE_LOCKED`.
+   */
+  dynamic_pricing?: boolean;
+  /** Default `fill_one`; a change applies to new recurring plans only. */
+  recurring_sale_policy?: RecurringSalePolicy;
   /** Both-or-neither with `vat_rate`; send both null to clear the override. */
   vat_mode?: PaymentVatMode | null;
   /** VAT percent (0–100, max 2 decimals); paired with `vat_mode`. */
@@ -2714,8 +2737,27 @@ export interface Booking {
   contact_id: string | null;
   status: BookingStatus;
   start_at: string;
+  /** `invitee`, `host` or `system` (`system` + reason `deposit_unpaid` = an unpaid deposit hold was released). */
+  cancelled_by?: "invitee" | "host" | "system" | null;
+  /** Always present on current responses. */
+  deposit?: BookingDeposit;
   created_at: string;
   [key: string]: unknown;
+}
+
+/**
+ * A booking's deposit. `state` only moves forward (`none` | `awaiting` →
+ * `paid` | `released`); a booking awaiting its deposit is still `confirmed`.
+ * Bookings created through the API never take a deposit (`none`).
+ */
+export interface BookingDeposit {
+  state: "none" | "awaiting" | "paid" | "released";
+  /** The amount that counts as paid, in the workspace currency. */
+  amount: number | null;
+  /** Payment deadline of a hold-until-paid meeting type; null = confirmed regardless. */
+  hold_until: string | null;
+  /** The sale recording the deposit. */
+  sale_id: string | null;
 }
 
 /**
@@ -2777,9 +2819,18 @@ export interface ProductCycleCreateParams {
   duration_unit?: DurationUnit;
   /** Dated cycles accept only cancelled or null (automatic). */
   manual_status?: CycleManualStatus | null;
+  /** On a product with `dynamic_pricing: false`, a different price → 400 `PRODUCT_PRICE_LOCKED`. */
   price?: number | null;
+  /** Default true; `false` stops sales in this cycle from overriding its price. */
+  dynamic_pricing?: boolean;
   capacity?: number | null;
   is_archived?: boolean;
+  /**
+   * When this call CHANGES `starts_on`/`ends_on` and date reminders already
+   * fired, `true` fires them again for the new date; the response then
+   * carries `rearmed_fires`. Default false.
+   */
+  rearm_date_triggers?: boolean;
 }
 export type ProductCycleUpdateParams = Partial<ProductCycleCreateParams>;
 export interface ProductCycleListParams {
@@ -2799,10 +2850,14 @@ export interface ProductCycle {
   manual_status: CycleManualStatus | null;
   /** Decimal amount; may be serialized as a string. */
   price: string | number | null;
+  dynamic_pricing?: boolean;
   capacity: number | null;
   is_archived: boolean;
   sales_count: number;
+  /** Seats currently occupied (units of every active place); compare with `capacity`. */
   units_taken: number;
+  /** Only on an update sent with `rearm_date_triggers: true`: date reminders reset. */
+  rearmed_fires?: number;
   created_at: string;
   updated_at: string;
   [key: string]: unknown;
@@ -2977,6 +3032,8 @@ export interface OtokEvent {
    */
   event_type: { id: string; name: string | null } | null;
   suppress_event_automations: boolean;
+  /** Priced-event opt-in: new registrations record a sale and send a payment link. */
+  collect_payment_on_registration?: boolean;
   archived_at: string | null;
   created_at: string;
   [key: string]: unknown;
@@ -3014,6 +3071,12 @@ export interface OtokEventUpsertParams {
    */
   event_type_name?: string;
   suppress_event_automations?: boolean;
+  /**
+   * Priced-event opt-in (default false): every new registration records a
+   * sale of the event's product and sends the contact a payment link. There
+   * is no per-call opt-out on registrations.
+   */
+  collect_payment_on_registration?: boolean;
 }
 
 export interface OtokEventUpsertResult extends OtokEvent {
@@ -3055,9 +3118,29 @@ export interface Attendance {
   unregistered_at: string | null;
   /** The attendee's personal join link, from Zoom or supplied by you. */
   join_url: string | null;
+  /** The sale this registration was charged through on a priced event. */
+  payment_sale_id?: string | null;
+  /** The registration's payment on a priced event; null when it carries no sale. */
+  payment?: AttendancePayment | null;
   created_at: string;
   updated_at: string | null;
   [key: string]: unknown;
+}
+
+/** A priced-event registration's payment block. */
+export interface AttendancePayment {
+  sale_id: string;
+  sale_status: "active" | "partially_cancelled" | "cancelled" | null;
+  settlement_status:
+    | "untracked"
+    | "unpaid"
+    | "partially_paid"
+    | "paid"
+    | "partially_refunded"
+    | "refunded"
+    | null;
+  /** The newest payment link that can still be paid; null when none is live. */
+  pay_url: string | null;
 }
 
 /** Identity to upsert when you have no `contact_id`. At least one identifier is required. */

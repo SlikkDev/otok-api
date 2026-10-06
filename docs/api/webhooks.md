@@ -477,7 +477,7 @@ All four booking events carry the same `data` fields (full field set, explicit `
 | `data.host_timezone` / `data.invitee_timezone` | IANA timezones — the host's schedule tz and the tz the invitee booked in |
 | `data.status` | Booking status at event time (e.g. `confirmed`, `cancelled`). Tolerate unknown values |
 | `data.location_type` | The meeting type's location kind. Tolerate unknown values |
-| `data.cancelled_by` / `data.cancel_reason` | `booking.cancelled` — who cancelled (e.g. `host`, `invitee`) and why; `null` elsewhere |
+| `data.cancelled_by` / `data.cancel_reason` | `booking.cancelled` — who cancelled (`host`, `invitee` or `system`) and why; `null` elsewhere. A booking released because its [deposit](bookings.md#deposits) went unpaid arrives with `cancelled_by: "system"` and `cancel_reason: "deposit_unpaid"` |
 | `data.source` | How the booking was created — `public_page`, `manual`, `api`, or `embed`. Passed through verbatim: **tolerate unknown values**, new sources may appear without notice |
 
 ### Event-attendance event `data`
