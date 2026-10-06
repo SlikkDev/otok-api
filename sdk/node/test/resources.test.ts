@@ -12,6 +12,9 @@ import {
   MESSAGE_WEBHOOK_EVENT_TYPES,
   ORDER_WEBHOOK_EVENT_TYPES,
   PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+  PAYMENT_WEBHOOK_EVENT_TYPES,
+  SALE_WEBHOOK_EVENT_TYPES,
+  TICKET_WEBHOOK_EVENT_TYPES,
   type WebhookEventType,
 } from "../src/types";
 
@@ -75,6 +78,11 @@ describe("webhook event type constants", () => {
     }
   });
 
+  it("payment.refunded is registrable but never defaulted", () => {
+    expect(PAYMENT_WEBHOOK_EVENT_TYPES).toEqual(["payment.refunded"]);
+    expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain("payment.refunded");
+  });
+
   it("contact, message, deal, booking, attendance, and form families are registrable but never defaulted", () => {
     expect(CONTACT_WEBHOOK_EVENT_TYPES).toEqual([
       "contact.created",
@@ -109,6 +117,32 @@ describe("webhook event type constants", () => {
       ...EVENT_ATTENDANCE_WEBHOOK_EVENT_TYPES,
       ...FORM_WEBHOOK_EVENT_TYPES,
     ]) {
+      expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
+    }
+  });
+
+  it("ticket event types are registrable but never defaulted", () => {
+    expect(TICKET_WEBHOOK_EVENT_TYPES).toEqual([
+      "ticket.created",
+      "ticket.message_created",
+      "ticket.status_changed",
+      "ticket.assigned",
+    ]);
+    for (const eventType of TICKET_WEBHOOK_EVENT_TYPES) {
+      expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
+    }
+    const listed: WebhookEventType[] = [...TICKET_WEBHOOK_EVENT_TYPES];
+    expect(listed).toHaveLength(4);
+  });
+
+  it("sale event types are registrable but never defaulted", () => {
+    expect(SALE_WEBHOOK_EVENT_TYPES).toEqual([
+      "sale.recorded",
+      "sale.cancelled",
+      "sale.paid",
+      "sale.refunded",
+    ]);
+    for (const eventType of SALE_WEBHOOK_EVENT_TYPES) {
       expect(DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES).not.toContain(eventType);
     }
   });
@@ -886,27 +920,41 @@ describe("payment requests", () => {
     ]);
   });
 
-  it("create returns pay_url plus checkout diagnostics (no duplicate marker — not idempotent)", async () => {
-    // There is no idempotency key on this resource: a repeat POST mints a
-    // second payable link, so no `duplicate` field can exist.
-    const fetchMock = vi.fn(async () =>
-      json(201, {
+  it("create returns pay_url, checkout diagnostics and the duplicate marker", async () => {
+    // A replay of the same idempotency_key returns the original row with
+    // duplicate: true.
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(JSON.parse(init.body)).toEqual({
+        contact_id: "c-1",
+        amount: 250,
+        product_id: "prod-1",
+        sale_id: "sale-1",
+        idempotency_key: "pr-key-1",
+      });
+      return json(201, {
         id: "pr-1",
         status: "pending",
         charge_kind: "checkout",
         amount: 250,
         currency: "ILS",
+        sale_id: "sale-1",
+        channel: null,
         pay_url: "https://app.otok.io/pay/pr_tok",
         checkout_url: "https://provider.example/checkout/1",
         checkout_error: null,
-      }),
-    );
+        duplicate: true,
+      });
+    });
     const otok = makeClient(fetchMock as any);
     const request = await otok.paymentRequests.create({
       contact_id: "c-1",
       amount: 250,
+      product_id: "prod-1",
+      sale_id: "sale-1",
+      idempotency_key: "pr-key-1",
     });
-    expect("duplicate" in request).toBe(false);
+    expect(request.duplicate).toBe(true);
+    expect(request.sale_id).toBe("sale-1");
     expect(request.pay_url).toBe("https://app.otok.io/pay/pr_tok");
     expect(request.checkout_url).toBe("https://provider.example/checkout/1");
     expect(request.checkout_error).toBeNull();
@@ -959,6 +1007,81 @@ describe("payment requests", () => {
     expect(err.code).toBe("TOKEN_REQUEST_NOT_CANCELLABLE");
   });
 
+  it("sendLink, issueDocument and refund hit their routes", async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const responses = [
+      json(201, { sent: true, channel: "whatsapp", to: "0501234567", message_id: "wamid.1" }),
+      json(201, { id: "pr-1", status: "paid", document: { number: "1001" } }),
+      json(201, {
+        payment: { id: "pay-1" },
+        entry: { id: "e-2", kind: "refund", amount: -100 },
+        outcome: "gateway_refunded",
+        duplicate: false,
+        payment_request_id: "pr-1",
+      }),
+    ];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      calls.push({
+        method: init.method,
+        path: new URL(String(url)).pathname,
+        body: init.body === undefined ? undefined : JSON.parse(init.body),
+      });
+      return responses.shift()!;
+    });
+    const otok = makeClient(fetchMock as any);
+
+    const sent = await otok.paymentRequests.sendLink("pr-1", { channel: "whatsapp" });
+    expect(sent.to).toBe("0501234567");
+    const doc = await otok.paymentRequests.issueDocument("pr-1");
+    expect(doc.document).toEqual({ number: "1001" });
+    const refund = await otok.paymentRequests.refund("pr-1", {
+      reason: "requested_by_customer",
+      mode: "auto",
+      amount: 100,
+      idempotency_key: "pr-refund-1",
+    });
+    expect(refund.outcome).toBe("gateway_refunded");
+    expect(refund.payment_request_id).toBe("pr-1");
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/payment-requests/pr-1/send-link",
+        body: { channel: "whatsapp" },
+      },
+      { method: "POST", path: "/api/v1/payment-requests/pr-1/document", body: undefined },
+      {
+        method: "POST",
+        path: "/api/v1/payment-requests/pr-1/refund",
+        body: {
+          reason: "requested_by_customer",
+          mode: "auto",
+          amount: 100,
+          idempotency_key: "pr-refund-1",
+        },
+      },
+    ]);
+  });
+
+  it("sendLink surfaces LINK_ALREADY_SENT", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(409, {
+        statusCode: 409,
+        error: "Conflict",
+        error_code: "LINK_ALREADY_SENT",
+        sent_at: "2026-07-15T09:00:00.000Z",
+        message: "The pay-link was already sent on this channel",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.paymentRequests
+      .sendLink("pr-1", { channel: "email" })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("LINK_ALREADY_SENT");
+  });
+
   it("feature-gate 403 embeds the workspace_payments feature id", async () => {
     // Pay-links are gated by `workspace_payments`, NOT the `payments`
     // ledger feature — the message embeds whichever id is missing.
@@ -974,6 +1097,140 @@ describe("payment requests", () => {
     expect(err).toBeInstanceOf(OtokApiError);
     expect(err.status).toBe(403);
     expect(err.code).toBe("FEATURE_NOT_INCLUDED_IN_PLAN");
+  });
+});
+
+describe("payment refunds", () => {
+  it("payments.refund sends reason + mode and returns the refund result", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(new URL(String(url)).pathname).toBe("/api/v1/payments/pay-1/refund");
+      expect(JSON.parse(init.body)).toEqual({
+        reason: "duplicate",
+        mode: "recorded_outside",
+        amount: 50,
+        idempotency_key: "refund-1",
+      });
+      return json(201, {
+        payment: { id: "pay-1", entries: [{ id: "e-1" }, { id: "e-2" }] },
+        entry: { id: "e-2", kind: "refund", amount: -50, recorded_outside: true },
+        outcome: "recorded_outside",
+        duplicate: false,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.payments.refund("pay-1", {
+      reason: "duplicate",
+      mode: "recorded_outside",
+      amount: 50,
+      idempotency_key: "refund-1",
+    });
+    expect(result.outcome).toBe("recorded_outside");
+    expect(result.entry?.recorded_outside).toBe(true);
+    expect(result.payment.entries).toHaveLength(2);
+  });
+
+  it("surfaces API_KEY_MONEY_OUT_DISABLED", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(403, {
+        statusCode: 403,
+        error: "Forbidden",
+        error_code: "API_KEY_MONEY_OUT_DISABLED",
+        message: "This API key is not allowed to move money out",
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.payments
+      .refund("pay-1", { reason: "other", mode: "auto" })
+      .catch((e) => e);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("API_KEY_MONEY_OUT_DISABLED");
+  });
+});
+
+describe("saved cards", () => {
+  it("lists a contact's payment methods", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(init.method).toBe("GET");
+      expect(new URL(String(url)).pathname).toBe("/api/v1/contacts/c-1/payment-methods");
+      return json(200, {
+        payment_methods: [
+          { id: "pm-1", provider: "cardcom", brand: "visa", last4: "4242", status: "active", isDefault: true },
+        ],
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.contacts.listPaymentMethods("c-1");
+    expect(result.payment_methods[0]!.last4).toBe("4242");
+    expect(result.payment_methods[0]!.isDefault).toBe(true);
+  });
+
+  it("charges a saved card — paid (200) and processing (202)", async () => {
+    const responses = [
+      json(200, { outcome: "paid", duplicate: false, payment_request: { id: "pr-9", status: "paid" } }),
+      json(202, { outcome: "processing", duplicate: true, payment_request_id: "pr-10" }),
+    ];
+    const bodies: unknown[] = [];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(new URL(String(url)).pathname).toBe("/api/v1/contacts/c-1/charges");
+      bodies.push(JSON.parse(init.body));
+      return responses.shift()!;
+    });
+    const otok = makeClient(fetchMock as any);
+
+    const paid = await otok.contacts.chargeSavedCard("c-1", {
+      idempotency_key: "charge-0001",
+      amount: 250,
+      method_selection: "most_recent",
+    });
+    expect(paid.outcome).toBe("paid");
+    if (paid.outcome === "paid") expect(paid.payment_request.id).toBe("pr-9");
+
+    const processing = await otok.contacts.chargeSavedCard("c-1", {
+      idempotency_key: "charge-0002",
+      amount: 100,
+    });
+    expect(processing.outcome).toBe("processing");
+    if (processing.outcome === "processing") {
+      expect(processing.payment_request_id).toBe("pr-10");
+      expect(processing.duplicate).toBe(true);
+    }
+    expect(bodies).toEqual([
+      { idempotency_key: "charge-0001", amount: 250, method_selection: "most_recent" },
+      { idempotency_key: "charge-0002", amount: 100 },
+    ]);
+  });
+
+  it("surfaces a decline and a missing capability as typed errors", async () => {
+    const responses = [
+      json(409, {
+        statusCode: 409,
+        error: "Conflict",
+        error_code: "TOKEN_CHARGE_DECLINED",
+        failure_reason: "Card declined",
+        payment_request_id: "pr-11",
+        message: "The card was declined",
+      }),
+      json(403, {
+        statusCode: 403,
+        error: "Forbidden",
+        error_code: "API_KEY_CHARGES_DISABLED",
+        message: "This API key is not allowed to charge saved cards",
+      }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    const otok = makeClient(fetchMock as any);
+
+    let err = await otok.contacts
+      .chargeSavedCard("c-1", { idempotency_key: "charge-0003", amount: 10 })
+      .catch((e) => e);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("TOKEN_CHARGE_DECLINED");
+
+    err = await otok.contacts
+      .chargeSavedCard("c-1", { idempotency_key: "charge-0004", amount: 10 })
+      .catch((e) => e);
+    expect(err.status).toBe(403);
+    expect(err.code).toBe("API_KEY_CHARGES_DISABLED");
   });
 });
 
@@ -1187,5 +1444,289 @@ describe("contact acquisitions", () => {
       kind: "api",
       limit: "20",
     });
+  });
+});
+
+describe("tickets", () => {
+  it("list serializes every documented filter", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { data: [], total: 0, limit: 50, offset: 0 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    await otok.tickets.list({
+      status: "open",
+      assignee: "unassigned",
+      category: "Access",
+      priority: "high",
+      source: "api",
+      external_reference: "helpdesk-88213",
+      created_from: "2026-09-01T00:00:00Z",
+      sort: "-created_at",
+      limit: 20,
+      offset: 40,
+    });
+    const [url] = fetchMock.mock.calls[0] as [any];
+    const parsed = new URL(String(url));
+    expect(parsed.pathname).toBe("/api/v1/tickets");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      status: "open",
+      assignee: "unassigned",
+      category: "Access",
+      priority: "high",
+      source: "api",
+      external_reference: "helpdesk-88213",
+      created_from: "2026-09-01T00:00:00Z",
+      sort: "-created_at",
+      limit: "20",
+      offset: "40",
+    });
+  });
+
+  it("iter pages at the ticket list cap of 200", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, { data: [{ id: "t-1" }], total: 1, limit: 200, offset: 0 }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const ids: string[] = [];
+    for await (const ticket of otok.tickets.iter({ status: "all", limit: 1000 })) {
+      ids.push(ticket.id);
+    }
+    expect(ids).toEqual(["t-1"]);
+    const parsed = new URL(String((fetchMock.mock.calls[0] as [any])[0]));
+    expect(parsed.searchParams.get("limit")).toBe("200");
+    expect(parsed.searchParams.get("status")).toBe("all");
+  });
+
+  it("get pages the conversation with messages_limit / messages_before", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(200, {
+        id: "t-1",
+        messages: [{ id: "m-2", side: "team", origin: "api" }],
+        messages_has_more: true,
+        messages_next_before: "m-2",
+        last_customer_email: null,
+      }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const ticket = await otok.tickets.get("t-1", { messages_limit: 1, messages_before: "m-3" });
+    expect(ticket.messages_has_more).toBe(true);
+    expect(ticket.messages_next_before).toBe("m-2");
+    const parsed = new URL(String((fetchMock.mock.calls[0] as [any])[0]));
+    expect(parsed.pathname).toBe("/api/v1/tickets/t-1");
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({
+      messages_limit: "1",
+      messages_before: "m-3",
+    });
+  });
+
+  it("create posts the inline contact and passes duplicate + the email outcome through", async () => {
+    const fetchMock = vi.fn(async (_url: any, init: any) => {
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        contact: { email: "jane@example.com", name: "Jane" },
+        subject: "Can't log in",
+        body: "Access denied after a reset.",
+        opened_by: "customer",
+        external_reference: "helpdesk-88213",
+      });
+      return json(201, {
+        id: "t-1",
+        status: "open",
+        duplicate: false,
+        customer_email_skipped: "no_verified_sender",
+        messages: [],
+        messages_has_more: false,
+        messages_next_before: null,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.tickets.create({
+      contact: { email: "jane@example.com", name: "Jane" },
+      subject: "Can't log in",
+      body: "Access denied after a reset.",
+      opened_by: "customer",
+      external_reference: "helpdesk-88213",
+    });
+    expect(result.duplicate).toBe(false);
+    expect(result.customer_email_skipped).toBe("no_verified_sender");
+    expect(String(fetchMock.mock.calls[0]![0])).toContain("/api/v1/tickets");
+  });
+
+  it("reply posts to the replies route with its idempotency key", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toContain("/api/v1/tickets/t-1/replies");
+      expect(init.method).toBe("POST");
+      expect(JSON.parse(init.body)).toEqual({
+        body: "Your access is back.",
+        author_email: "dana@example.com",
+        idempotency_key: "reply-1",
+      });
+      return json(200, {
+        message: { id: "m-9", side: "team", origin: "api" },
+        ticket: { id: "t-1", status: "pending" },
+        duplicate: true,
+      });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.tickets.reply("t-1", {
+      body: "Your access is back.",
+      author_email: "dana@example.com",
+      idempotency_key: "reply-1",
+    });
+    expect(result.duplicate).toBe(true);
+    expect(result.message.origin).toBe("api");
+    expect(result.ticket.status).toBe("pending");
+  });
+
+  it("update patches triage fields, null unassigning", async () => {
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toContain("/api/v1/tickets/t-1");
+      expect(init.method).toBe("PATCH");
+      expect(JSON.parse(init.body)).toEqual({
+        status: "resolved",
+        category: null,
+        assigned_user_id: null,
+      });
+      return json(200, { id: "t-1", status: "resolved", customer_email_skipped: "capped" });
+    });
+    const otok = makeClient(fetchMock as any);
+    const result = await otok.tickets.update("t-1", {
+      status: "resolved",
+      category: null,
+      assigned_user_id: null,
+    });
+    expect(result.status).toBe("resolved");
+    expect(result.customer_email_skipped).toBe("capped");
+  });
+
+  it("surfaces the envelope code on a refusal", async () => {
+    const fetchMock = vi.fn(async () =>
+      json(409, { error: { code: "ticket_is_spam", message: "A ticket in spam takes no replies" } }),
+    );
+    const otok = makeClient(fetchMock as any);
+    const err = await otok.tickets.reply("t-1", { body: "Hi" }).catch((e) => e);
+    expect(err).toBeInstanceOf(OtokApiError);
+    expect(err.status).toBe(409);
+    expect(err.code).toBe("ticket_is_spam");
+  });
+});
+
+describe("sales", () => {
+  it("list serializes every documented filter", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      const parsed = new URL(String(url));
+      expect(parsed.pathname).toBe("/api/v1/sales");
+      expect(Object.fromEntries(parsed.searchParams)).toEqual({
+        contact_id: "c-1",
+        owner_user_id: "u-1",
+        status: "active",
+        settlement_status: "unpaid",
+        external_reference: "crm-invoice-4471",
+        limit: "10",
+        offset: "20",
+      });
+      return json(200, { data: [], total: 0, limit: 10, offset: 20 });
+    });
+    const otok = makeClient(fetchMock as any);
+    await otok.sales.list({
+      contact_id: "c-1",
+      owner_user_id: "u-1",
+      status: "active",
+      settlement_status: "unpaid",
+      external_reference: "crm-invoice-4471",
+      limit: 10,
+      offset: 20,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("iter pages with the deals/payments cap of 100", async () => {
+    const fetchMock = vi.fn(async (url: any) => {
+      const parsed = new URL(String(url));
+      expect(parsed.searchParams.get("limit")).toBe("100");
+      return json(200, { data: [{ id: "s-1" }], total: 1, limit: 100, offset: 0 });
+    });
+    const otok = makeClient(fetchMock as any);
+    const ids: string[] = [];
+    for await (const sale of otok.sales.iter()) ids.push(sale.id);
+    expect(ids).toEqual(["s-1"]);
+  });
+
+  it("issues the documented verb + path + body for each method", async () => {
+    const calls: Array<{ method: string; path: string; body: unknown }> = [];
+    const fetchMock = vi.fn(async (url: any, init: any) => {
+      calls.push({
+        method: init.method,
+        path: new URL(String(url)).pathname,
+        body: init.body === undefined ? undefined : JSON.parse(init.body),
+      });
+      return json(200, { id: "s-1" });
+    });
+    const otok = makeClient(fetchMock as any);
+
+    await otok.sales.create({
+      contact_id: "c-1",
+      items: [{ product_id: "p-1", quantity: 2 }],
+      currency: "ILS",
+      external_reference: "crm-invoice-4471",
+    });
+    await otok.sales.get("s-1");
+    await otok.sales.update("s-1", { note: null });
+    await otok.sales.cancel("s-1", {
+      reason: "customer_request",
+      money: { mode: "refund" },
+    });
+    await otok.sales.reinstate("s-1");
+    await otok.sales.refund("s-1", {
+      reason: "requested_by_customer",
+      mode: "auto",
+      amount: 100,
+      idempotency_key: "crm-refund-1",
+    });
+    await otok.sales.setOwner("s-1", null);
+    await otok.sales.linkDeal("s-1", "d-1");
+    await otok.sales.allocate("s-1", { payment_entry_id: "e-1" });
+    await otok.sales.unallocate("s-1", "a-1");
+    await otok.sales.delete("s-1");
+
+    expect(calls).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/sales",
+        body: {
+          contact_id: "c-1",
+          items: [{ product_id: "p-1", quantity: 2 }],
+          currency: "ILS",
+          external_reference: "crm-invoice-4471",
+        },
+      },
+      { method: "GET", path: "/api/v1/sales/s-1", body: undefined },
+      { method: "PATCH", path: "/api/v1/sales/s-1", body: { note: null } },
+      {
+        method: "POST",
+        path: "/api/v1/sales/s-1/cancel",
+        body: { reason: "customer_request", money: { mode: "refund" } },
+      },
+      { method: "POST", path: "/api/v1/sales/s-1/reinstate", body: {} },
+      {
+        method: "POST",
+        path: "/api/v1/sales/s-1/refund",
+        body: {
+          reason: "requested_by_customer",
+          mode: "auto",
+          amount: 100,
+          idempotency_key: "crm-refund-1",
+        },
+      },
+      { method: "PUT", path: "/api/v1/sales/s-1/owner", body: { owner_user_id: null } },
+      { method: "PUT", path: "/api/v1/sales/s-1/deal", body: { deal_id: "d-1" } },
+      {
+        method: "POST",
+        path: "/api/v1/sales/s-1/allocations",
+        body: { payment_entry_id: "e-1" },
+      },
+      { method: "DELETE", path: "/api/v1/sales/s-1/allocations/a-1", body: undefined },
+      { method: "DELETE", path: "/api/v1/sales/s-1", body: undefined },
+    ]);
   });
 });

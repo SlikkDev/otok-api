@@ -304,11 +304,11 @@ class TestNetworkErrorRetries:
             )
         assert transport.calls == 1
 
-    def test_does_not_retry_a_payment_request_create(self) -> None:
-        # POST /v1/payment-requests has NO idempotency key of any kind — a
-        # replay would mint a second, independently payable link — so the
-        # network error must surface after exactly one attempt (the same
-        # posture as bookings.create, whose idempotency is server-derived).
+    def test_does_not_retry_a_payment_request_create_without_a_key(self) -> None:
+        # Without an idempotency_key a replay would mint a second,
+        # independently payable link — so the network error must surface
+        # after exactly one attempt (the same posture as bookings.create,
+        # whose idempotency is server-derived).
         transport = _FlakyTransport(
             [ConnectionResetError("connection reset")],
             [json_response(201, {"id": "pr-1"})],
@@ -321,6 +321,21 @@ class TestNetworkErrorRetries:
                 body={"contact_id": "c-1", "amount": 250, "title": "Session"},
             )
         assert transport.calls == 1
+
+    def test_retries_a_payment_request_create_carrying_an_idempotency_key(self) -> None:
+        # A keyed mint replays to the original row (duplicate: True).
+        transport = _FlakyTransport(
+            [ConnectionResetError("connection reset")],
+            [json_response(201, {"id": "pr-1", "duplicate": True})],
+        )
+        client = self._client(transport)
+        result = client.request(
+            "POST",
+            "/v1/payment-requests",
+            body={"contact_id": "c-1", "amount": 250, "idempotency_key": "pr-key-1"},
+        )
+        assert result["id"] == "pr-1"
+        assert transport.calls == 2
 
     def test_does_not_retry_patch_or_delete(self) -> None:
         transport = _FlakyTransport(

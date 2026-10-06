@@ -24,6 +24,7 @@ Events and their registrations. Create the event your form or system knows about
 | `event_type_id` | UUID or `null` | The saved event this event was created from |
 | `event_type` | object or `null` | `{ "id", "name" }` of that saved event — `null` when the event was not created from one |
 | `suppress_event_automations` | boolean | Stops every automation for this event, reminders included |
+| `collect_payment_on_registration` | boolean | Priced-event opt-in — see [Priced events](#priced-events). Default `false` |
 | `archived_at` | ISO 8601 or `null` | Archived events are never written to |
 | `created_at` | ISO 8601 | |
 
@@ -36,7 +37,18 @@ Events and their registrations. Create the event your form or system knows about
 | `status` | string | `registered`, `attended`, `no_show`, `waitlist` or `unregistered` |
 | `registered_at` / `attended_at` / `unregistered_at` | ISO 8601 or `null` | Stamped as the row passes through each status |
 | `join_url` | string or `null` | The attendee's personal join link, from Zoom or supplied by you |
+| `payment_sale_id` | UUID or `null` | The sale this registration was charged through on a [priced event](#priced-events), or `null` |
+| `payment` | object or `null` | The registration's payment on a priced event, or `null` when it carries no sale — see below |
 | `created_at` / `updated_at` | ISO 8601 | |
+
+**The `payment` block.** Present on every registration read (the list, the POST and the PATCH answers):
+
+| Field | Type | Notes |
+|---|---|---|
+| `sale_id` | UUID | The [sale](sales.md) recorded for this registration |
+| `sale_status` | string or `null` | `active`, `partially_cancelled` or `cancelled` |
+| `settlement_status` | string or `null` | `untracked`, `unpaid`, `partially_paid`, `paid`, `partially_refunded` or `refunded` |
+| `pay_url` | string or `null` | The newest payment link that can still be paid, or `null` when none is live (nothing left to collect, or the link expired) |
 
 **Status vocabulary.** These five values are what oToK stores and what every surface returns — this API, the contact object's `event_attendances[]`, and the `event.attendance.changed` webhook. On writes only, `cancelled` is accepted as an alias for `unregistered`; it is never returned, so a round-trip settles on the stored spelling.
 
@@ -81,6 +93,7 @@ Creates an event, or updates the one already carrying this `external_id`.
 | `event_type_id` | UUID | The saved event to file this event under. See [Saved events](#saved-events) |
 | `event_type_name` | string | ≤200 chars. The same saved event by its exact name (case-insensitive, whitespace trimmed) — for callers that don't hold the id |
 | `suppress_event_automations` | boolean | |
+| `collect_payment_on_registration` | boolean | Charge for registrations on this event — see [Priced events](#priced-events) |
 
 `external_provider` is not writable. It is how oToK knows a meeting belongs to a connected Zoom account, and a caller claiming it would make us push registrants at a meeting nobody owns.
 
@@ -91,7 +104,7 @@ curl -X POST "https://app.otok.io/api/v1/events" \
   -d '{"name":"Autumn webinar","external_id":"autumn-webinar-2026","start_at":"2026-10-06T14:00:00Z"}'
 ```
 
-Response `200`: the event object plus `"duplicate": true | false`.
+Response `201`: the event object plus `"duplicate": true | false`.
 
 **Idempotency.** Send the same `external_id` on every submission. The first call creates the event; the rest update it. There is no `PATCH /v1/events/:id` — the upsert *is* the update path.
 
@@ -116,7 +129,17 @@ curl -X POST "https://app.otok.io/api/v1/events" \
   -d '{"name":"Weekly yoga — October","external_id":"yoga-2026-10","event_type_name":"Weekly yoga","start_at":"2026-10-06T18:00:00Z"}'
 ```
 
-Response `200`: the event object with `"event_type": { "id": "…", "name": "Weekly yoga" }`.
+Response `201`: the event object with `"event_type": { "id": "…", "name": "Weekly yoga" }`.
+
+### Priced events
+
+With `collect_payment_on_registration: true`, a **new** registration — made through `POST /v1/events/:id/attendances`, by an automation, or in the app's registration dialogs — records a sale of the event's product (at the cycle's price when the event has a cycle with one) and sends the contact a payment link. The registration's [`payment`](#the-registration-object) block then reports the sale and the live link.
+
+- It applies only to an event with a priced product that does not already grant attendance when sold, and only when the workspace's plan includes [Sales](sales.md), automatic sale recording is on, and a connected payment provider can issue payment links in the workspace currency. Otherwise registrations go through as usual with no sale and `payment: null`.
+- There is **no per-call opt-out**: on an opted-in event every API registration is charged.
+- Re-sending a registration that is already `registered` does not charge twice. Moving a registration back to `registered` from another status charges like a new registration.
+- Unregistering someone whose sale is still unpaid cancels the sale and its payment link within a few minutes; money already paid is kept.
+- Zoom-synced and imported registrations never charge.
 
 ---
 
@@ -127,7 +150,7 @@ Registers a contact for the event, or sets their status directly.
 | Field | Type | Notes |
 |---|---|---|
 | `contact_id` | UUID | An existing contact. Mutually exclusive with `contact` |
-| `contact` | object | `{ name, email, phone, national_id }` — upserted with the same identity resolution `POST /v1/contacts` uses (phone, then email, then national ID), so registering someone who already exists never creates a second copy of them. At least one identifier is required |
+| `contact` | object | `{ name, email, phone, national_id }` (`name` ≤200, `phone` ≤40, `national_id` ≤20 chars; none may contain NUL characters) — upserted with the same identity resolution `POST /v1/contacts` uses (phone, then email, then national ID), so registering someone who already exists never creates a second copy of them. At least one identifier is required |
 | `status` | string | Default `registered`. Accepts `cancelled` as an alias for `unregistered` |
 | `zoom_registration` | `auto` \| `skip` | Default `auto`. See below |
 | `join_url` | string | The attendee's personal join link. Honoured with `zoom_registration: "skip"` |
@@ -143,7 +166,7 @@ curl -X POST "https://app.otok.io/api/v1/events/7f3c.../attendances" \
       }'
 ```
 
-Response `200`: the registration object plus:
+Response `201`: the registration object plus:
 
 | Field | Notes |
 |---|---|
@@ -187,7 +210,7 @@ curl -X PATCH "https://app.otok.io/api/v1/attendances/9a1e.../" \
   -d '{"status":"attended"}'
 ```
 
-Response `200`: the registration object plus `created: false` and `previous_status`. The same refusals as the POST apply — an archived event takes no move, and a canceled one takes no move back to `registered` or `waitlist`.
+Response `200`: the registration object plus `created: false` and `previous_status`. On a [priced event](#priced-events), moving someone back to `registered` charges like a new registration. The same refusals as the POST apply — an archived event takes no move, and a canceled one takes no move back to `registered` or `waitlist`.
 
 ---
 
@@ -201,3 +224,4 @@ Marking someone `no_show` records and scores like the rest, and wakes a waiting 
 
 - [Contacts](contacts.md) — the identity resolution the inline `contact` uses, and the `acquisition` object
 - [Webhooks](webhooks.md) — `event.attendance.changed`
+- [Sales](sales.md) — the sale a priced-event registration records

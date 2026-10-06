@@ -1,8 +1,8 @@
 # Webhooks
 
-Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), **payment-request events** (lifecycle events for [pay-links](payment-requests.md)), **contact events** (lifecycle + [consent](consent-and-suppressions.md) changes), **message events** (inbound WhatsApp messages), **deal events** (lifecycle events for [deals](deals.md)), **booking events** (lifecycle events for [bookings](bookings.md)), **event-attendance events**, and **form-submission events**. Events are signed, retried, and deduplicable by event id.
+Register HTTPS endpoints to receive **email events** (delivery and engagement events for emails sent through [`POST /v1/emails`](emails.md)), **order events** (lifecycle events for [orders](orders.md)), **payment-request events** (lifecycle events for [pay-links](payment-requests.md)), **contact events** (lifecycle + [consent](consent-and-suppressions.md) changes), **message events** (inbound WhatsApp messages), **deal events** (lifecycle events for [deals](deals.md)), **sale events** (recorded / cancelled / paid / refunded [sales](sales.md)), **booking events** (lifecycle events for [bookings](bookings.md)), **event-attendance events**, **form-submission events**, and **ticket events** (lifecycle events for [customer tickets](tickets.md)). Events are signed, retried, and deduplicable by event id.
 
-**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links. **Contact, message, deal, booking, attendance, and form events** fire for every intentional write source too — their quiet paths are documented per family below.
+**Email events** fire **only for API-originated sends** (sends made with an idempotency key via `POST /v1/emails`); engagement events additionally require the send to have opted into `tracking`. **Order events** fire for **every** order write source — API, in-app, and automations — not just API-created orders (never for historical import ingestion). **Payment-request events** fire for hosted pay-links from every mint source (API and in-app) — never for direct saved-card charges or internal dunning-recovery links. **Contact, message, deal, sale, booking, attendance, form, and ticket events** fire for every intentional write source too — their quiet paths are documented per family below.
 
 All management endpoints require [authentication](getting-started.md#authentication). Errors use the structured envelope `{"error": {"code", "message"}}`.
 
@@ -17,7 +17,7 @@ All management endpoints require [authentication](getting-started.md#authenticat
 | Field | Type | Required | Constraints |
 |---|---|---|---|
 | `url` | string | yes | 1–2048 chars; `http://` or `https://` only. URLs pointing at private, loopback, link-local, and other reserved IP ranges are rejected (400 `unsafe_url`) — this is re-checked on every delivery attempt |
-| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `contact.*`, `message.received`, `deal.*`, `booking.*`, `event.attendance.changed`, and `form.submitted` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
+| `events` | string[] | no | Event types to receive (see tables below). Must be non-empty when present. **Omitted → the three email delivery events** (`email.delivered`, `email.bounced`, `email.complained`) — every other family is opt-in and received only when explicitly listed: the engagement events `email.opened`/`email.clicked` and **all `order.*`, `payment_request.*`, `payment.*`, `contact.*`, `message.received`, `deal.*`, `sale.*`, `booking.*`, `event.attendance.changed`, `form.submitted`, and `ticket.*` events**. A pre-existing registration never starts receiving a new family unasked. `email.failed` is **deprecated**: still accepted when listed explicitly (the registration succeeds and echoes it in `events`), but it is never delivered |
 
 **Maximum 3 endpoints per workspace** (409 `endpoint_limit_reached`). The cap is enforced safely under concurrency.
 
@@ -117,7 +117,17 @@ Four [payment-request](payment-requests.md) (pay-link) lifecycle events, mirrori
 | `payment_request.expired` | opt-in | A pending link passed `expires_at` unpaid (from the expiry sweep, or lazily when the expired link is opened) |
 | `payment_request.cancelled` | opt-in | The link was withdrawn — `POST /v1/payment-requests/:id/cancel` or an in-app cancel. A later `payment_request.paid` for the same request supersedes this event (late completion) |
 
-**Hosted pay-links only:** direct saved-card charges (`charge_kind: "token"`) and internal dunning-recovery links never emit `payment_request.*` events — the event stream is exactly the payer-facing links.
+**Hosted pay-links only:** direct saved-card charges (`charge_kind: "token"`, including those made through [`POST /v1/contacts/:id/charges`](contacts.md#post-apiv1contactsidcharges)), save-card-only links and internal dunning-recovery links never emit `payment_request.*` events — the event stream is exactly the payer-facing links that collect money.
+
+### Payment events
+
+One [payment](payments.md) ledger event. It is **opt-in**: delivered only to endpoints that list it explicitly in `events`.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `payment.refunded` | opt-in | A refund entry was recorded on a payment — from **any** source: `POST /v1/payments/:id/refund`, `POST /v1/payment-requests/:id/refund`, an [order refund](orders.md#post-apiv1ordersidrefunds) mirrored into its payment, marking a charge `refunded`, an in-app refund, a refund made in a connected store, or a refund made directly in the payment provider's dashboard that oToK picked up. `data.refund.recorded_outside` says whether the money moved through the gateway |
+
+One event per refund entry. A **pending reversal** (the provider issued the credit document but the money is still to be returned) is silent until it settles, and fires then. A refund that was first booked as returned outside oToK and later matched to the provider's own refund does not fire a second time — the money moved once.
 
 ### Contact events
 
@@ -153,6 +163,17 @@ Four [deal](deals.md) lifecycle events. All are **opt-in** (delivered only to en
 | `deal.won` | opt-in | The deal was marked won (`data.closed_at` stamped; the deal keeps its last stage) |
 | `deal.lost` | opt-in | The deal was marked lost — `data.lost_reason` carries the stored reason (or `null`) |
 
+### Sale events
+
+Four [sales ledger](sales.md) events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`). They fire for **every** write source — API, in-app, automations, and the sales the app records from quotes, orders, pay-links, bookings and event registrations — `data.sale.source` says where the sale came from.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `sale.recorded` | opt-in | A sale was recorded — once per sale (an `external_reference` replay does not fire it again) |
+| `sale.cancelled` | opt-in | A sale **item** was cancelled — **once per cancelled item**, and `data.sale` is the item (see [below](#sale-event-data)). Reinstating an item fires nothing |
+| `sale.paid` | opt-in | The sale's `settlement_status` became `paid` — the allocated money now covers the total |
+| `sale.refunded` | opt-in | Money was refunded from the sale — fires when the refund settles (a refund still pending fires nothing until then) |
+
 ### Booking events
 
 Four [booking](bookings.md) lifecycle events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`).
@@ -181,6 +202,19 @@ Four [booking](bookings.md) lifecycle events. All are **opt-in** (delivered only
 | Type | Subscription | Fires when |
 |---|---|---|
 | `form.submitted` | opt-in | A form was submitted — a standalone embed (`origin: "form"`), a published landing page's form block (`"landing_page"`), or an on-site popup (`"popup"`). Fires post-persist even when no contact was resolved (`data.contact_id` is then `null`) |
+
+### Ticket events
+
+Four [customer-ticket](tickets.md) events. All are **opt-in** (delivered only to endpoints that list them explicitly in `events`), and they are sent only while the workspace's plan includes **Customer tickets**. They fire for every write source — the hosted help page and website widget, the team in the app, automations, and the API — and `data.message.origin` / `data.change.origin` say which.
+
+| Type | Subscription | Fires when |
+|---|---|---|
+| `ticket.created` | opt-in | A ticket was opened — by the customer, by a team member on their behalf, or through the API. It carries the opening message (`data.message`) and the assignee the ticket landed on, so there is no separate `ticket.message_created` or `ticket.assigned` for the opening |
+| `ticket.message_created` | opt-in | A customer or team message was added — never an internal note. `data.message.origin` (`customer`, `agent`, `automation`, `api`) lets you drop your own API posts when they come back. A status move the message caused (a customer reply reopening the ticket, a team reply moving it to Answered) rides this event's `data.ticket.status` — there is no `ticket.status_changed` for it |
+| `ticket.status_changed` | opt-in | The status was changed explicitly — by a team member, the customer (on the help page), an automation, the API, or the system closing a quietly resolved ticket. `data.change.status` carries `from` → `to`; `data.change.origin` is `agent`, `customer`, `automation`, `api` or `system`. Moves into and out of `spam` are included |
+| `ticket.assigned` | opt-in | Triage changed the assignee — unassigning included. `data.change.assignee` carries `from_user_id` → `to_user_id` |
+
+**Quiet by design:** a ticket filed into `spam` emits no `ticket.created` and no `ticket.message_created` while it is spam (status moves into and out of spam, and assignee changes, still emit); internal notes never emit; reassignments that follow a contact's owner hand-over or a team member's offboarding are quiet; and nothing is sent about a contact once it has been anonymised. Attachments ride as **metadata only** (`filename`, `mime_type`, `size`) — never a link; fetch a fresh signed `media_url` from [`GET /v1/tickets/:id`](tickets.md#get-apiv1ticketsid).
 
 Registering an endpoint for a mix of the new families:
 
@@ -305,6 +339,7 @@ Unlike email events, order event `data` always carries the full field set — ab
     "status": "paid",
     "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
     "deal_id": null,
+    "sale_id": null,
     "provider": "sumit",
     "amount": 250,
     "currency": "ILS",
@@ -313,6 +348,7 @@ Unlike email events, order event `data` always carries the full field set — ab
     "vat_rate": 18,
     "test_mode": false,
     "pay_url": "https://app.otok.io/pay/pr_k3J9…",
+    "channel": "whatsapp",
     "contact_payment_id": "7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d",
     "expires_at": "2026-07-18T09:00:00.000Z",
     "paid_at": "2026-07-15T11:20:00.000Z",
@@ -329,16 +365,69 @@ All four payment-request events carry the same `data` fields (a snapshot of the 
 | `data.payment_request_id` | The payment request's `id` |
 | `data.status` | Status at event time — `pending` on `payment_request.created`; `paid` / `expired` / `cancelled` on the terminal events |
 | `data.contact_id` / `data.deal_id` | The payer contact; the bound deal (or `null`) |
+| `data.sale_id` | The [sale](sales.md) the link collects for, or `null` |
 | `data.provider` | `cardcom` / `sumit` |
 | `data.amount` / `data.currency` | **JSON number** in the request's currency |
 | `data.title` | Payer-facing charge title, or `null` |
 | `data.vat_mode` / `data.vat_rate` | The request's stamped VAT posture, or `null`s on pre-VAT rows |
 | `data.test_mode` | **Always present.** `true` = authorise-only test request — never real money |
 | `data.pay_url` | The same hosted pay-link URL the API/app expose |
+| `data.channel` | The first channel oToK delivered the link on — `email`, `whatsapp`, `sms` — or `null` when it was never sent by oToK |
 | `data.contact_payment_id` | The settled [payment](payments.md) ledger row — set once paid, else `null` |
 | `data.expires_at` / `data.paid_at` / `data.cancelled_at` / `data.created_at` | ISO 8601 UTC, or `null` |
 
 Provider correlation references and internal row metadata are deliberately excluded from the payload — read `GET /v1/payment-requests/:id` when you need them.
+
+### Payment event `data`
+
+```json
+{
+  "id": "d4e5f607-1829-304a-5b6c-7d8e9f0a1b2c",
+  "type": "payment.refunded",
+  "created_at": "2026-07-16T08:05:00.000Z",
+  "data": {
+    "payment": {
+      "id": "7b6a5c4d-3e2f-1a0b-9c8d-7e6f5a4b3c2d",
+      "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "title": "Onboarding session",
+      "total_amount": 350,
+      "currency": "ILS",
+      "arrangement_status": "completed",
+      "external_reference": "shop-order-88123"
+    },
+    "refund": {
+      "entry_id": "f2e3d4c5-b6a7-4890-8123-456789abcdef",
+      "amount": 100,
+      "currency": "ILS",
+      "reason": "requested_by_customer",
+      "note": "Partial refund — unused session",
+      "recorded_outside": false,
+      "is_void": false,
+      "occurred_at": "2026-07-16T08:05:00.000Z"
+    },
+    "contact": {
+      "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "name": "Dana Levi",
+      "phone": "+972501234567",
+      "email": "dana@example.com"
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `data.payment` | The payment header after the refund — `id`, `contact_id`, `title`, `total_amount` (JSON number), `currency`, `arrangement_status`, `external_reference` (your idempotency key on `POST /v1/payments`, or `null`) |
+| `data.refund.entry_id` | The refund entry's id on the payment (`entries[]` on `GET /v1/payments/:id`) |
+| `data.refund.amount` / `data.refund.currency` | The refunded amount as a **positive** JSON number (the ledger entry itself stores it negative) |
+| `data.refund.reason` | The [refund reason](payments.md#refund-reasons) — including the system reasons `order_refund`, `store_refund`, `legacy_mark` — or `null` |
+| `data.refund.note` | The refund note, or `null` |
+| `data.refund.recorded_outside` | `true` = booked only, the money was returned outside oToK; `false` = executed through the payment gateway, or a payment that never involved a provider |
+| `data.refund.is_void` | `true` when the provider voided the original charge rather than refunding it |
+| `data.refund.occurred_at` | When the refund was recognized — ISO 8601 UTC |
+| `data.contact` | The payer: `id`, `name`, `phone`, `email` (explicit `null`s when unknown) |
+
+Provider correlation references, idempotency keys and the performing user are deliberately excluded.
 
 ### Contact event `data`
 
@@ -463,6 +552,97 @@ All four deal events carry the same `data` fields (a snapshot of the deal at eve
 | `data.source` | Which surface performed the write — `manual`, `api`, `automation`, `salesforce`. Tolerate unknown values |
 | `data.expected_close_at` / `data.closed_at` / `data.lost_reason` | ISO 8601 UTC or `null` |
 
+### Sale event `data`
+
+`sale.recorded`, `sale.paid` and `sale.refunded` carry the sale header with its items, plus the buyer (full field set, explicit `null`s):
+
+```json
+{
+  "id": "f6071829-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+  "type": "sale.paid",
+  "created_at": "2026-10-02T12:30:00.000Z",
+  "data": {
+    "sale": {
+      "id": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d",
+      "number": 1042,
+      "contact_id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "deal_id": null,
+      "owner_user_id": "708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f",
+      "status": "active",
+      "settlement_status": "paid",
+      "currency": "ILS",
+      "total_amount": 350,
+      "paid_total": 350,
+      "refunded_total": 0,
+      "pending_refund_total": 0,
+      "sold_at": "2026-10-01T09:00:00.000Z",
+      "source": "api",
+      "external_reference": "crm-invoice-4471",
+      "items": [
+        {
+          "id": "6b7c8d9e-0f1a-4b2c-9d3e-4f5a6b7c8d9e",
+          "position": 0,
+          "product_id": "2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a",
+          "cycle_id": null,
+          "title": "Onboarding session",
+          "quantity": 1,
+          "unit_amount": 350,
+          "discount_percent": null,
+          "line_total": 350,
+          "status": "active"
+        }
+      ]
+    },
+    "contact": {
+      "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c",
+      "name": "Dana Levi",
+      "phone": "+972501234567",
+      "email": "dana@example.com"
+    },
+    "settlement": {
+      "transition_id": "0718293a-4b5c-4d6e-9f80-1a2b3c4d5e6f",
+      "paid_total": 350,
+      "total_amount": 350,
+      "payment": {
+        "payment_id": "8192a3b4-c5d6-4e7f-8091-a2b3c4d5e6f7",
+        "entry_id": "92a3b4c5-d6e7-4f80-91a2-b3c4d5e6f708",
+        "amount": 350
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `data.sale.id` / `data.sale.number` | The sale and its per-workspace number |
+| `data.sale.contact_id` | The buyer |
+| `data.sale.deal_id` / `data.sale.owner_user_id` | The linked deal and the owning team member, or `null` |
+| `data.sale.status` | `active` / `partially_cancelled` / `cancelled` |
+| `data.sale.settlement_status` | `untracked` / `unpaid` / `partially_paid` / `paid` / `partially_refunded` / `refunded` |
+| `data.sale.currency` / `total_amount` / `paid_total` / `refunded_total` / `pending_refund_total` | **JSON numbers** in the sale's currency; `total_amount` is `null` while no active item has a price |
+| `data.sale.sold_at` | ISO 8601 UTC |
+| `data.sale.source` | Where the sale was recorded — `api`, `manual`, `automation`, or the record that created it (`quote`, `order`, `payment_request`, …). Tolerate unknown values |
+| `data.sale.external_reference` | The [`/v1/sales`](sales.md) idempotency reference, when set |
+| `data.sale.items[]` | Every item in line order, cancelled ones included: `id`, `position`, `product_id`, `cycle_id`, `title`, `quantity`, `unit_amount`, `discount_percent`, `line_total`, `status` (`active` / `cancelled`) |
+| `data.contact` | The buyer: `id`, `name`, `phone`, `email` |
+| `data.settlement` | **`sale.paid` only.** `transition_id` (identifies this settlement change), `paid_total`, `total_amount`, and `payment` — the payment entry that completed the sale (`payment_id`, `entry_id`, `amount`), or `null` |
+| `data.refund` | **`sale.refunded` only.** `payment_id`, `entry_id` (the refund entry), `amount` (refunded from this sale — a **positive** number), `reason` (the refund reason, or `null`), `recorded_outside` (`true` when recorded as returned outside oToK), and `refunded_total` (the sale's total refunded after this refund) |
+
+**`sale.cancelled` is per item.** Its `data.sale` is the cancelled **item**, not the header — `data.sale.id` is the **item** id and `data.sale.sale_id` the sale's id:
+
+| Field | Meaning |
+|---|---|
+| `data.sale.id` / `data.sale.sale_id` | The item, and the sale it belongs to |
+| `data.sale.position` / `contact_id` / `product_id` / `cycle_id` / `title` | The line — `contact_id` is the buyer |
+| `data.sale.quantity` / `unit_amount` / `discount_percent` / `line_total` / `currency` | JSON numbers (or `null` while unpriced) |
+| `data.sale.purchased_at` / `cancelled_at` | ISO 8601 UTC |
+| `data.sale.status` | `cancelled` |
+| `data.sale.cancel_reason` / `cancel_note` | `customer_request`, `duplicate`, `mistake`, `not_delivered`, `payment_failed`, `fraud`, or `other`; the note or `null` |
+| `data.contact` | The buyer: `id`, `name`, `phone`, `email` |
+
+Sale payloads never carry payment-provider references, refund idempotency keys, or the team member who performed the write.
+
 ### Booking event `data`
 
 All four booking events carry the same `data` fields (full field set, explicit `null`s). The booking module is deliberately **multi-timezone**, so both the host and invitee timezones ride the payload. There is deliberately **no `manage_url`** — that is a capability token and never leaves through a webhook body (mint links from your own systems instead).
@@ -477,7 +657,7 @@ All four booking events carry the same `data` fields (full field set, explicit `
 | `data.host_timezone` / `data.invitee_timezone` | IANA timezones — the host's schedule tz and the tz the invitee booked in |
 | `data.status` | Booking status at event time (e.g. `confirmed`, `cancelled`). Tolerate unknown values |
 | `data.location_type` | The meeting type's location kind. Tolerate unknown values |
-| `data.cancelled_by` / `data.cancel_reason` | `booking.cancelled` — who cancelled (e.g. `host`, `invitee`) and why; `null` elsewhere |
+| `data.cancelled_by` / `data.cancel_reason` | `booking.cancelled` — who cancelled (`host`, `invitee` or `system`) and why; `null` elsewhere. A booking released because its [deposit](bookings.md#deposits) went unpaid arrives with `cancelled_by: "system"` and `cancel_reason: "deposit_unpaid"` |
 | `data.source` | How the booking was created — `public_page`, `manual`, `api`, or `embed`. Passed through verbatim: **tolerate unknown values**, new sources may appear without notice |
 
 ### Event-attendance event `data`
@@ -500,6 +680,61 @@ All four booking events carry the same `data` fields (full field set, explicit `
 | `data.origin` | `form` (standalone embed) \| `landing_page` \| `popup` |
 | `data.landing_page_id` / `data.popup_id` | Set when `origin` is `landing_page` / `popup` respectively, else `null` |
 | `data.fields` | The submitted answers, keyed by form field ids |
+
+### Ticket event `data`
+
+All four ticket events share one shape. `data.ticket` is exactly the [ticket object](tickets.md#the-ticket-object) `GET /v1/tickets` returns — a snapshot at the moment of the change — and `data.contact` repeats its `contact` block.
+
+```json
+{
+  "id": "f6071829-3a4b-4c5d-8e7f-901234567890",
+  "type": "ticket.message_created",
+  "created_at": "2026-10-05T09:12:40.000Z",
+  "data": {
+    "ticket": {
+      "id": "5b1d2e3f-4a5b-4c6d-8e7f-90a1b2c3d4e5",
+      "number": 1042,
+      "number_label": "T-1042",
+      "subject": "Can't log in to the course",
+      "status": "pending",
+      "priority": "normal",
+      "category": "Access",
+      "source": "portal",
+      "language": "en",
+      "widget_id": null,
+      "external_reference": null,
+      "contact": { "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c", "name": "Jane Cohen", "email": "jane@example.com", "phone": "+972501234567" },
+      "assignee": { "id": "708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f", "name": "Dana Levi", "email": "dana@example.com" },
+      "first_response_at": "2026-10-05T09:12:40.000Z",
+      "response_target": null,
+      "last_message_at": "2026-10-05T09:12:40.000Z",
+      "resolved_at": null,
+      "closed_at": null,
+      "created_at": "2026-10-05T08:57:02.000Z",
+      "updated_at": "2026-10-05T09:12:40.000Z"
+    },
+    "contact": { "id": "9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c", "name": "Jane Cohen", "email": "jane@example.com", "phone": "+972501234567" },
+    "message": {
+      "id": "2a3b4c5d-6e7f-4809-9a1b-2c3d4e5f6a7b",
+      "side": "team",
+      "origin": "agent",
+      "author": { "id": "708192a3-b4c5-d6e7-f809-1a2b3c4d5e6f", "name": "Dana Levi" },
+      "body": "Thanks Jane — I've re-enabled your access. Please try again.",
+      "attachment": null,
+      "created_at": "2026-10-05T09:12:40.000Z"
+    }
+  }
+}
+```
+
+| Field | Presence | Meaning |
+|---|---|---|
+| `data.ticket` | always | The [ticket object](tickets.md#the-ticket-object) |
+| `data.contact` | always | `{ id, name, email, phone }` — the same as `data.ticket.contact` (`null` if unavailable) |
+| `data.message` | `ticket.created`, `ticket.message_created` | The message: `id`, `side` (`customer` \| `team`), `origin` (`customer` \| `agent` \| `automation` \| `api`), `author` (`{ id, name }` of the team member, or `null`), `body` (full text), `attachment` (`{ filename, mime_type, size }` or `null` — never a link), `created_at`. On `ticket.created` it is the opening message |
+| `data.change.status` | `ticket.status_changed` | `{ from, to }` — the statuses before and after |
+| `data.change.origin` | `ticket.status_changed` | Who changed it: `agent`, `customer`, `automation`, `api` or `system`. Tolerate unknown values |
+| `data.change.assignee` | `ticket.assigned` | `{ from_user_id, to_user_id }` — either may be `null` (unassigned) |
 
 ## Request headers
 

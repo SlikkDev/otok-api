@@ -13,6 +13,8 @@ All endpoints require [authentication](getting-started.md#authentication). There
 | GET | `/api/v1/contacts/:id/consent` | Read per-channel marketing consent — see [Consent & Suppressions](consent-and-suppressions.md) |
 | PUT | `/api/v1/contacts/:id/consent/:channel` | Record a consent decision — see [Consent & Suppressions](consent-and-suppressions.md) |
 | GET | `/api/v1/contacts/:id/documents` | List a contact's financial documents (requires the **Payments** feature) |
+| GET | `/api/v1/contacts/:id/payment-methods` | List a contact's saved cards — see [saved cards and charges](#saved-cards-and-charges) |
+| POST | `/api/v1/contacts/:id/charges` | Charge a saved card — see [saved cards and charges](#saved-cards-and-charges) |
 | GET | `/api/v1/contacts/:id/notes` | List a contact's notes |
 | POST | `/api/v1/contacts/:id/notes` | Add a note |
 | PATCH | `/api/v1/notes/:id` | Edit / pin a note |
@@ -227,6 +229,8 @@ Conflicting identifiers, historical split matches, and pairs awaiting or preserv
 
 The non-identity fields of your request are parked with the merge request and applied when it is resolved. Retry after the merge request is resolved in the app. Repeated conflicting requests for the same pair reuse the same merge request.
 
+**Retrying after "Keep separate".** When someone resolves the conflict in the app by keeping the contacts separate and choosing which one the submission belongs to, your retry of the same submission is applied to that chosen contact (201, `duplicate: true`) instead of opening another merge request. None of the submitted identifiers are moved onto it — the phone, email and national ID stay with the contacts that hold them — but the rest of the request (fields, tags, groups, `acquisition`, `inquiry`) lands on the chosen contact. If the identifiers point at contacts for which no such choice was made, the request still answers 409 `CONTACT_MERGE_REQUIRED`.
+
 ### Example
 
 ```bash
@@ -330,6 +334,7 @@ Response `200` — the updated contact object.
 | 400 | `error_code: "PHONE_BLACKLISTED"` | Only when the patch *changes* the phone to a blacklisted number |
 | 404 | `"Contact <id> not found"` | Unknown in this workspace |
 | 409 | `error_code: "CONTACT_MERGE_REQUIRED"` | The new phone/email belongs (or previously belonged) to another contact — see above |
+| 409 | `error_code: "CONTACT_ANONYMISED"` | The contact was anonymised (erased for privacy compliance in the app). Its profile can no longer be changed; only `owner_user_id`, `tags` and `groups` are still accepted |
 
 ---
 
@@ -476,6 +481,145 @@ The `live` object reports the provider lookup: `attempted` (a live lookup ran), 
 | 400 | Non-UUID contact id, or a malformed `live` value |
 | 403 | `FEATURE_NOT_INCLUDED_IN_PLAN` — plan lacks the Payments feature |
 | 404 | `"contacts with ID <id> not found"` — same lookup and wording as `GET /v1/contacts/:id`, so an unknown or cross-workspace contact answers identically instead of an empty-but-plausible list |
+
+---
+
+## Saved cards and charges
+
+A contact's **saved cards** are cards the payer agreed to keep on file — at checkout on a pay-link, or entered in the app — stored at the workspace's connected payment provider (Cardcom / Sumit). Through the API you can list them (masked) and charge one directly, without sending a pay-link. Card numbers never pass through the API: a stored card is charged by reference.
+
+> **Plan feature required:** both routes require the **Workspace payments** feature (`workspace_payments`) — the [payment requests](payment-requests.md) gate, not the `payments` ledger gate — and answer `403 FEATURE_NOT_INCLUDED_IN_PLAN` without it.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/contacts/:id/payment-methods` | List a contact's saved cards (masked) |
+| POST | `/api/v1/contacts/:id/charges` | Charge a saved card — requires **saved-card charge access** on the API key |
+
+### GET /api/v1/contacts/:id/payment-methods
+
+```bash
+curl "https://app.otok.io/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c/payment-methods" \
+  -H "Authorization: Bearer otok_live_abc123..."
+```
+
+Response `200` — `{ payment_methods }`, newest first:
+
+```json
+{
+  "payment_methods": [
+    {
+      "id": "5d6e7f80-9a1b-4c2d-8e3f-405162738495",
+      "provider": "cardcom",
+      "brand": "visa",
+      "last4": "4242",
+      "expiryMonth": 12,
+      "expiryYear": 2028,
+      "tokenExpiresAt": null,
+      "status": "active",
+      "isDefault": true,
+      "consentSource": "checkout_optin",
+      "consentedAt": "2026-07-14T10:00:00.000Z",
+      "lastUsedAt": "2026-08-01T08:00:00.000Z",
+      "createdAt": "2026-07-14T10:00:00.000Z"
+    }
+  ]
+}
+```
+
+> Unlike most API objects, saved-card fields are **camelCase**.
+
+| Field | Meaning |
+|---|---|
+| `id` | The saved card's id — pass it as `method_id` to charge this card |
+| `provider` | `cardcom` / `sumit` — only cards saved with the **currently connected** provider can be charged |
+| `brand` / `last4` / `expiryMonth` / `expiryYear` | Display facts as the provider reported them (any may be `null`) |
+| `tokenExpiresAt` | When the provider will delete the stored card, if it declared one; else `null` |
+| `status` | `active`, `revoked` or `expired` — only `active` cards can be charged |
+| `isDefault` | The contact's default card (at most one) |
+| `consentSource` / `consentedAt` | How and when the payer agreed to keep the card on file (e.g. `checkout_optin`, `payer_link`, `manual`, `in_person`) |
+| `lastUsedAt` / `createdAt` | ISO 8601 |
+
+| Status | Meaning |
+|---|---|
+| 400 | Non-UUID contact id |
+| 403 | `FEATURE_NOT_INCLUDED_IN_PLAN` |
+| 404 | `"contacts with ID <id> not found"` — unknown or another workspace's contact |
+
+### POST /api/v1/contacts/:id/charges
+
+Charges one of the contact's saved cards through the connected payment provider — the same charge as the in-app **Charge saved card** button. The result is a payment request with `charge_kind: "token"` (no pay-link), recorded on the contact's [payments](payments.md) ledger once paid, with the tax document auto-issued when configured.
+
+> **Saved-card charge access (API key capability).** This route requires the calling API key to carry **saved-card charge access** (`allow_charges`). It is off by default on every key; only the workspace owner can grant it, in **Settings → Developers → API keys**. A key without it gets `403` with `error_code: "API_KEY_CHARGES_DISABLED"` — checked before anything else, including the contact lookup.
+
+#### Request body
+
+| Field | Type | Required | Constraints |
+|---|---|---|---|
+| `idempotency_key` | string | **yes** | 8–124 chars (trimmed). See [idempotency](#charge-idempotency) |
+| `amount` | number | **yes** | 0.01 – 9,999,999,999.99, ≤2 decimals — major units |
+| `method_id` | UUID | no | The saved card to charge (from [`payment-methods`](#get-apiv1contactsidpayment-methods)). Omitted → chosen by `method_selection` |
+| `method_selection` | enum | no | When no `method_id` is sent: `default` (the contact's default card — the default) or `most_recent` (the most recently charged card, else the newest; expired cards are skipped) |
+| `currency` | enum | no | `ILS`, `USD`, `EUR`, `GBP`. Omitted → the workspace payment currency |
+| `title` | string | no | ≤200 — charge title |
+| `product_id` | UUID | no | Catalog [product](products.md) — the title then derives from the product name |
+| `note` | string | no | ≤2000 — internal note |
+| `document_kind` | enum | no | Tax-document kind — the [payment-request vocabulary](payment-requests.md#request-body). Omitted → the provider/account default |
+| `auto_issue_document` | boolean | no | Auto-issue the tax document on a successful charge |
+| `installments` | integer | no | 1–36 — card installments to charge with (omitted = none) |
+| `test_mode` | boolean | no | Authorise-only test run — 400 `TOKEN_TEST_MODE_NOT_SUPPORTED` when the provider has no test mode |
+| `deal_id` | UUID | no | [Deal](deals.md) to bind the charge to |
+| `vat_mode` / `vat_rate` | enum / number | no | Per-charge VAT override, always **together** (`inclusive`/`exclusive`, 0–100). Omitted → the product's pair, else the workspace default |
+| `sale_id` | UUID | no | Collect for an existing [sale](sales.md) of this contact — allocated when the charge settles. Same checks as on [payment requests](payment-requests.md#errors) |
+| `terminal_number` | integer | no | Cardcom only — charge on this configured terminal. Omitted → the default terminal; unknown number or a provider without terminals → 400 |
+
+Card fields of any kind are refused (unknown properties are rejected).
+
+```bash
+curl -X POST "https://app.otok.io/api/v1/contacts/9c2f1a4e-3b7d-4e2a-9f0c-1d2e3f4a5b6c/charges" \
+  -H "Authorization: Bearer otok_live_abc123..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idempotency_key": "plan-renewal-2026-08",
+    "amount": 250,
+    "title": "August membership",
+    "method_selection": "default"
+  }'
+```
+
+#### Outcomes
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | `{ outcome: "paid", duplicate, payment_request }` | Approved and verified. `payment_request` is the settled request (`status: "paid"`, `contact_payment_id` set) |
+| `202` | `{ outcome: "processing", duplicate, payment_request_id }` | The final outcome is not known yet (the provider's answer was late or unclear). It settles on its own — poll `GET /v1/payment-requests/:id`. **Never retry it with a new key** |
+| `409` | `error_code: "TOKEN_CHARGE_DECLINED"`, `failure_reason`, `payment_request_id` | The card was declined. Try again with a **new** key (or another card) |
+
+#### Charge idempotency
+
+`idempotency_key` is required. Keys are scoped to the API key that sent them: a replay of the same key answers the original charge's outcome with `duplicate: true` and **never charges twice** — a paid charge replays `200`, one still processing replays `202`. Reusing a key with a different contact, `amount` or `currency` answers 409 `IDEMPOTENCY_KEY_MISMATCH` and charges nothing. A new charge attempt — for example after a decline — needs a new key.
+
+#### Errors
+
+| Status | Code / message | Meaning |
+|---|---|---|
+| 400 | validation array | Missing/short `idempotency_key`, bad `amount`, unknown fields (including any card data) |
+| 400 | `NO_PAYMENT_PROVIDER` | No payment provider is connected |
+| 400 | `TOKEN_TEST_MODE_NOT_SUPPORTED` | `test_mode` with a provider that has no test mode |
+| 400 | `"terminal_number <n> matches no configured Cardcom terminal"` | Unknown terminal |
+| 400 | `INVALID_PRODUCT` / `PRODUCT_INACTIVE` / `CURRENCY_MISMATCH` | Product or sale checks |
+| 403 | `FEATURE_NOT_INCLUDED_IN_PLAN` | Plan lacks `workspace_payments` |
+| 403 | `API_KEY_CHARGES_DISABLED` | The API key lacks saved-card charge access |
+| 404 | `"contacts with ID <id> not found"` | Unknown contact |
+| 409 | `TOKEN_CHARGE_DECLINED` | The card was declined (see [outcomes](#outcomes)) |
+| 409 | `IDEMPOTENCY_KEY_MISMATCH` | The key was already used for a different charge |
+| 409 | `NO_CHARGEABLE_METHOD` | No active, unexpired saved card for the connected provider (or `method_id` is not one) |
+| 409 | `TOKEN_CHARGE_NOT_SUPPORTED` | The connected provider does not support saved-card charges |
+| 409 | `TERMINAL_NOT_CHARGEABLE` | The chosen Cardcom terminal cannot charge |
+| 409 | `CONTACT_ANONYMISED` | The contact was anonymised — no new charges |
+| 409 | `PLAN_FEATURE_REQUIRED` / `SALE_CONTACT_MISMATCH` / `SALE_ALREADY_CANCELLED` | `sale_id` checks |
+| 502 | `TOKEN_CHARGE_FAILED` | The provider request failed — nothing was charged; retry with a new key |
+
+A charge fires no `payment_request.*` webhooks (direct saved-card charges never do); a paid charge appears on the [payments](payments.md) ledger and fires the payment-recorded automations like any other payment.
 
 ---
 

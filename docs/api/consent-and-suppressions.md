@@ -136,7 +136,7 @@ The workspace's slice of the email suppression list. Suppression is a **send-tim
 
 ### GET /api/v1/suppressions
 
-Standard [list envelope](getting-started.md#pagination) (`limit` default 50, cap 500), newest first.
+Standard [list envelope](getting-started.md#list-conventions) (`limit` default 50, cap 500), newest first.
 
 | Param | Type | Notes |
 |---|---|---|

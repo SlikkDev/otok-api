@@ -20,6 +20,9 @@ from otok import (
     MESSAGE_WEBHOOK_EVENT_TYPES,
     ORDER_WEBHOOK_EVENT_TYPES,
     PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES,
+    PAYMENT_WEBHOOK_EVENT_TYPES,
+    SALE_WEBHOOK_EVENT_TYPES,
+    TICKET_WEBHOOK_EVENT_TYPES,
     AudienceListParams,
     OtokAPIError,
     OtokClient,
@@ -384,6 +387,11 @@ class TestEmailsAndWebhookEndpoints:
         for event_type in PAYMENT_REQUEST_WEBHOOK_EVENT_TYPES:
             assert event_type not in defaults
 
+    def test_payment_refunded_is_registrable_but_never_defaulted(self) -> None:
+        assert PAYMENT_WEBHOOK_EVENT_TYPES == ("payment.refunded",)
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        assert "payment.refunded" not in defaults
+
     def test_order_events_are_listed_verbatim_at_registration(self) -> None:
         client, transport = make_client(json_response(201, {"id": "we-1", "secret": "whsec_x"}))
         client.webhook_endpoints.create(
@@ -433,6 +441,28 @@ class TestEmailsAndWebhookEndpoints:
         )
         assert len(new_family_types) == 15
         for event_type in new_family_types:
+            assert event_type not in defaults
+
+    def test_ticket_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert TICKET_WEBHOOK_EVENT_TYPES == (
+            "ticket.created",
+            "ticket.message_created",
+            "ticket.status_changed",
+            "ticket.assigned",
+        )
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        for event_type in TICKET_WEBHOOK_EVENT_TYPES:
+            assert event_type not in defaults
+
+    def test_sale_event_types_are_registrable_but_never_defaulted(self) -> None:
+        assert SALE_WEBHOOK_EVENT_TYPES == (
+            "sale.recorded",
+            "sale.cancelled",
+            "sale.paid",
+            "sale.refunded",
+        )
+        defaults: tuple[str, ...] = DEFAULT_EMAIL_WEBHOOK_EVENT_TYPES
+        for event_type in SALE_WEBHOOK_EVENT_TYPES:
             assert event_type not in defaults
 
     def test_new_family_events_are_listed_verbatim_at_registration(self) -> None:
@@ -1679,14 +1709,22 @@ class TestPayments:
             "/api/v1/payments/p-1/entries/e-1/mark",
         )
         assert transport.request_body() == {"status": "completed"}
-        client.payments.refund("p-1")
+        client.payments.refund("p-1", {"reason": "other", "mode": "auto"})
         assert (last_request(transport).method, transport.request_path()) == (
             "POST",
             "/api/v1/payments/p-1/refund",
         )
-        assert transport.request_body() == {}
-        client.payments.refund("p-1", {"amount": 100, "note": "Partial"})
-        assert transport.request_body() == {"amount": 100, "note": "Partial"}
+        assert transport.request_body() == {"reason": "other", "mode": "auto"}
+        client.payments.refund(
+            "p-1",
+            {"reason": "other", "mode": "recorded_outside", "amount": 100, "note": "Partial"},
+        )
+        assert transport.request_body() == {
+            "reason": "other",
+            "mode": "recorded_outside",
+            "amount": 100,
+            "note": "Partial",
+        }
 
     def test_create_surfaces_the_top_level_duplicate_marker(self) -> None:
         # 201 in both outcomes; duplicate=True means external_reference
@@ -1763,10 +1801,10 @@ class TestPaymentRequests:
         )
         assert request.body is None  # no request body on cancel
 
-    def test_create_returns_checkout_diagnostics_and_no_duplicate_marker(self) -> None:
-        # There is no idempotency key on this resource: a repeat POST mints
-        # a second payable link, so no `duplicate` field can exist.
-        client, _ = make_client(
+    def test_create_returns_checkout_diagnostics_and_the_duplicate_marker(self) -> None:
+        # A replay of the same idempotency_key returns the original row with
+        # duplicate: True.
+        client, transport = make_client(
             json_response(
                 201,
                 {
@@ -1775,14 +1813,33 @@ class TestPaymentRequests:
                     "charge_kind": "checkout",
                     "amount": 250,
                     "currency": "ILS",
+                    "sale_id": "sale-1",
+                    "channel": None,
                     "pay_url": "https://app.otok.io/pay/pr_tok",
                     "checkout_url": "https://provider.example/checkout/1",
                     "checkout_error": None,
+                    "duplicate": True,
                 },
             )
         )
-        request = client.payment_requests.create({"contact_id": "c-1", "amount": 250})
-        assert "duplicate" not in request
+        request = client.payment_requests.create(
+            {
+                "contact_id": "c-1",
+                "amount": 250,
+                "product_id": "prod-1",
+                "sale_id": "sale-1",
+                "idempotency_key": "pr-key-1",
+            }
+        )
+        assert transport.request_body() == {
+            "contact_id": "c-1",
+            "amount": 250,
+            "product_id": "prod-1",
+            "sale_id": "sale-1",
+            "idempotency_key": "pr-key-1",
+        }
+        assert request["duplicate"] is True
+        assert request["sale_id"] == "sale-1"
         assert request["pay_url"] == "https://app.otok.io/pay/pr_tok"
         assert request["checkout_url"] == "https://provider.example/checkout/1"
         assert request["checkout_error"] is None
@@ -1839,6 +1896,74 @@ class TestPaymentRequests:
         assert excinfo.value.status == 409
         assert excinfo.value.code == "TOKEN_REQUEST_NOT_CANCELLABLE"
 
+    def test_send_link_issue_document_and_refund_hit_their_routes(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {"sent": True, "channel": "whatsapp", "to": "0501234567", "message_id": "wamid.1"},
+            ),
+            json_response(201, {"id": "pr-1", "status": "paid", "document": {"number": "1001"}}),
+            json_response(
+                201,
+                {
+                    "payment": {"id": "pay-1"},
+                    "entry": {"id": "e-2", "kind": "refund", "amount": -100},
+                    "outcome": "gateway_refunded",
+                    "duplicate": False,
+                    "payment_request_id": "pr-1",
+                },
+            ),
+        )
+        sent = client.payment_requests.send_link("pr-1", {"channel": "whatsapp"})
+        assert sent["to"] == "0501234567"
+        assert (last_request(transport).method, transport.request_path()) == (
+            "POST",
+            "/api/v1/payment-requests/pr-1/send-link",
+        )
+        assert transport.request_body() == {"channel": "whatsapp"}
+
+        document = client.payment_requests.issue_document("pr-1")
+        assert document["document"] == {"number": "1001"}
+        assert transport.request_path() == "/api/v1/payment-requests/pr-1/document"
+        assert last_request(transport).body is None
+
+        refund = client.payment_requests.refund(
+            "pr-1",
+            {
+                "reason": "requested_by_customer",
+                "mode": "auto",
+                "amount": 100,
+                "idempotency_key": "pr-refund-1",
+            },
+        )
+        assert refund["outcome"] == "gateway_refunded"
+        assert refund.get("payment_request_id") == "pr-1"
+        assert transport.request_path() == "/api/v1/payment-requests/pr-1/refund"
+        assert transport.request_body() == {
+            "reason": "requested_by_customer",
+            "mode": "auto",
+            "amount": 100,
+            "idempotency_key": "pr-refund-1",
+        }
+
+    def test_send_link_surfaces_link_already_sent(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "statusCode": 409,
+                    "error": "Conflict",
+                    "error_code": "LINK_ALREADY_SENT",
+                    "sent_at": "2026-07-15T09:00:00.000Z",
+                    "message": "The pay-link was already sent on this channel",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.payment_requests.send_link("pr-1", {"channel": "email"})
+        assert excinfo.value.status == 409
+        assert excinfo.value.code == "LINK_ALREADY_SENT"
+
     def test_feature_gate_403_embeds_the_workspace_payments_feature_id(self) -> None:
         # Pay-links are gated by `workspace_payments`, NOT the `payments`
         # ledger feature — the message embeds whichever id is missing.
@@ -1858,6 +1983,157 @@ class TestPaymentRequests:
             client.payment_requests.list()
         assert excinfo.value.status == 403
         assert excinfo.value.code == "FEATURE_NOT_INCLUDED_IN_PLAN"
+
+
+class TestPaymentRefunds:
+    def test_refund_sends_reason_and_mode_and_returns_the_result(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "payment": {"id": "pay-1", "entries": [{"id": "e-1"}, {"id": "e-2"}]},
+                    "entry": {
+                        "id": "e-2",
+                        "kind": "refund",
+                        "amount": -50,
+                        "recorded_outside": True,
+                    },
+                    "outcome": "recorded_outside",
+                    "duplicate": False,
+                },
+            )
+        )
+        result = client.payments.refund(
+            "pay-1",
+            {
+                "reason": "duplicate",
+                "mode": "recorded_outside",
+                "amount": 50,
+                "idempotency_key": "refund-1",
+            },
+        )
+        assert transport.request_path() == "/api/v1/payments/pay-1/refund"
+        assert transport.request_body() == {
+            "reason": "duplicate",
+            "mode": "recorded_outside",
+            "amount": 50,
+            "idempotency_key": "refund-1",
+        }
+        assert result["outcome"] == "recorded_outside"
+        entry = result["entry"]
+        assert entry is not None and entry["recorded_outside"] is True
+
+    def test_refund_surfaces_api_key_money_out_disabled(self) -> None:
+        client, _ = make_client(
+            json_response(
+                403,
+                {
+                    "statusCode": 403,
+                    "error": "Forbidden",
+                    "error_code": "API_KEY_MONEY_OUT_DISABLED",
+                    "message": "This API key is not allowed to move money out",
+                },
+            )
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.payments.refund("pay-1", {"reason": "other", "mode": "auto"})
+        assert excinfo.value.status == 403
+        assert excinfo.value.code == "API_KEY_MONEY_OUT_DISABLED"
+
+
+class TestSavedCards:
+    def test_lists_payment_methods(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "payment_methods": [
+                        {
+                            "id": "pm-1",
+                            "provider": "cardcom",
+                            "brand": "visa",
+                            "last4": "4242",
+                            "status": "active",
+                            "isDefault": True,
+                        }
+                    ]
+                },
+            )
+        )
+        result = client.contacts.list_payment_methods("c-1")
+        assert (last_request(transport).method, transport.request_path()) == (
+            "GET",
+            "/api/v1/contacts/c-1/payment-methods",
+        )
+        assert result["payment_methods"][0].get("last4") == "4242"
+
+    def test_charges_a_saved_card_paid_and_processing(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "outcome": "paid",
+                    "duplicate": False,
+                    "payment_request": {"id": "pr-9", "status": "paid"},
+                },
+            ),
+            json_response(
+                202, {"outcome": "processing", "duplicate": True, "payment_request_id": "pr-10"}
+            ),
+        )
+        paid = client.contacts.charge_saved_card(
+            "c-1",
+            {"idempotency_key": "charge-0001", "amount": 250, "method_selection": "most_recent"},
+        )
+        assert paid.get("outcome") == "paid"
+        assert transport.request_path() == "/api/v1/contacts/c-1/charges"
+        assert transport.request_body() == {
+            "idempotency_key": "charge-0001",
+            "amount": 250,
+            "method_selection": "most_recent",
+        }
+        processing = client.contacts.charge_saved_card(
+            "c-1", {"idempotency_key": "charge-0002", "amount": 100}
+        )
+        assert processing.get("outcome") == "processing"
+        assert processing.get("payment_request_id") == "pr-10"
+        assert processing.get("duplicate") is True
+
+    def test_charge_surfaces_decline_and_missing_capability(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {
+                    "statusCode": 409,
+                    "error": "Conflict",
+                    "error_code": "TOKEN_CHARGE_DECLINED",
+                    "failure_reason": "Card declined",
+                    "payment_request_id": "pr-11",
+                    "message": "The card was declined",
+                },
+            ),
+            json_response(
+                403,
+                {
+                    "statusCode": 403,
+                    "error": "Forbidden",
+                    "error_code": "API_KEY_CHARGES_DISABLED",
+                    "message": "This API key is not allowed to charge saved cards",
+                },
+            ),
+        )
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.contacts.charge_saved_card(
+                "c-1", {"idempotency_key": "charge-0003", "amount": 10}
+            )
+        assert excinfo.value.status == 409
+        assert excinfo.value.code == "TOKEN_CHARGE_DECLINED"
+        with pytest.raises(OtokAPIError) as excinfo:
+            client.contacts.charge_saved_card(
+                "c-1", {"idempotency_key": "charge-0004", "amount": 10}
+            )
+        assert excinfo.value.status == 403
+        assert excinfo.value.code == "API_KEY_CHARGES_DISABLED"
 
 
 class TestOrders:
@@ -2349,3 +2625,264 @@ class TestContactAcquisitions:
         assert request.method == "GET"
         assert urlsplit(request.url).path == "/api/v1/contacts/c-1/acquisitions"
         assert query_of(request) == {"kind": ["api"], "limit": ["20"]}
+
+
+class TestTickets:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [], "total": 0, "limit": 50, "offset": 0})
+        )
+        client.tickets.list(
+            {
+                "status": "open",
+                "assignee": "unassigned",
+                "category": "Access",
+                "priority": "high",
+                "source": "api",
+                "external_reference": "helpdesk-88213",
+                "created_from": "2026-09-01T00:00:00Z",
+                "sort": "-created_at",
+                "limit": 20,
+                "offset": 40,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/tickets"
+        assert query_of(request) == {
+            "status": ["open"],
+            "assignee": ["unassigned"],
+            "category": ["Access"],
+            "priority": ["high"],
+            "source": ["api"],
+            "external_reference": ["helpdesk-88213"],
+            "created_from": ["2026-09-01T00:00:00Z"],
+            "sort": ["-created_at"],
+            "limit": ["20"],
+            "offset": ["40"],
+        }
+
+    def test_iter_pages_at_the_ticket_list_cap(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [{"id": "t-1"}], "total": 1, "limit": 200, "offset": 0})
+        )
+        ids = [ticket["id"] for ticket in client.tickets.iter({"limit": 1000})]
+        assert ids == ["t-1"]
+        assert query_of(last_request(transport))["limit"] == ["200"]
+
+    def test_get_pages_the_conversation(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "id": "t-1",
+                    "messages": [{"id": "m-2", "side": "team", "origin": "api"}],
+                    "messages_has_more": True,
+                    "messages_next_before": "m-2",
+                    "last_customer_email": None,
+                },
+            )
+        )
+        ticket = client.tickets.get("t-1", {"messages_limit": 1, "messages_before": "m-3"})
+        request = last_request(transport)
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1"
+        assert query_of(request) == {"messages_limit": ["1"], "messages_before": ["m-3"]}
+        assert ticket["messages_next_before"] == "m-2"
+
+    def test_create_posts_the_inline_contact_and_reports_the_outcome(self) -> None:
+        client, transport = make_client(
+            json_response(
+                201,
+                {
+                    "id": "t-1",
+                    "duplicate": False,
+                    "customer_email_skipped": "no_verified_sender",
+                },
+            )
+        )
+        result = client.tickets.create(
+            {
+                "contact": {"email": "jane@example.com", "name": "Jane"},
+                "subject": "Can't log in",
+                "body": "Access denied after a reset.",
+                "opened_by": "customer",
+                "external_reference": "helpdesk-88213",
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "POST"
+        assert urlsplit(request.url).path == "/api/v1/tickets"
+        assert transport.request_body() == {
+            "contact": {"email": "jane@example.com", "name": "Jane"},
+            "subject": "Can't log in",
+            "body": "Access denied after a reset.",
+            "opened_by": "customer",
+            "external_reference": "helpdesk-88213",
+        }
+        assert result["duplicate"] is False
+        assert result["customer_email_skipped"] == "no_verified_sender"
+
+    def test_reply_posts_to_the_replies_route(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200,
+                {
+                    "message": {"id": "m-9", "origin": "api"},
+                    "ticket": {"id": "t-1", "status": "pending"},
+                    "duplicate": True,
+                },
+            )
+        )
+        result = client.tickets.reply(
+            "t-1",
+            {
+                "body": "Your access is back.",
+                "author_email": "dana@example.com",
+                "idempotency_key": "reply-1",
+            },
+        )
+        request = last_request(transport)
+        assert request.method == "POST"
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1/replies"
+        assert transport.request_body() == {
+            "body": "Your access is back.",
+            "author_email": "dana@example.com",
+            "idempotency_key": "reply-1",
+        }
+        assert result["duplicate"] is True
+        assert result["ticket"]["status"] == "pending"
+
+    def test_update_patches_triage_fields_with_null_unassign(self) -> None:
+        client, transport = make_client(
+            json_response(
+                200, {"id": "t-1", "status": "resolved", "customer_email_skipped": "capped"}
+            )
+        )
+        result = client.tickets.update(
+            "t-1", {"status": "resolved", "category": None, "assigned_user_id": None}
+        )
+        request = last_request(transport)
+        assert request.method == "PATCH"
+        assert urlsplit(request.url).path == "/api/v1/tickets/t-1"
+        assert transport.request_body() == {
+            "status": "resolved",
+            "category": None,
+            "assigned_user_id": None,
+        }
+        assert result["customer_email_skipped"] == "capped"
+
+    def test_refusal_surfaces_the_envelope_code(self) -> None:
+        client, _ = make_client(
+            json_response(
+                409,
+                {"error": {"code": "ticket_is_spam", "message": "No replies in spam"}},
+            )
+        )
+        with pytest.raises(OtokAPIError) as exc_info:
+            client.tickets.reply("t-1", {"body": "Hi"})
+        assert exc_info.value.status == 409
+        assert exc_info.value.code == "ticket_is_spam"
+
+
+class TestSales:
+    def test_list_serializes_every_documented_filter(self) -> None:
+        client, transport = make_client()
+        client.sales.list(
+            {
+                "contact_id": "c-1",
+                "owner_user_id": "u-1",
+                "status": "active",
+                "settlement_status": "unpaid",
+                "external_reference": "crm-invoice-4471",
+                "limit": 10,
+                "offset": 20,
+            }
+        )
+        request = last_request(transport)
+        assert request.method == "GET"
+        assert urlsplit(request.url).path == "/api/v1/sales"
+        assert query_of(request) == {
+            "contact_id": ["c-1"],
+            "owner_user_id": ["u-1"],
+            "status": ["active"],
+            "settlement_status": ["unpaid"],
+            "external_reference": ["crm-invoice-4471"],
+            "limit": ["10"],
+            "offset": ["20"],
+        }
+
+    def test_iter_pages_with_the_deals_payments_cap(self) -> None:
+        client, transport = make_client(
+            json_response(200, {"data": [{"id": "s-1"}], "total": 1, "limit": 100, "offset": 0})
+        )
+        assert [sale["id"] for sale in client.sales.iter()] == ["s-1"]
+        assert query_of(last_request(transport))["limit"] == ["100"]
+
+    def test_writes_issue_the_documented_verb_path_and_body(self) -> None:
+        client, transport = make_client(json_response(200, {"id": "s-1"}))
+        client.sales.create(
+            {
+                "contact_id": "c-1",
+                "items": [{"product_id": "p-1", "quantity": 2}],
+                "currency": "ILS",
+                "external_reference": "crm-invoice-4471",
+            }
+        )
+        client.sales.get("s-1")
+        client.sales.update("s-1", {"note": None})
+        client.sales.cancel("s-1", {"reason": "customer_request", "money": {"mode": "refund"}})
+        client.sales.reinstate("s-1")
+        client.sales.refund(
+            "s-1",
+            {
+                "reason": "requested_by_customer",
+                "mode": "auto",
+                "amount": 100,
+                "idempotency_key": "crm-refund-1",
+            },
+        )
+        client.sales.set_owner("s-1", None)
+        client.sales.link_deal("s-1", "d-1")
+        client.sales.allocate("s-1", {"payment_entry_id": "e-1"})
+        client.sales.unallocate("s-1", "a-1")
+        client.sales.delete("s-1")
+
+        calls = [
+            (request.method, transport.request_path(i), transport.request_body(i))
+            for i, request in enumerate(transport.requests)
+        ]
+        assert calls == [
+            (
+                "POST",
+                "/api/v1/sales",
+                {
+                    "contact_id": "c-1",
+                    "items": [{"product_id": "p-1", "quantity": 2}],
+                    "currency": "ILS",
+                    "external_reference": "crm-invoice-4471",
+                },
+            ),
+            ("GET", "/api/v1/sales/s-1", None),
+            ("PATCH", "/api/v1/sales/s-1", {"note": None}),
+            (
+                "POST",
+                "/api/v1/sales/s-1/cancel",
+                {"reason": "customer_request", "money": {"mode": "refund"}},
+            ),
+            ("POST", "/api/v1/sales/s-1/reinstate", {}),
+            (
+                "POST",
+                "/api/v1/sales/s-1/refund",
+                {
+                    "reason": "requested_by_customer",
+                    "mode": "auto",
+                    "amount": 100,
+                    "idempotency_key": "crm-refund-1",
+                },
+            ),
+            ("PUT", "/api/v1/sales/s-1/owner", {"owner_user_id": None}),
+            ("PUT", "/api/v1/sales/s-1/deal", {"deal_id": "d-1"}),
+            ("POST", "/api/v1/sales/s-1/allocations", {"payment_entry_id": "e-1"}),
+            ("DELETE", "/api/v1/sales/s-1/allocations/a-1", None),
+            ("DELETE", "/api/v1/sales/s-1", None),
+        ]

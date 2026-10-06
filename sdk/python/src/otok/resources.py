@@ -77,6 +77,9 @@ from .types import (
     PaymentRequest,
     PaymentRequestCreateParams,
     PaymentRequestListParams,
+    PaymentRequestRefundParams,
+    PaymentRequestSendLinkParams,
+    PaymentRequestSendLinkResult,
     PaymentUpdateParams,
     Pipeline,
     Product,
@@ -87,9 +90,28 @@ from .types import (
     ProductCycleUpdateParams,
     ProductListParams,
     ProductUpdateParams,
+    RefundResult,
     ReportListParams,
     ReportRunParams,
     ReportRunResult,
+    Sale,
+    SaleAllocateParams,
+    SaleAllocation,
+    SaleCancelParams,
+    SaleCancelResult,
+    SaleCreateParams,
+    SaleCreateResult,
+    SaleListParams,
+    SaleRefundParams,
+    SaleRefundResult,
+    SaleReinstateParams,
+    SaleReinstateResult,
+    SaleUnallocateResult,
+    SaleUpdateParams,
+    SaleView,
+    SavedCardChargeParams,
+    SavedCardChargeResult,
+    SavedCardList,
     SenderProfileListParams,
     SetConsentParams,
     SlotsParams,
@@ -100,6 +122,13 @@ from .types import (
     TagCreateParams,
     TagUpdateParams,
     TemplateSendParams,
+    Ticket,
+    TicketCreateParams,
+    TicketGetParams,
+    TicketListParams,
+    TicketReplyParams,
+    TicketReplyResult,
+    TicketUpdateParams,
     WebhookEndpointCreated,
     WebhookEndpointCreateParams,
     WebhookEndpointList,
@@ -280,6 +309,33 @@ class ContactsApi:
                 f"/v1/contacts/{contact_id}/documents",
                 query={"live": live},
             ),
+        )
+
+    # ── Saved cards ──
+
+    def list_payment_methods(self, contact_id: str) -> SavedCardList:
+        """The contact's saved cards, newest first — display facts only
+        (camelCase fields). Requires the Workspace payments feature.
+        """
+        return cast(
+            SavedCardList,
+            self._http.request("GET", f"/v1/contacts/{contact_id}/payment-methods"),
+        )
+
+    def charge_saved_card(
+        self, contact_id: str, params: SavedCardChargeParams
+    ) -> SavedCardChargeResult:
+        """Charge one of the contact's saved cards. Returns ``outcome:
+        "paid"`` (HTTP 200) or ``outcome: "processing"`` (HTTP 202 — poll
+        ``payment_requests.get(result["payment_request_id"])``); a decline
+        raises 409 ``TOKEN_CHARGE_DECLINED``. ``idempotency_key`` is
+        required, so a replay never charges twice. Requires an API key with
+        saved-card charge access (``allow_charges``, off by default) — 403
+        ``API_KEY_CHARGES_DISABLED``.
+        """
+        return cast(
+            SavedCardChargeResult,
+            self._http.request("POST", f"/v1/contacts/{contact_id}/charges", body=params),
         )
 
     def list_acquisitions(
@@ -1311,14 +1367,22 @@ class PaymentsApi:
             ),
         )
 
-    def refund(self, payment_id: str, params: Optional[PaymentRefundParams] = None) -> Payment:
-        """Refund a payment (full or partial)."""
+    def refund(self, payment_id: str, params: PaymentRefundParams) -> RefundResult:
+        """Refund a payment (full or partial). ``reason`` and ``mode`` are
+        required: ``mode="auto"`` refunds a provider-collected charge through
+        the payment gateway; ``"recorded_outside"`` books the refund only.
+        Requires an API key with refund access (``allow_money_out``) — 403
+        ``API_KEY_MONEY_OUT_DISABLED`` otherwise. Send ``idempotency_key`` to
+        make retries safe (a replay answers ``duplicate: True``). A 502
+        ``REFUND_INDETERMINATE`` or 500 ``REFUND_RECORD_FAILED`` means the
+        outcome is being verified — do not retry with a new key.
+        """
         return cast(
-            Payment,
+            RefundResult,
             self._http.request(
                 "POST",
                 f"/v1/payments/{payment_id}/refund",
-                body=dict(params or {}),
+                body=params,
             ),
         )
 
@@ -1381,12 +1445,13 @@ class PaymentRequestsApi:
         shareable ``pay_url`` (plus ``checkout_url``/``checkout_error``
         diagnostics).
 
-        **NOT idempotent — there is no idempotency key on this resource.**
-        A repeat POST mints a second, independently payable link, so the SDK
-        NEVER auto-retries this call on transient network errors (unlike the
-        keyed creates): a network failure surfaces for you to handle. If the
-        outcome is uncertain, check ``list()`` for the link you may have
-        already minted before minting again, and ``cancel()`` extras.
+        Idempotent only with ``idempotency_key``: a replay returns the
+        original row with ``duplicate: True``, and the SDK auto-retries such
+        a call on transient network errors. WITHOUT a key a repeat POST mints
+        a second, independently payable link, so the SDK never auto-retries
+        it: a network failure surfaces for you to handle — check ``list()``
+        for the link you may have already minted before minting again, and
+        ``cancel()`` extras.
 
         The payer resolves like payments/deals: ``contact_id`` wins, else
         ``phone``/``email`` upsert a contact (409 ``CONTACT_MERGE_REQUIRED``
@@ -1410,6 +1475,48 @@ class PaymentRequestsApi:
         return cast(
             PaymentRequest,
             self._http.request("POST", f"/v1/payment-requests/{request_id}/cancel"),
+        )
+
+    def send_link(
+        self, request_id: str, params: PaymentRequestSendLinkParams
+    ) -> PaymentRequestSendLinkResult:
+        """Send a PENDING request's pay-link to its contact by email,
+        WhatsApp or SMS. Once per channel: a second send on the same channel
+        raises 409 ``LINK_ALREADY_SENT`` unless ``resend=True`` is in
+        ``params``. Not auto-retried on network errors.
+        """
+        return cast(
+            PaymentRequestSendLinkResult,
+            self._http.request(
+                "POST",
+                f"/v1/payment-requests/{request_id}/send-link",
+                body=params,
+            ),
+        )
+
+    def issue_document(self, request_id: str) -> PaymentRequest:
+        """Issue the tax document for a PAID request (when the automatic
+        issue was off or failed). Returns the request with its ``document``.
+        A credit document kind requires an API key with refund access.
+        """
+        return cast(
+            PaymentRequest,
+            self._http.request("POST", f"/v1/payment-requests/{request_id}/document"),
+        )
+
+    def refund(self, request_id: str, params: PaymentRequestRefundParams) -> RefundResult:
+        """Refund the payment a PAID request settled — the same refund path
+        as ``payments.refund``, addressed by the request. The result also
+        carries ``payment_request_id``. Requires an API key with refund
+        access (``allow_money_out``).
+        """
+        return cast(
+            RefundResult,
+            self._http.request(
+                "POST",
+                f"/v1/payment-requests/{request_id}/refund",
+                body=params,
+            ),
         )
 
 
@@ -1509,6 +1616,136 @@ class OrdersApi:
         success.
         """
         return cast(Order, self._http.request("POST", f"/v1/orders/{order_id}/cancel"))
+
+
+# ─────────────────────────── Sales ───────────────────────────
+
+
+class SalesApi:
+    """The sales ledger — what each contact bought. Recording a sale never
+    charges anyone; money is linked by allocating payment entries to it.
+
+    Requires the Sales feature (``sales``) on the workspace's plan. Refunds
+    (and cancelling with a money mode) need a key with the "Allow refunds"
+    capability (``allow_money_out`` — 403 ``API_KEY_MONEY_OUT_DISABLED``);
+    the two DELETE routes need "Allow permanent deletion through the API"
+    (``allow_hard_delete`` — 403 ``HARD_DELETE_OWNER_ONLY``). Both are
+    granted per key by the workspace owner.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[SaleListParams] = None) -> Paginated:
+        """List sale headers, newest ``sold_at`` first. Pages like
+        deals/payments (default 25, cap 100); an unknown ``status`` /
+        ``settlement_status`` 400s.
+        """
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/sales", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[SaleListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching sale, auto-paginating ``GET /v1/sales``."""
+        p: SaleListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(SaleListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _DEALS_PAYMENTS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, sale_id: str) -> SaleView:
+        """The full sale view — items, allocations, pay-links, documents,
+        timeline."""
+        return cast(SaleView, self._http.request("GET", f"/v1/sales/{sale_id}"))
+
+    def create(self, params: SaleCreateParams) -> SaleCreateResult:
+        """Record a sale (never charges the buyer). Idempotent via
+        ``external_reference``: a replay writes nothing and returns the
+        original sale with ``duplicate: True``.
+        """
+        return cast(SaleCreateResult, self._http.request("POST", "/v1/sales", body=params))
+
+    def update(self, sale_id: str, params: SaleUpdateParams) -> Sale:
+        """Edit the sale's note — the only editable header field."""
+        return cast(Sale, self._http.request("PATCH", f"/v1/sales/{sale_id}", body=params))
+
+    def delete(self, sale_id: str) -> dict[str, Any]:
+        """Permanently delete an unfunded, unlinked sale (409
+        ``SALE_HAS_ALLOCATIONS`` otherwise). Needs the key's "Allow permanent
+        deletion through the API" capability. Returns ``{"success": True}``.
+        """
+        return cast(dict[str, Any], self._http.request("DELETE", f"/v1/sales/{sale_id}"))
+
+    def cancel(self, sale_id: str, params: SaleCancelParams) -> SaleCancelResult:
+        """Cancel every active item, or the listed ones. Money stays on the
+        sale unless ``money["mode"]`` says otherwise (needs "Allow refunds"
+        and a full cancel). A refused refund does not undo the cancel — see
+        ``refunds``.
+        """
+        return cast(
+            SaleCancelResult,
+            self._http.request("POST", f"/v1/sales/{sale_id}/cancel", body=params),
+        )
+
+    def reinstate(
+        self, sale_id: str, params: Optional[SaleReinstateParams] = None
+    ) -> SaleReinstateResult:
+        """Reinstate every cancelled item, or the listed ones. Money is
+        untouched."""
+        return cast(
+            SaleReinstateResult,
+            self._http.request("POST", f"/v1/sales/{sale_id}/reinstate", body=dict(params or {})),
+        )
+
+    def refund(self, sale_id: str, params: SaleRefundParams) -> SaleRefundResult:
+        """Refund one charge that funds this sale (the items stay active).
+        Needs the key's "Allow refunds" capability. Pass an
+        ``idempotency_key`` to make retries safe.
+        """
+        return cast(
+            SaleRefundResult,
+            self._http.request("POST", f"/v1/sales/{sale_id}/refund", body=params),
+        )
+
+    def set_owner(self, sale_id: str, owner_user_id: Optional[str]) -> Sale:
+        """Assign the sale to an active team member, or ``None`` for
+        unowned."""
+        return cast(
+            Sale,
+            self._http.request(
+                "PUT", f"/v1/sales/{sale_id}/owner", body={"owner_user_id": owner_user_id}
+            ),
+        )
+
+    def link_deal(self, sale_id: str, deal_id: Optional[str]) -> Sale:
+        """Link one of the buyer's deals, or ``None`` to unlink."""
+        return cast(
+            Sale,
+            self._http.request("PUT", f"/v1/sales/{sale_id}/deal", body={"deal_id": deal_id}),
+        )
+
+    def allocate(self, sale_id: str, params: SaleAllocateParams) -> SaleAllocation:
+        """Allocate an existing charge (a payment entry) to the sale.
+        Nothing is charged."""
+        return cast(
+            SaleAllocation,
+            self._http.request("POST", f"/v1/sales/{sale_id}/allocations", body=params),
+        )
+
+    def unallocate(self, sale_id: str, allocation_id: str) -> SaleUnallocateResult:
+        """Release a charge allocation (and its refunds on this sale). No
+        money moves. Needs the key's "Allow permanent deletion through the
+        API" capability.
+        """
+        return cast(
+            SaleUnallocateResult,
+            self._http.request("DELETE", f"/v1/sales/{sale_id}/allocations/{allocation_id}"),
+        )
 
 
 # ─────────────────────────── Bookings ───────────────────────────
@@ -1730,4 +1967,86 @@ class ReportsApi:
                 f"/v1/reports/{report_id}/run",
                 body=params if params is not None else {},
             ),
+        )
+
+
+# ─────────────────────────── Customer tickets ───────────────────────────
+
+#: Documented ``limit`` cap for GET /v1/tickets (default 50).
+_TICKETS_PAGE_CAP = 200
+
+
+class TicketsApi:
+    """Customer tickets — open, read, answer and triage.
+
+    Every write does what the same action does in the app: a ticket opened
+    here is routed, starts its response target and emails the customer their
+    link; a reply is a real team reply (the ticket moves to Answered and the
+    customer is emailed). Internal notes never leave through the API.
+    Requires the ``customer_tickets`` plan feature.
+    """
+
+    def __init__(self, http: HttpClient) -> None:
+        self._http = http
+
+    def list(self, params: Optional[TicketListParams] = None) -> Paginated:
+        """List tickets — newest activity first; ``status="all"`` (the
+        default) leaves spam out."""
+        return cast(
+            Paginated,
+            self._http.request("GET", "/v1/tickets", query=_params_query(params)),
+        )
+
+    def iter(self, params: Optional[TicketListParams] = None) -> Iterator[dict[str, Any]]:
+        """Iterate every matching ticket, auto-paginating ``GET /v1/tickets``
+        (pages of 200)."""
+        p: TicketListParams = params or {}
+        return _paginate(
+            lambda limit, offset: self.list(
+                cast(TicketListParams, {**p, "limit": limit, "offset": offset})
+            ),
+            _TICKETS_PAGE_CAP,
+            p.get("limit"),
+            p.get("offset"),
+        )
+
+    def get(self, ticket_id: str, params: Optional[TicketGetParams] = None) -> Ticket:
+        """The ticket, its ``last_customer_email`` and one page of its
+        conversation — the newest messages first, each page oldest to newest.
+        While ``messages_has_more``, pass ``messages_next_before`` as
+        ``messages_before`` for the page before it.
+        """
+        return cast(
+            Ticket,
+            self._http.request(
+                "GET", f"/v1/tickets/{ticket_id}", query=_params_query(params)
+            ),
+        )
+
+    def create(self, params: TicketCreateParams) -> Ticket:
+        """Open a ticket. Idempotent when ``external_reference`` is set: a
+        repeat call changes nothing and answers the original ticket with
+        ``duplicate: True``. ``customer_email_skipped`` says when the creation
+        email will not go out.
+        """
+        return cast(Ticket, self._http.request("POST", "/v1/tickets", body=dict(params)))
+
+    def reply(self, ticket_id: str, params: TicketReplyParams) -> TicketReplyResult:
+        """Reply to the customer as the team (or a named member). Moves the
+        ticket to Answered and emails the customer once per stretch of unread
+        replies. Pass ``idempotency_key`` to make retries safe.
+        """
+        return cast(
+            TicketReplyResult,
+            self._http.request(
+                "POST", f"/v1/tickets/{ticket_id}/replies", body=dict(params)
+            ),
+        )
+
+    def update(self, ticket_id: str, params: TicketUpdateParams) -> Ticket:
+        """Triage: status (``open`` | ``resolved`` | ``closed``), priority,
+        category, assignee."""
+        return cast(
+            Ticket,
+            self._http.request("PATCH", f"/v1/tickets/{ticket_id}", body=dict(params)),
         )

@@ -139,6 +139,43 @@ describe("constructEvent", () => {
     }
   });
 
+  it("narrows a payment.refunded event", () => {
+    const body = JSON.stringify({
+      id: "5f1e9c4a-0000-4000-8000-000000000002",
+      type: "payment.refunded",
+      created_at: "2026-07-16T08:05:00.000Z",
+      data: {
+        payment: {
+          id: "pay-1",
+          contact_id: "c-1",
+          title: "Onboarding session",
+          total_amount: 350,
+          currency: "ILS",
+          arrangement_status: "completed",
+          external_reference: null,
+        },
+        refund: {
+          entry_id: "e-2",
+          amount: 100,
+          currency: "ILS",
+          reason: "requested_by_customer",
+          note: null,
+          recorded_outside: false,
+          is_void: false,
+          occurred_at: "2026-07-16T08:05:00.000Z",
+        },
+        contact: { id: "c-1", name: "Dana Levi", phone: null, email: null },
+      },
+    });
+    const event = constructEvent(body, sign(body), SECRET, { now: NOW });
+    expect(event.type).toBe("payment.refunded");
+    if (event.type === "payment.refunded") {
+      expect(event.data.refund.amount).toBe(100);
+      expect(event.data.refund.recorded_outside).toBe(false);
+      expect(event.data.payment.id).toBe("pay-1");
+    }
+  });
+
   it("throws on a missing header", () => {
     expect(() => constructEvent(EVENT_BODY, undefined, SECRET)).toThrow(
       OtokWebhookVerificationError,

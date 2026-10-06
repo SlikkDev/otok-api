@@ -21,18 +21,21 @@ All endpoints require [authentication](getting-started.md#authentication); there
 | `sku` | string or `null` | Per-workspace-unique product code (human-facing) |
 | `external_id` | string or `null` | Per-workspace-unique id of this product **in your system** — the POST idempotency key |
 | `description` | string or `null` | |
-| `price` | number or `null` | Default price in the workspace payment currency, as a JSON number. **`null` = dynamic pricing** — a deal referencing the product then needs an explicit amount |
+| `price` | number or `null` | Default price in the workspace payment currency, as a JSON number. `null` = no default price — a deal referencing the product then needs an explicit amount |
+| `dynamic_pricing` | boolean | Default `true`: [cycle](product-cycles.md) prices — and sales recorded without a cycle — may override `price`. `false` fixes the price: every cycle and sale uses `price` (see [Fixed pricing](#fixed-pricing)) |
 | `vat_mode` / `vat_rate` | enum / number, or `null`s | Per-product VAT override (`inclusive` / `exclusive` + percent 0–100). One **both-or-neither pair** — `null`s mean the workspace payments default applies at resolution time |
 | `is_active` | boolean | Inactive products stay attached to existing deals/payments but cannot be attached to new ones |
 | `starts_on` / `ends_on` | date or `null` | Schedule dates in the workspace calendar |
 | `duration_unit` / `manual_status` | enum / nullable enum | Schedule unit and optional archive/cancel override |
 | `enforce_cycle_capacity` / `require_cycle` | boolean | Sales capacity and cycle requirements |
+| `attendance_on_sale` | boolean | Read-only here (set in the app): a sale of this product registers the buyer for the product's matching upcoming events |
+| `recurring_sale_policy` | `fill_one` \| `per_period` | How a recurring payment plan for this product records [sales](sales.md) — see the request field below |
 | `created_by` | UUID or `null` | `null` for API creates |
 | `created_at` / `updated_at` | ISO 8601 | |
 
 ## GET /api/v1/products
 
-Standard [list envelope](getting-started.md#pagination) (`data`/`total`/`limit`/`offset`; `limit` default 50, cap 500), newest first. Filters combine (AND):
+Standard [list envelope](getting-started.md#list-conventions) (`data`/`total`/`limit`/`offset`; `limit` default 50, cap 500), newest first. Filters combine (AND):
 
 | Param | Type | Notes |
 |---|---|---|
@@ -61,7 +64,8 @@ Returns the product, or 404 `product_not_found` (structured `{"error": {"code", 
 | `sku` | string or `null` | no | ≤100 chars; per-workspace-unique |
 | `external_id` | string or `null` | no | ≤200 chars; per-workspace-unique — **the idempotency key** |
 | `description` | string or `null` | no | ≤2000 chars |
-| `price` | number or `null` | no | ≥0; `null` = dynamic pricing |
+| `price` | number or `null` | no | ≥0; `null` = no default price |
+| `dynamic_pricing` | boolean | no | Default `true`. `false` fixes the price — see [Fixed pricing](#fixed-pricing) |
 | `vat_mode` | `inclusive` \| `exclusive` \| `null` | no | Travels with `vat_rate` as one both-or-neither pair (400 when only one leg is sent); send both `null` to clear |
 | `vat_rate` | number or `null` | no | 0–100, max 2 decimals |
 | `is_active` | boolean | no | Defaults to `true`; `false` alone is rejected for dated products. Use `manual_status` to archive/cancel them. |
@@ -70,6 +74,7 @@ Returns the product, or 404 `product_not_found` (structured `{"error": {"code", 
 | `manual_status` | enum or `null` | no | `archived`, `cancelled`, or `null` to remove the override. Archive/cancel makes the product inactive. |
 | `enforce_cycle_capacity` | boolean | no | Default `false`: full [cycles](product-cycles.md) are advisory. `true` rejects new sales into full cycles with 409 `CYCLE_FULL`. |
 | `require_cycle` | boolean | no | Default `false`. `true` requires a cycle on sales (400 `CYCLE_REQUIRED`); deal cycles remain optional. |
+| `recurring_sale_policy` | `fill_one` \| `per_period` | no | How a recurring payment plan for this product records sales: `fill_one` (default) keeps paying into one sale until it is fully paid; `per_period` opens a new sale for every billing period. A plan keeps the policy it started with — a change applies to new plans only |
 
 ### Upsert resolution
 
@@ -137,6 +142,10 @@ curl -X PATCH "https://app.otok.io/api/v1/products/6f2a1b3c-..." \
 
 - **Attachment rules** (enforced on deals/payments, not here): only **active** products attach to new records; re-saving a record that already carries an inactive product never fails; deleting is impossible, so denormalized titles always keep resolving.
 - The public API resolves product references on [deal creation](deals.md) by `product_id` → `sku` → `external_id`.
+
+### Fixed pricing
+
+With `dynamic_pricing: false` the product's `price` is the only price: a deal created without an amount defaults to it even when its cycle has a price of its own, setting a different `price` on one of the product's [cycles](product-cycles.md) is refused with 400 `PRODUCT_PRICE_LOCKED`, and a sale recorded at a different unit amount is refused with 400 `SALE_PRICE_LOCKED`. Turning it back on (`true`, the default) lets cycles and sales override the price again.
 
 ### Scheduling
 

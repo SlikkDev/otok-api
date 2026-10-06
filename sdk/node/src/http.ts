@@ -31,7 +31,7 @@ const DEFAULT_MAX_RETRIES = 2;
 /** Base backoff delay; grows exponentially per retry with full jitter. */
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 30_000;
-const SDK_VERSION = "0.11.0";
+const SDK_VERSION = "0.12.0";
 
 export type QueryValue = string | number | boolean | undefined;
 
@@ -121,12 +121,13 @@ export function isTransientNetworkError(err: unknown, depth = 0): boolean {
  * A network error is ambiguous — the request may or may not have reached
  * the server — so replaying it is only safe when a replay cannot
  * double-apply an effect: safe methods (GET/HEAD), or a write body that
- * carries its own idempotency key — `idempotency_key` (POST /v1/emails),
- * `external_reference` (POST /v1/deals, POST /v1/payments, POST
+ * carries its own idempotency key — `idempotency_key` (POST /v1/emails,
+ * POST /v1/payment-requests, POST /v1/contacts/:id/charges and the refund
+ * routes), `external_reference` (POST /v1/deals, POST /v1/payments, POST
  * /v1/orders), or `external_refund_id` (POST /v1/orders/:id/refunds).
- * Everything else surfaces the network error to the caller — notably POST
- * /v1/payment-requests, which has NO idempotency key at all (a replay would
- * mint a second payable link), and POST /v1/bookings (its idempotency is
+ * Everything else surfaces the network error to the caller — notably a POST
+ * /v1/payment-requests WITHOUT `idempotency_key` (a replay would mint a
+ * second payable link), and POST /v1/bookings (its idempotency is
  * server-derived, not a body key). (429/5xx HTTP
  * responses are a different case — the server answered — and keep their
  * existing retry behavior for all requests.)

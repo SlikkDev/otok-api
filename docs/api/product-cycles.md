@@ -13,7 +13,7 @@ Cycles are cohorts, runs or versions of a [product](products.md). They require A
 
 The list accepts `is_archived` (`true` or `false`), `limit` (default 50, cap 500) and `offset` (default 0). Omitting `is_archived` includes archived cycles. Dates sort ascending, undated cycles last, then creation time. The response is `{ data, total, limit, offset }`.
 
-Cycle records include `id`, `workspace_id`, `product_id`, the fields below, timestamps, `sales_count` and `units_taken`. Capacity uses units sold, so compare `units_taken` with `capacity`. A returned `price` can be a decimal string, number or `null`.
+Cycle records include `id`, `workspace_id`, `product_id`, the fields below, timestamps, `sales_count` and `units_taken`. `units_taken` counts the seats currently occupied — the units of every active place in the cycle (a cancelled sale or ended access frees its seats) — so compare it with `capacity`. A returned `price` can be a decimal string, number or `null`.
 
 ## Create or update
 
@@ -23,9 +23,11 @@ Cycle records include `id`, `workspace_id`, `product_id`, the fields below, time
 | `starts_on` / `ends_on` | Real `YYYY-MM-DD` workspace-calendar dates, or `null`. End cannot precede start. |
 | `duration_unit` | `days` (default), `weeks`, `months`, `years`. |
 | `manual_status` | Undated cycles: `open`, `ongoing`, `ended`, `undated`, `cancelled`, or `null`. With either date set, only `cancelled` or `null` is accepted; `null` resumes automatic status. |
-| `price` | Number 0–1,000,000,000, at most 2 decimals, or `null` to use product price. Workspace payment currency. |
+| `price` | Number 0–1,000,000,000, at most 2 decimals, or `null` to use product price. Workspace payment currency. On a product with `dynamic_pricing: false`, a price different from the product's is refused with 400 `PRODUCT_PRICE_LOCKED` — see [fixed pricing](products.md#fixed-pricing). |
+| `dynamic_pricing` | Boolean, default `true`. `false` stops sales in this cycle from overriding the cycle's price. |
 | `capacity` | Integer 1–1,000,000, or `null` for no cap. |
 | `is_archived` | Boolean, default `false`. Archive with `true`; no DELETE endpoint. |
+| `rearm_date_triggers` | Boolean, default `false`. See [Date reminders](#date-reminders). |
 
 POST matches the name within the product and updates only supplied fields. It returns **201** with `duplicate: true` for a match or `false` for creation. PATCH makes every field optional and returns **200**, without a duplicate marker.
 
@@ -42,5 +44,9 @@ Example POST body:
 ```
 
 Unknown or cross-workspace products/cycles return 404. Invalid dates, reversed ranges and invalid manual statuses return 400. Renaming a cycle to another cycle's name returns 409 `CYCLE_NAME_TAKEN`.
+
+## Date reminders
+
+Automations can fire a set time before or after a cycle's start or end date, once per person. When an update **changes** `starts_on` or `ends_on` after such reminders already fired, the API does not fire them again by default. Send `rearm_date_triggers: true` with the date change to have them fire again for the new date; the response then carries `rearmed_fires` — how many already-fired reminders were reset (`0` = nothing to fire again). Only reminders anchored on the date that actually changed are reset. The flag works on PATCH and on a POST that matches an existing cycle.
 
 Attach a cycle to a [deal](deals.md) with `cycle_id`; it must belong to the attached product. The product's `enforce_cycle_capacity` and `require_cycle` options govern sales, while a deal's cycle remains optional.

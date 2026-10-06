@@ -11,6 +11,7 @@ import pytest
 
 from otok import (
     OtokWebhookVerificationError,
+    PaymentRefundedEvent,
     compute_webhook_signature,
     construct_event,
     parse_signature_header,
@@ -171,6 +172,43 @@ class TestConstructEvent:
         assert event["type"] == "email.bounced"
         assert event["data"]["to"] == "jane@example.com"
         assert event["data"].get("bounce_type") == "hard"
+
+    def test_returns_a_payment_refunded_event(self) -> None:
+        body = json.dumps(
+            {
+                "id": "5f1e9c4a-0000-4000-8000-000000000002",
+                "type": "payment.refunded",
+                "created_at": "2026-07-16T08:05:00.000Z",
+                "data": {
+                    "payment": {
+                        "id": "pay-1",
+                        "contact_id": "c-1",
+                        "title": "Onboarding session",
+                        "total_amount": 350,
+                        "currency": "ILS",
+                        "arrangement_status": "completed",
+                        "external_reference": None,
+                    },
+                    "refund": {
+                        "entry_id": "e-2",
+                        "amount": 100,
+                        "currency": "ILS",
+                        "reason": "requested_by_customer",
+                        "note": None,
+                        "recorded_outside": False,
+                        "is_void": False,
+                        "occurred_at": "2026-07-16T08:05:00.000Z",
+                    },
+                    "contact": {"id": "c-1", "name": "Dana Levi", "phone": None, "email": None},
+                },
+            }
+        )
+        event = construct_event(body, sign(body), SECRET, now=NOW)
+        assert event["type"] == "payment.refunded"
+        refunded: PaymentRefundedEvent = event
+        assert refunded["data"]["refund"]["amount"] == 100
+        assert refunded["data"]["refund"]["recorded_outside"] is False
+        assert refunded["data"]["payment"]["id"] == "pay-1"
 
     def test_raises_on_a_missing_header(self) -> None:
         with pytest.raises(OtokWebhookVerificationError, match="Missing X-Otok-Signature"):

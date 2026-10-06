@@ -285,11 +285,11 @@ describe("HttpClient network-error retries", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("does NOT retry a payment-request create (no idempotency key exists)", async () => {
-    // POST /v1/payment-requests has NO idempotency key of any kind — a
-    // replay would mint a second, independently payable link — so the
-    // network error must surface after exactly one attempt (the same
-    // posture as bookings.create, whose idempotency is server-derived).
+  it("does NOT retry a payment-request create without idempotency_key", async () => {
+    // Without an idempotency_key a replay would mint a second, independently
+    // payable link — so the network error must surface after exactly one
+    // attempt (the same posture as bookings.create, whose idempotency is
+    // server-derived).
     const fetchMock = vi.fn().mockRejectedValue(connectionError("ECONNRESET"));
     const client = makeClient(fetchMock as any);
     await expect(
@@ -298,6 +298,20 @@ describe("HttpClient network-error retries", () => {
       }),
     ).rejects.toThrow("fetch failed");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a payment-request create that carries idempotency_key", async () => {
+    // A keyed mint replays to the original row (duplicate: true) server-side.
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(connectionError("ECONNRESET"))
+      .mockResolvedValueOnce(jsonResponse(201, { id: "pr-1", duplicate: true }));
+    const client = makeClient(fetchMock as any);
+    const result = await client.request<{ id: string }>("POST", "/v1/payment-requests", {
+      body: { contact_id: "c-1", amount: 250, idempotency_key: "pr-key-1" },
+    });
+    expect(result.id).toBe("pr-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("does NOT retry PATCH/DELETE requests", async () => {
