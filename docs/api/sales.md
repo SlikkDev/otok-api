@@ -211,7 +211,7 @@ Each line's `title` is the product's name at the time of sale.
 
 A POST whose `external_reference` matches an existing sale **writes nothing** and returns that sale with `duplicate: true` — concurrent duplicates included. The body of the replay is not compared with the original. Use your own system's order or invoice id.
 
-Some prefixes are **reserved** for sales the app records from its own records: a reference starting with `order:`, `quote:`, `pr:`, `cycle:`, `store:`, `cardcom:`, `form:`, `booking:`, or `event:` returns 400 `RESERVED_EXTERNAL_REFERENCE`. You can still *look up* such sales with `GET /v1/sales?external_reference=…`.
+Some prefixes are **reserved** for sales the app records from its own records: a reference starting with `order:`, `quote:`, `pr:`, `cycle:`, `mayab:`, `store:`, `cardcom:`, `form:`, `booking:`, or `event:` returns 400 `RESERVED_EXTERNAL_REFERENCE`. You can still *look up* such sales with `GET /v1/sales?external_reference=…`.
 
 ### Example
 
@@ -420,8 +420,10 @@ Response `201`:
 | 409 | `IDEMPOTENCY_KEY_MISMATCH` | The `idempotency_key` was used for a different sale, charge, or amount |
 | 409 | `PLAN_FEATURE_REQUIRED` | `mode: "auto"` on a provider charge without the **Workspace payments** feature — retry with `recorded_outside` |
 | 409 | `PROVIDER_NOT_CONNECTED` | The provider the charge was taken through is no longer connected |
+| 409 | `PROVIDER_REF_MISSING` | `mode: "auto"`, but oToK holds no provider reference for the charge — refund it in the provider dashboard, then retry with `recorded_outside` |
 | 409 | `REFUND_IN_STORE` | The payment was synced from an online store — refund it in the store |
 | 409 | `REQUEST_NOT_REFUNDABLE` | The charge came from a test-mode pay-link and never moved money |
+| 409 | `TERMINAL_NOT_CHARGEABLE` | The Cardcom terminal the charge was made on can no longer move money |
 
 Refunds fire the payment-refunded automations, [`payment.refunded`](webhooks.md), and — once the refund settles — [`sale.refunded`](webhooks.md#sale-events).
 

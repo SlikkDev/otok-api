@@ -47,6 +47,7 @@ Main fields:
 | `reminders_enabled` / `reminder_count` / `last_reminder_at` | | Pre-expiry reminders |
 | `channel` | enum or `null` | The **first** channel the link was delivered on by oToK — `email`, `whatsapp` or `sms`; `null` when it was never sent (e.g. you shared `pay_url` yourself) |
 | `link_emailed_at` / `link_whatsapp_sent_at` / `link_sms_sent_at` | ISO 8601 or `null` | When the link was first sent on each channel |
+| `receipt_email_sent_at` | ISO 8601 or `null` | When the payment receipt was emailed to the payer |
 | `payment_method_id` | UUID or `null` | On `token` rows: the [saved card](contacts.md#get-apiv1contactsidpayment-methods) that was charged |
 | `expires_at` | ISO 8601 or `null` | Link deadline (clamped at mint — see below) |
 | `paid_at` / `cancelled_at` | ISO 8601 or `null` | |

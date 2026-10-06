@@ -2726,6 +2726,8 @@ export interface PaymentRequest {
   link_emailed_at?: string | null;
   link_whatsapp_sent_at?: string | null;
   link_sms_sent_at?: string | null;
+  /** When the payment receipt was emailed to the payer. */
+  receipt_email_sent_at?: string | null;
   /** The saved card a `token` request was charged to. */
   payment_method_id?: string | null;
   created_at: string;

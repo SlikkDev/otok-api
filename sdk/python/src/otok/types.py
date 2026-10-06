@@ -2423,7 +2423,8 @@ class PaymentRequestListParams(TypedDict, total=False):
 #: ``contact_name``/``contact_phone``/``contact_email`` and a computed
 #: ``refunded_total``. Rows also carry ``sale_id``, the delivery facts
 #: ``channel`` / ``link_emailed_at`` / ``link_whatsapp_sent_at`` /
-#: ``link_sms_sent_at`` and, on saved-card charges, ``payment_method_id``;
+#: ``link_sms_sent_at``, ``receipt_email_sent_at`` and, on saved-card charges,
+#: ``payment_method_id``;
 #: create responses carry ``duplicate`` (``True`` on an ``idempotency_key``
 #: replay).
 PaymentRequest = dict[str, Any]
